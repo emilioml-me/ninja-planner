@@ -7,7 +7,11 @@ COPY package.json ./
 RUN npm install
 
 COPY tsconfig.json ./
+COPY vite.config.ts ./
+COPY tailwind.config.ts ./
+COPY postcss.config.ts ./
 COPY src ./src
+COPY client ./client
 
 RUN npm run build
 

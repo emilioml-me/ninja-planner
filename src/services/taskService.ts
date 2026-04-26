@@ -175,6 +175,28 @@ export async function softDeleteTask(taskId: string, workspaceId: string): Promi
   return (result.rowCount ?? 0) > 0;
 }
 
+export async function reorderTasks(
+  updates: Array<{ id: string; position: number }>,
+  workspaceId: string,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const { id, position } of updates) {
+      await client.query(
+        'UPDATE tasks SET position = $1 WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL',
+        [position, id, workspaceId],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function logTaskActivity(
   taskId: string,
   actorId: string,

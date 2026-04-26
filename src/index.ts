@@ -3,6 +3,8 @@ if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
 }
 
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -67,6 +69,16 @@ app.use('/api/revenue',    revenueRouter);
 app.use('/api/clients',    clientsRouter);
 app.use('/api/roadmap',    roadmapRouter);
 app.use('/api/reviews',    reviewsRouter);
+
+// ─── Static frontend (production) ────────────────────────────────────────────
+if (process.env.NODE_ENV === 'production') {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const publicDir = join(__dirname, 'public');
+  app.use(express.static(publicDir));
+  app.get('*', (_req, res) => {
+    res.sendFile(join(publicDir, 'index.html'));
+  });
+}
 
 // ─── Global error handler ────────────────────────────────────────────────────
 app.use(errorHandler);
