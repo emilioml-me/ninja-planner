@@ -149,7 +149,7 @@ export function KanbanColumn({
         </div>
       </div>
 
-      <div ref={setNodeRef} className="flex-1 overflow-y-auto space-y-3">
+      <div ref={setNodeRef} className="flex-1 overflow-y-auto space-y-3 min-h-20">
         <SortableContext items={sortedCards.map((c) => c.id)} strategy={verticalListSortingStrategy}>
           {sortedCards.map((card) => (
             <SortableCard
@@ -159,6 +159,11 @@ export function KanbanColumn({
               onDeleteCard={onDeleteCard}
             />
           ))}
+          {sortedCards.length === 0 && (
+            <div className="rounded-lg border border-dashed border-muted-foreground/25 p-4 text-center text-sm text-muted-foreground">
+              No tasks
+            </div>
+          )}
         </SortableContext>
       </div>
 

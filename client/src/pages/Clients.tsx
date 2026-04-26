@@ -26,6 +26,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Plus, MoreVertical, Pencil, Trash2, Users } from 'lucide-react';
 
 interface Client {
@@ -163,7 +164,9 @@ export default function Clients() {
 
           <TabsContent value={tab}>
             {isLoading ? (
-              <div className="text-center py-12 text-muted-foreground text-sm">Loading…</div>
+              <div className="space-y-2 mt-2">
+                {[1,2,3].map(i => <Skeleton key={i} className="h-14 w-full" />)}
+              </div>
             ) : filtered.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground text-sm">No clients in this stage.</div>
             ) : (

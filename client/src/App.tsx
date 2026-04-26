@@ -4,6 +4,7 @@ import { Route, Switch, Redirect } from 'wouter';
 import { queryClient } from './lib/queryClient';
 import { Toaster } from './components/ui/toaster';
 import { AppLayout } from './components/AppLayout';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import Tasks from './pages/Tasks';
 import Revenue from './pages/Revenue';
 import Clients from './pages/Clients';
@@ -37,6 +38,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <AuthGuard>
         <AppLayout>
+          <ErrorBoundary>
           <Switch>
             <Route path="/" component={() => <Redirect to="/tasks" />} />
             <Route path="/tasks" component={Tasks} />
@@ -45,6 +47,7 @@ export default function App() {
             <Route path="/roadmap" component={Roadmap} />
             <Route path="/reviews" component={Reviews} />
           </Switch>
+          </ErrorBoundary>
         </AppLayout>
       </AuthGuard>
       <Toaster />
