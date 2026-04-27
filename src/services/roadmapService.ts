@@ -56,6 +56,8 @@ export async function createRoadmapItem(
   return result.rows[0];
 }
 
+const ROADMAP_UPDATABLE_COLUMNS = new Set(['title', 'description', 'phase', 'status', 'priority']);
+
 export async function updateRoadmapItem(
   id: string,
   workspaceId: string,
@@ -66,7 +68,7 @@ export async function updateRoadmapItem(
   let i = 1;
 
   for (const [key, value] of Object.entries(data)) {
-    if (value !== undefined) {
+    if (value !== undefined && ROADMAP_UPDATABLE_COLUMNS.has(key)) {
       fields.push(`${key} = $${i++}`);
       values.push(value);
     }

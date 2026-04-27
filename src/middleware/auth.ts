@@ -18,6 +18,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     req.auth = {
       userId: payload.sub,
       orgId: (payload as Record<string, unknown>).org_id as string | null ?? null,
+      memberRole: null,
     };
 
     next();

@@ -17,6 +17,11 @@ router.get('/:id/members', requireWorkspace, async (req, res, next) => {
 // DELETE /api/workspaces/:id/members/:memberId
 router.delete('/:id/members/:memberId', requireWorkspace, async (req, res, next) => {
   try {
+    if (req.auth.memberRole !== 'org:admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
     const removed = await removeMember(req.workspace.id, req.params.memberId);
     if (!removed) {
       res.status(404).json({ error: 'Member not found' });

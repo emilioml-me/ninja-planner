@@ -57,6 +57,8 @@ export async function getReviewById(id: string, workspaceId: string): Promise<We
   return result.rows[0] ?? null;
 }
 
+const REVIEW_UPDATABLE_COLUMNS = new Set(['wins', 'blockers', 'focus_next', 'health_score']);
+
 export async function updateReview(
   id: string,
   workspaceId: string,
@@ -67,7 +69,7 @@ export async function updateReview(
   let i = 1;
 
   for (const [key, value] of Object.entries(data)) {
-    if (value !== undefined) {
+    if (value !== undefined && REVIEW_UPDATABLE_COLUMNS.has(key)) {
       fields.push(`${key} = $${i++}`);
       values.push(value);
     }

@@ -41,6 +41,11 @@ router.get('/:id', requireWorkspace, async (req, res, next) => {
 // PATCH /api/workspaces/:id
 router.patch('/:id', requireWorkspace, async (req, res, next) => {
   try {
+    if (req.auth.memberRole !== 'org:admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: parsed.error.flatten() });

@@ -118,12 +118,17 @@ export async function getTaskById(
   if (taskResult.rows.length === 0) return null;
 
   const activityResult = await pool.query<TaskActivity>(
-    'SELECT * FROM task_activity WHERE task_id = $1 ORDER BY created_at',
-    [taskId],
+    `SELECT ta.* FROM task_activity ta
+     JOIN tasks t ON t.id = ta.task_id
+     WHERE ta.task_id = $1 AND t.workspace_id = $2
+     ORDER BY ta.created_at`,
+    [taskId, workspaceId],
   );
 
   return { task: taskResult.rows[0], activity: activityResult.rows };
 }
+
+const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'tags']);
 
 export async function updateTask(
   taskId: string,
@@ -135,7 +140,7 @@ export async function updateTask(
   let i = 1;
 
   for (const [key, value] of Object.entries(data)) {
-    if (value !== undefined) {
+    if (value !== undefined && TASK_UPDATABLE_COLUMNS.has(key)) {
       fields.push(`${key} = $${i++}`);
       values.push(value);
     }

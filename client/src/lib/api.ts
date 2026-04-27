@@ -9,18 +9,30 @@ export function useApiClient() {
     data?: unknown,
   ): Promise<T> {
     const token = await getToken();
-    const res = await fetch(url, {
-      method,
-      headers: {
-        ...(data ? { 'Content-Type': 'application/json' } : {}),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: data ? JSON.stringify(data) : undefined,
-    });
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: {
+          ...(data ? { 'Content-Type': 'application/json' } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: data ? JSON.stringify(data) : undefined,
+      });
+    } catch {
+      throw new Error('Network error — please check your connection');
+    }
 
     if (!res.ok) {
-      const text = (await res.text()) || res.statusText;
-      throw new Error(`${res.status}: ${text}`);
+      let message: string;
+      try {
+        const body = await res.json() as { error?: string };
+        message = body.error ?? res.statusText;
+      } catch {
+        message = res.statusText;
+      }
+      throw new Error(`${res.status}: ${message}`);
     }
 
     if (res.status === 204) return undefined as T;

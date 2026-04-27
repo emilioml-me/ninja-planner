@@ -68,6 +68,44 @@ router.post('/', async (req, res, next) => {
   }
 });
 
+// POST /api/tasks/reorder  — batch position update used by kanban drag-and-drop
+const reorderSchema = z.object({
+  taskId:      z.string().uuid(),
+  newStatus:   z.enum(['todo', 'in_progress', 'done', 'blocked']),
+  newPosition: z.number().int().min(0),
+  resequence:  z.array(z.object({ id: z.string().uuid(), position: z.number().int().min(0) })).optional(),
+});
+
+router.post('/reorder', async (req, res, next) => {
+  try {
+    const parsed = reorderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const { taskId, newStatus, newPosition, resequence } = parsed.data;
+
+    // Apply batch resequence first (includes the moved task)
+    if (resequence && resequence.length > 0) {
+      await reorderTasks(resequence, req.workspace.id);
+    } else {
+      await updateTaskPosition(taskId, req.workspace.id, newPosition);
+    }
+
+    // Update status if column changed
+    const task = await updateTask(taskId, req.workspace.id, { status: newStatus });
+    if (!task) {
+      res.status(404).json({ error: 'Task not found' });
+      return;
+    }
+
+    await logTaskActivity(taskId, req.auth.userId, 'moved', { status: newStatus, position: newPosition });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/tasks/:id
 router.get('/:id', async (req, res, next) => {
   try {
@@ -117,44 +155,6 @@ router.patch('/:id/position', async (req, res, next) => {
     }
     await logTaskActivity(task.id, req.auth.userId, 'moved', { position: parsed.data.position });
     res.json(task);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /api/tasks/reorder  — batch position update used by kanban drag-and-drop
-const reorderSchema = z.object({
-  taskId:      z.string().uuid(),
-  newStatus:   z.enum(['todo', 'in_progress', 'done', 'blocked']),
-  newPosition: z.number().int().min(0),
-  resequence:  z.array(z.object({ id: z.string().uuid(), position: z.number().int().min(0) })).optional(),
-});
-
-router.post('/reorder', async (req, res, next) => {
-  try {
-    const parsed = reorderSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.flatten() });
-      return;
-    }
-    const { taskId, newStatus, newPosition, resequence } = parsed.data;
-
-    // Apply batch resequence first (includes the moved task)
-    if (resequence && resequence.length > 0) {
-      await reorderTasks(resequence, req.workspace.id);
-    } else {
-      await updateTaskPosition(taskId, req.workspace.id, newPosition);
-    }
-
-    // Update status if column changed
-    const task = await updateTask(taskId, req.workspace.id, { status: newStatus });
-    if (!task) {
-      res.status(404).json({ error: 'Task not found' });
-      return;
-    }
-
-    await logTaskActivity(taskId, req.auth.userId, 'moved', { status: newStatus, position: newPosition });
-    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

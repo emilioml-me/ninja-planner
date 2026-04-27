@@ -57,6 +57,8 @@ export async function createClient(
   return result.rows[0];
 }
 
+const CLIENT_UPDATABLE_COLUMNS = new Set(['name', 'contact_name', 'contact_email', 'stage', 'mrr', 'notes']);
+
 export async function updateClient(
   id: string,
   workspaceId: string,
@@ -67,7 +69,7 @@ export async function updateClient(
   let i = 1;
 
   for (const [key, value] of Object.entries(data)) {
-    if (value !== undefined) {
+    if (value !== undefined && CLIENT_UPDATABLE_COLUMNS.has(key)) {
       fields.push(`${key} = $${i++}`);
       values.push(value);
     }

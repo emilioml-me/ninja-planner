@@ -22,8 +22,8 @@ export async function requireWorkspace(req: Request, res: Response, next: NextFu
 
     const workspace = wsResult.rows[0];
 
-    const memberResult = await pool.query(
-      'SELECT id FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+    const memberResult = await pool.query<{ role: string }>(
+      'SELECT role FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
       [workspace.id, userId],
     );
 
@@ -32,6 +32,7 @@ export async function requireWorkspace(req: Request, res: Response, next: NextFu
       return;
     }
 
+    req.auth.memberRole = memberResult.rows[0].role;
     req.workspace = workspace;
     next();
   } catch (err) {

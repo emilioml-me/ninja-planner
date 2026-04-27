@@ -6,6 +6,7 @@ declare global {
       auth: {
         userId: string;
         orgId: string | null;
+        memberRole: string | null;
       };
       workspace: {
         id: string;

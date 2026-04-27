@@ -3,6 +3,18 @@ if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
 }
 
+const REQUIRED_ENV = ['CLERK_SECRET_KEY', 'CLERK_WEBHOOK_SECRET', 'DATABASE_URL'] as const;
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`Missing required env var: ${key}`);
+    process.exit(1);
+  }
+}
+if (process.env.NODE_ENV === 'production' && !process.env.ALLOWED_ORIGIN) {
+  console.error('Missing required env var: ALLOWED_ORIGIN');
+  process.exit(1);
+}
+
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import express from 'express';
