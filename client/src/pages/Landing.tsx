@@ -20,34 +20,34 @@ const FEATURES = [
   {
     icon: CheckSquare,
     title: 'Task Board',
-    description: 'Kanban board with drag-and-drop. To Do, In Progress, Done, Blocked — with priority, tags, and due dates.',
+    description: 'Kanban board with drag-and-drop. To Do, In Progress, Done, Blocked — with priority, tags, assignees, and due dates.',
   },
   {
     icon: TrendingUp,
-    title: 'Revenue Tracker',
-    description: 'Set monthly, quarterly, or yearly targets. Track actuals vs goals with live progress bars.',
-  },
-  {
-    icon: Users,
-    title: 'Client Pipeline',
-    description: 'Lightweight CRM. Move clients from Prospect to Active, track MRR, and never lose a deal.',
+    title: 'Revenue Goals',
+    description: 'Set monthly, quarterly, or yearly targets. See actual vs goal at a glance so the team always knows where you stand.',
   },
   {
     icon: Map,
     title: 'Product Roadmap',
-    description: 'Plan features across Idea → Building → Live. Keep your team aligned on what ships next.',
+    description: 'Move initiatives from Idea → Building → Live. Keep everyone aligned on what ships next and why.',
   },
   {
     icon: ClipboardList,
     title: 'Weekly Review',
-    description: 'Reflect every week. Wins, blockers, focus, and a health score so you can spot patterns.',
+    description: 'A structured weekly ritual: wins, blockers, focus for next week, and a team health score to spot burnout early.',
+  },
+  {
+    icon: Users,
+    title: 'Business Dashboard',
+    description: 'Key numbers in one place — MRR, pipeline, and progress against goals. Connects with your CRM so data stays in sync.',
   },
 ];
 
 const STATS = [
-  { value: '5', label: 'modules in one place' },
-  { value: '∞', label: 'tasks & clients' },
-  { value: '100%', label: 'your data' },
+  { value: '1', label: 'workspace for your whole team' },
+  { value: '∞', label: 'tasks & milestones' },
+  { value: '0', label: 'spreadsheets needed' },
 ];
 
 export default function Landing() {
@@ -83,17 +83,17 @@ export default function Landing() {
         <div className="relative max-w-3xl mx-auto space-y-6">
           <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-4 py-1.5 text-xs font-medium text-primary">
             <Layers className="h-3 w-3" />
-            Business planning for small teams
+            Team planner for small businesses
           </div>
 
           <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight leading-tight">
-            Run your business,<br />
-            <span className="text-primary">not spreadsheets.</span>
+            Your team's command<br />
+            <span className="text-primary">center.</span>
           </h1>
 
           <p className="text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
-            Tasks, revenue targets, client pipeline, product roadmap, and weekly reviews —
-            all in one focused workspace for your team.
+            Tasks, goals, roadmap, and weekly reviews in one workspace.
+            Plan the week, ship the work, measure what matters.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
@@ -124,11 +124,11 @@ export default function Landing() {
           <div className="text-center mb-12">
             <div className="flex items-center justify-center gap-2 mb-3">
               <BarChart3 className="h-4 w-4 text-primary" />
-              <span className="text-xs font-semibold uppercase tracking-widest text-primary">Everything you need</span>
+              <span className="text-xs font-semibold uppercase tracking-widest text-primary">Built for execution</span>
             </div>
-            <h2 className="text-2xl sm:text-3xl font-bold">One workspace. Five tools.</h2>
+            <h2 className="text-2xl sm:text-3xl font-bold">Plan it. Ship it. Review it.</h2>
             <p className="text-muted-foreground mt-3 max-w-lg mx-auto">
-              No more juggling apps. Everything your team needs to plan, execute, and grow.
+              Everything your team needs to stay aligned — without the noise of tools built for enterprises.
             </p>
           </div>
 
@@ -155,9 +155,9 @@ export default function Landing() {
       {/* CTA banner */}
       <section className="border-t px-6 py-16">
         <div className="max-w-2xl mx-auto text-center space-y-5">
-          <h2 className="text-2xl sm:text-3xl font-bold">Ready to get organized?</h2>
+          <h2 className="text-2xl sm:text-3xl font-bold">Stop context-switching. Start shipping.</h2>
           <p className="text-muted-foreground">
-            Sign in and set up your workspace in minutes.
+            Get your team's workspace up and running in minutes.
           </p>
           <Button size="lg" className="gap-2 px-8" onClick={() => setSignInOpen(true)}>
             Get started free
