@@ -49,12 +49,14 @@ export async function createRevenue(
 export async function updateRevenue(
   id: string,
   workspaceId: string,
-  data: { target_amount?: number; actual_amount?: number; notes?: string },
+  data: { period_type?: string; period_start?: string; target_amount?: number; actual_amount?: number; notes?: string },
 ): Promise<RevenueTarget | null> {
   const fields: string[] = [];
   const values: unknown[] = [];
   let i = 1;
 
+  if (data.period_type !== undefined)   { fields.push(`period_type = $${i++}`);   values.push(data.period_type); }
+  if (data.period_start !== undefined)  { fields.push(`period_start = $${i++}`);  values.push(data.period_start); }
   if (data.target_amount !== undefined) { fields.push(`target_amount = $${i++}`); values.push(data.target_amount); }
   if (data.actual_amount !== undefined) { fields.push(`actual_amount = $${i++}`); values.push(data.actual_amount); }
   if (data.notes !== undefined)         { fields.push(`notes = $${i++}`);         values.push(data.notes); }

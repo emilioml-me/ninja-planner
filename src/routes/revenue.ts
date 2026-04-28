@@ -19,11 +19,7 @@ const createSchema = z.object({
   notes:          z.string().optional(),
 });
 
-const updateSchema = z.object({
-  target_amount: z.number().positive().optional(),
-  actual_amount: z.number().min(0).optional(),
-  notes:         z.string().optional(),
-});
+const updateSchema = createSchema.partial();
 
 // GET /api/revenue
 router.get('/', async (req, res, next) => {

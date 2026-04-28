@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { KanbanBoard, type KanbanCard, type KanbanColumnData } from '@/components/KanbanBoard';
-import { TaskFormDialog, type Task } from '@/components/TaskFormDialog';
+import { TaskFormDialog, type Task, type WorkspaceMember } from '@/components/TaskFormDialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -73,6 +73,11 @@ export default function Tasks() {
   const { data: tasks = [], isLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
     queryFn: () => apiRequest<Task[]>('GET', '/api/tasks'),
+  });
+
+  const { data: members = [] } = useQuery<WorkspaceMember[]>({
+    queryKey: ['/api/workspaces/me/members'],
+    queryFn: () => apiRequest<WorkspaceMember[]>('GET', '/api/workspaces/me/members'),
   });
 
   const createMutation = useMutation({
@@ -243,6 +248,7 @@ export default function Tasks() {
         task={editingTask}
         defaultStatus={defaultStatus}
         isPending={createMutation.isPending || updateMutation.isPending}
+        members={members}
       />
     </div>
   );

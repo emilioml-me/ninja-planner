@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useAuth } from '@clerk/clerk-react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -22,6 +23,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
+export interface WorkspaceMember {
+  id: string;
+  clerk_user_id: string;
+  role: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -41,6 +48,7 @@ const taskFormSchema = z.object({
   priority: z.enum(['low', 'medium', 'high', 'urgent']),
   due_date: z.string().optional(),
   tags: z.string().optional(),
+  assignee_clerk_id: z.string().optional(),
 });
 
 type TaskFormData = z.infer<typeof taskFormSchema>;
@@ -52,6 +60,7 @@ interface TaskFormDialogProps {
   task?: Task | null;
   defaultStatus?: Task['status'];
   isPending?: boolean;
+  members?: WorkspaceMember[];
 }
 
 export function TaskFormDialog({
@@ -61,7 +70,10 @@ export function TaskFormDialog({
   task,
   defaultStatus = 'todo',
   isPending,
+  members = [],
 }: TaskFormDialogProps) {
+  const { userId } = useAuth();
+
   const form = useForm<TaskFormData>({
     resolver: zodResolver(taskFormSchema),
     defaultValues: {
@@ -71,6 +83,7 @@ export function TaskFormDialog({
       priority: 'medium',
       due_date: '',
       tags: '',
+      assignee_clerk_id: '',
     },
   });
 
@@ -83,6 +96,7 @@ export function TaskFormDialog({
         priority: task?.priority ?? 'medium',
         due_date: task?.due_date ? task.due_date.substring(0, 10) : '',
         tags: task?.tags?.join(', ') ?? '',
+        assignee_clerk_id: task?.assignee_clerk_id ?? '',
       });
     }
   }, [open, task, defaultStatus, form]);
@@ -98,6 +112,7 @@ export function TaskFormDialog({
       priority: data.priority,
       due_date: data.due_date ? data.due_date : null,
       tags,
+      assignee_clerk_id: data.assignee_clerk_id || null,
     });
   };
 
@@ -219,6 +234,34 @@ export function TaskFormDialog({
                 )}
               />
             </div>
+
+            {members.length > 0 && (
+              <FormField
+                control={form.control}
+                name="assignee_clerk_id"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Assignee</FormLabel>
+                    <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Unassigned" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="">Unassigned</SelectItem>
+                        {members.map((m) => (
+                          <SelectItem key={m.clerk_user_id} value={m.clerk_user_id}>
+                            {m.clerk_user_id === userId ? 'Me' : m.clerk_user_id}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
 
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>

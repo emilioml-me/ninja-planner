@@ -4,6 +4,16 @@ import { getMembersForWorkspace, removeMember } from '../services/workspaceServi
 
 const router = Router();
 
+// GET /api/workspaces/me/members — current workspace derived from JWT org_id
+router.get('/me/members', requireWorkspace, async (req, res, next) => {
+  try {
+    const members = await getMembersForWorkspace(req.workspace.id);
+    res.json(members);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/workspaces/:id/members
 router.get('/:id/members', requireWorkspace, async (req, res, next) => {
   try {
