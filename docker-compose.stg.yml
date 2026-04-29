@@ -1,0 +1,24 @@
+services:
+  ninja-planner-stg:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Baked into the Vite bundle at build time — export before running build
+        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY}
+    container_name: ninja-planner-stg
+    restart: unless-stopped
+    env_file: /srv/secrets/ninja-planner.stg.env
+    ports:
+      - "127.0.0.1:3208:3206"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3206/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
