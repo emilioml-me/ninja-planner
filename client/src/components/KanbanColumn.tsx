@@ -15,6 +15,7 @@ import {
 import { Plus, MoreVertical, Calendar, AlertCircle, Trash2, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { KanbanCard } from './KanbanBoard';
+import { type WorkspaceMember } from '@/hooks/use-members';
 
 interface KanbanColumnProps {
   columnId: string;
@@ -23,16 +24,19 @@ interface KanbanColumnProps {
   onAddCard?: () => void;
   onCardClick?: (cardId: string) => void;
   onDeleteCard?: (cardId: string) => void;
+  members?: WorkspaceMember[];
 }
 
 function SortableCard({
   card,
   onCardClick,
   onDeleteCard,
+  members = [],
 }: {
   card: KanbanCard;
   onCardClick?: (id: string) => void;
   onDeleteCard?: (id: string) => void;
+  members?: WorkspaceMember[];
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: card.id,
@@ -123,15 +127,22 @@ function SortableCard({
             ))}
           </div>
 
-          {card.assignee_clerk_id && (
-            <div className="flex items-center gap-2 mt-2">
-              <Avatar className="h-6 w-6">
-                <AvatarFallback className="text-xs">
-                  {card.assignee_clerk_id.substring(0, 2).toUpperCase()}
-                </AvatarFallback>
-              </Avatar>
-            </div>
-          )}
+          {card.assignee_clerk_id && (() => {
+            const member = members.find((m) => m.clerk_user_id === card.assignee_clerk_id);
+            const name = member?.display_name ?? card.assignee_clerk_id;
+            const parts = name.trim().split(/\s+/);
+            const abbr = parts.length >= 2
+              ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+              : name.slice(0, 2).toUpperCase();
+            return (
+              <div className="flex items-center gap-2 mt-2">
+                <Avatar className="h-6 w-6">
+                  <AvatarFallback className="text-xs bg-primary/10 text-primary">{abbr}</AvatarFallback>
+                </Avatar>
+                <span className="text-xs text-muted-foreground truncate">{name}</span>
+              </div>
+            );
+          })()}
         </div>
       </Card>
     </div>
@@ -168,6 +179,7 @@ export function KanbanColumn({
               card={card}
               onCardClick={onCardClick}
               onDeleteCard={onDeleteCard}
+              members={members}
             />
           ))}
           {sortedCards.length === 0 && (

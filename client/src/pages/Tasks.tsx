@@ -1,13 +1,23 @@
 import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { format, isBefore, isToday, startOfDay } from 'date-fns';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import { useMembers } from '@/hooks/use-members';
 import { KanbanBoard, type KanbanCard, type KanbanColumnData } from '@/components/KanbanBoard';
-import { TaskFormDialog, type Task, type WorkspaceMember } from '@/components/TaskFormDialog';
+import { TaskFormDialog, type Task } from '@/components/TaskFormDialog';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Plus, Search, X } from 'lucide-react';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Plus, Search, X, LayoutGrid, List, MoreVertical, Pencil, Trash2, Clock, Calendar } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const COLUMNS: { id: Task['status']; title: string }[] = [
@@ -59,6 +69,146 @@ function TasksSkeleton() {
   );
 }
 
+// ─── List view ────────────────────────────────────────────────────────────────
+
+const STATUS_LABEL: Record<string, string> = {
+  todo: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked',
+};
+const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'outline' | 'destructive'> = {
+  todo: 'outline', in_progress: 'default', done: 'secondary', blocked: 'destructive',
+};
+const PRIORITY_VARIANT: Record<string, 'default' | 'secondary' | 'outline' | 'destructive'> = {
+  low: 'outline', medium: 'secondary', high: 'default', urgent: 'destructive',
+};
+
+function TaskListView({
+  tasks,
+  onEdit,
+  onDelete,
+  displayName,
+  initials,
+}: {
+  tasks: Task[];
+  onEdit: (task: Task) => void;
+  onDelete: (id: string) => void;
+  displayName: (id: string | null | undefined) => string;
+  initials: (id: string | null | undefined) => string;
+}) {
+  const now = new Date();
+  const todayStart = startOfDay(now);
+
+  const sorted = [...tasks].sort((a, b) => {
+    // Overdue first, then due today, then by position
+    const aOverdue = a.due_date && isBefore(new Date(a.due_date + 'T23:59:59'), todayStart) && a.status !== 'done';
+    const bOverdue = b.due_date && isBefore(new Date(b.due_date + 'T23:59:59'), todayStart) && b.status !== 'done';
+    if (aOverdue && !bOverdue) return -1;
+    if (!aOverdue && bOverdue) return 1;
+    return a.position - b.position;
+  });
+
+  if (sorted.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
+        <p className="text-sm">No tasks match your filters.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-auto h-full">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Title</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Priority</TableHead>
+            <TableHead>Assignee</TableHead>
+            <TableHead>Due</TableHead>
+            <TableHead>Tags</TableHead>
+            <TableHead className="w-10" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {sorted.map((task) => {
+            const isOverdue = task.due_date && task.status !== 'done' &&
+              isBefore(new Date(task.due_date + 'T23:59:59'), todayStart);
+            const dueToday = task.due_date && isToday(new Date(task.due_date));
+            return (
+              <TableRow
+                key={task.id}
+                className="cursor-pointer hover:bg-muted/50"
+                onClick={() => onEdit(task)}
+              >
+                <TableCell className="font-medium max-w-64 truncate">{task.title}</TableCell>
+                <TableCell>
+                  <Badge variant={STATUS_VARIANT[task.status]} className="text-xs">
+                    {STATUS_LABEL[task.status]}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  <Badge variant={PRIORITY_VARIANT[task.priority]} className="text-xs capitalize">
+                    {task.priority}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  {task.assignee_clerk_id ? (
+                    <div className="flex items-center gap-2">
+                      <Avatar className="h-6 w-6">
+                        <AvatarFallback className="text-xs">{initials(task.assignee_clerk_id)}</AvatarFallback>
+                      </Avatar>
+                      <span className="text-xs text-muted-foreground">{displayName(task.assignee_clerk_id)}</span>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {task.due_date ? (
+                    <span className={cn(
+                      'text-xs flex items-center gap-1',
+                      isOverdue ? 'text-destructive font-medium' : dueToday ? 'text-yellow-600' : 'text-muted-foreground',
+                    )}>
+                      {isOverdue ? <Clock className="h-3 w-3" /> : <Calendar className="h-3 w-3" />}
+                      {format(new Date(task.due_date), 'MMM d')}
+                    </span>
+                  ) : <span className="text-xs text-muted-foreground">—</span>}
+                </TableCell>
+                <TableCell>
+                  <div className="flex gap-1 flex-wrap">
+                    {task.tags.slice(0, 2).map((tag) => (
+                      <Badge key={tag} variant="outline" className="text-xs">#{tag}</Badge>
+                    ))}
+                    {task.tags.length > 2 && (
+                      <span className="text-xs text-muted-foreground">+{task.tags.length - 2}</span>
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell onClick={(e) => e.stopPropagation()}>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-7 w-7">
+                        <MoreVertical className="h-3.5 w-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => onEdit(task)}>
+                        <Pencil className="h-4 w-4 mr-2" /> Edit
+                      </DropdownMenuItem>
+                      <DropdownMenuItem className="text-destructive" onClick={() => onDelete(task.id)}>
+                        <Trash2 className="h-4 w-4 mr-2" /> Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 export default function Tasks() {
   const { apiRequest } = useApiClient();
   const queryClient = useQueryClient();
@@ -69,16 +219,14 @@ export default function Tasks() {
   const [defaultStatus, setDefaultStatus] = useState<Task['status']>('todo');
   const [search, setSearch] = useState('');
   const [priorityFilter, setPriorityFilter] = useState<Task['priority'] | 'all'>('all');
+  const [view, setView] = useState<'kanban' | 'list'>('kanban');
 
   const { data: tasks = [], isLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
     queryFn: () => apiRequest<Task[]>('GET', '/api/tasks'),
   });
 
-  const { data: members = [] } = useQuery<WorkspaceMember[]>({
-    queryKey: ['/api/workspaces/me/members'],
-    queryFn: () => apiRequest<WorkspaceMember[]>('GET', '/api/workspaces/me/members'),
-  });
+  const { members, displayName, initials } = useMembers();
 
   const createMutation = useMutation({
     mutationFn: (data: Partial<Task> & { title: string }) =>
@@ -193,14 +341,33 @@ export default function Tasks() {
             </Button>
           )}
         </div>
-        <Button
-          size="sm"
-          className="gap-2 shrink-0"
-          onClick={() => { setEditingTask(null); setDefaultStatus('todo'); setDialogOpen(true); }}
-        >
-          <Plus className="h-4 w-4" />
-          <span className="hidden sm:inline">New Task</span>
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* View toggle */}
+          <div className="flex rounded-md border overflow-hidden">
+            <button
+              onClick={() => setView('kanban')}
+              className={cn('px-2.5 py-1.5 transition-colors', view === 'kanban' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted')}
+              title="Kanban view"
+            >
+              <LayoutGrid className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setView('list')}
+              className={cn('px-2.5 py-1.5 transition-colors border-l', view === 'list' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted')}
+              title="List view"
+            >
+              <List className="h-4 w-4" />
+            </button>
+          </div>
+          <Button
+            size="sm"
+            className="gap-2"
+            onClick={() => { setEditingTask(null); setDefaultStatus('todo'); setDialogOpen(true); }}
+          >
+            <Plus className="h-4 w-4" />
+            <span className="hidden sm:inline">New Task</span>
+          </Button>
+        </div>
       </div>
 
       {/* Priority filter pills */}
@@ -226,17 +393,26 @@ export default function Tasks() {
         )}
       </div>
 
-      {/* Board */}
+      {/* Board / List */}
       <div className="flex-1 overflow-hidden">
         {isLoading ? (
           <TasksSkeleton />
-        ) : (
+        ) : view === 'kanban' ? (
           <KanbanBoard
             columns={columns}
             onAddCard={handleAddCard}
             onCardClick={handleCardClick}
             onReorder={handleReorder}
             onDeleteCard={(id) => deleteMutation.mutate(id)}
+            members={members}
+          />
+        ) : (
+          <TaskListView
+            tasks={filteredTasks}
+            onEdit={(task) => { setEditingTask(task); setDialogOpen(true); }}
+            onDelete={(id) => deleteMutation.mutate(id)}
+            displayName={displayName}
+            initials={initials}
           />
         )}
       </div>

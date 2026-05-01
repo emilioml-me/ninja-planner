@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { type WorkspaceMember } from '@/hooks/use-members';
 import {
   DndContext,
   DragOverlay,
@@ -44,6 +45,7 @@ interface KanbanBoardProps {
     resequence?: Array<{ id: string; position: number }>,
   ) => void;
   onDeleteCard?: (cardId: string) => void;
+  members?: WorkspaceMember[];
 }
 
 const BASE_POSITION = 1024;
@@ -56,6 +58,7 @@ export function KanbanBoard({
   onCardClick,
   onReorder,
   onDeleteCard,
+  members = [],
 }: KanbanBoardProps) {
   const [activeCard, setActiveCard] = useState<KanbanCard | null>(null);
 
@@ -158,6 +161,7 @@ export function KanbanBoard({
               onAddCard={() => onAddCard?.(column.id)}
               onCardClick={onCardClick}
               onDeleteCard={onDeleteCard}
+              members={members}
             />
           ))}
         </div>

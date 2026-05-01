@@ -9,6 +9,7 @@ import {
   ClipboardList,
   Briefcase,
   X,
+  UsersRound,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -21,6 +22,7 @@ const NAV = [
   { href: '/clients',   label: 'Clients',       icon: Users },
   { href: '/roadmap',   label: 'Roadmap',       icon: Map },
   { href: '/reviews',   label: 'Weekly Review', icon: ClipboardList },
+  { href: '/members',   label: 'Team',          icon: UsersRound },
 ];
 
 interface AppSidebarProps {

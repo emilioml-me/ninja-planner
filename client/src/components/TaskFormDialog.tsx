@@ -26,12 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useApiClient } from '@/lib/api';
-
-export interface WorkspaceMember {
-  id: string;
-  clerk_user_id: string;
-  role: string;
-}
+import { type WorkspaceMember } from '@/hooks/use-members';
 
 interface TaskActivity {
   id: string;
@@ -289,7 +284,7 @@ export function TaskFormDialog({
                         <SelectItem value="">Unassigned</SelectItem>
                         {members.map((m) => (
                           <SelectItem key={m.clerk_user_id} value={m.clerk_user_id}>
-                            {m.clerk_user_id === userId ? 'Me' : m.clerk_user_id}
+                            {m.clerk_user_id === userId ? `${m.display_name} (me)` : m.display_name}
                           </SelectItem>
                         ))}
                       </SelectContent>
