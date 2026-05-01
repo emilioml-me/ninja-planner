@@ -1,6 +1,7 @@
 import { Link, useLocation } from 'wouter';
 import { UserButton } from '@clerk/clerk-react';
 import {
+  LayoutDashboard,
   CheckSquare,
   TrendingUp,
   Users,
@@ -14,11 +15,12 @@ import { ThemeToggle } from '@/components/ThemeToggle';
 import { Button } from '@/components/ui/button';
 
 const NAV = [
-  { href: '/tasks',   label: 'Tasks',        icon: CheckSquare },
-  { href: '/revenue', label: 'Revenue',       icon: TrendingUp },
-  { href: '/clients', label: 'Clients',       icon: Users },
-  { href: '/roadmap', label: 'Roadmap',       icon: Map },
-  { href: '/reviews', label: 'Weekly Review', icon: ClipboardList },
+  { href: '/dashboard', label: 'Dashboard',     icon: LayoutDashboard },
+  { href: '/tasks',     label: 'Tasks',         icon: CheckSquare },
+  { href: '/revenue',   label: 'Revenue',       icon: TrendingUp },
+  { href: '/clients',   label: 'Clients',       icon: Users },
+  { href: '/roadmap',   label: 'Roadmap',       icon: Map },
+  { href: '/reviews',   label: 'Weekly Review', icon: ClipboardList },
 ];
 
 interface AppSidebarProps {

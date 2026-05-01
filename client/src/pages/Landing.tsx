@@ -54,7 +54,7 @@ export default function Landing() {
   const { isLoaded, isSignedIn } = useAuth();
   const [signInOpen, setSignInOpen] = useState(false);
 
-  if (isLoaded && isSignedIn) return <Redirect to="/tasks" />;
+  if (isLoaded && isSignedIn) return <Redirect to="/dashboard" />;
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">

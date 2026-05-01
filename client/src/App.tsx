@@ -6,6 +6,7 @@ import { Toaster } from './components/ui/toaster';
 import { AppLayout } from './components/AppLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import Landing from './pages/Landing';
+import Dashboard from './pages/Dashboard';
 import Tasks from './pages/Tasks';
 import Revenue from './pages/Revenue';
 import Clients from './pages/Clients';
@@ -29,12 +30,13 @@ function AuthenticatedApp() {
     <AppLayout>
       <ErrorBoundary>
         <Switch>
-          <Route path="/tasks"   component={Tasks} />
-          <Route path="/revenue" component={Revenue} />
-          <Route path="/clients" component={Clients} />
-          <Route path="/roadmap" component={Roadmap} />
-          <Route path="/reviews" component={Reviews} />
-          <Route component={() => <Redirect to="/tasks" />} />
+          <Route path="/dashboard" component={Dashboard} />
+          <Route path="/tasks"     component={Tasks} />
+          <Route path="/revenue"   component={Revenue} />
+          <Route path="/clients"   component={Clients} />
+          <Route path="/roadmap"   component={Roadmap} />
+          <Route path="/reviews"   component={Reviews} />
+          <Route component={() => <Redirect to="/dashboard" />} />
         </Switch>
       </ErrorBoundary>
     </AppLayout>
