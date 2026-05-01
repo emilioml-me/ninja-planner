@@ -30,6 +30,79 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Plus, MoreVertical, Pencil, Trash2, TrendingUp } from 'lucide-react';
 
+// ─── Revenue bar chart (no external deps) ────────────────────────────────────
+
+function RevenueChart({ targets }: { targets: RevenueTarget[] }) {
+  const sorted = [...targets]
+    .sort((a, b) => new Date(a.period_start).getTime() - new Date(b.period_start).getTime())
+    .slice(-8);
+
+  if (sorted.length < 2) return null;
+
+  const maxVal = Math.max(
+    ...sorted.flatMap((t) => [Number(t.target_amount), Number(t.actual_amount)]),
+    1,
+  );
+
+  const W = 560, H = 140, LABEL_H = 20;
+  const groupW = W / sorted.length;
+  const barW = Math.min(groupW * 0.32, 28);
+  const gap = 3;
+
+  function periodLabel(t: RevenueTarget) {
+    const d = new Date(t.period_start + 'T00:00:00');
+    if (t.period_type === 'yearly')    return String(d.getFullYear());
+    if (t.period_type === 'quarterly') return `Q${Math.ceil((d.getMonth() + 1) / 3)} ${String(d.getFullYear()).slice(2)}`;
+    return format(d, 'MMM yy');
+  }
+
+  return (
+    <div className="rounded-lg border bg-card p-4">
+      <div className="flex items-center gap-4 mb-3 text-xs text-muted-foreground">
+        <div className="flex items-center gap-1.5">
+          <div className="h-2.5 w-2.5 rounded-sm" style={{ background: 'hsl(var(--muted-foreground) / 0.25)' }} />
+          Target
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="h-2.5 w-2.5 rounded-sm" style={{ background: 'hsl(var(--primary))' }} />
+          Actual
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H + LABEL_H}`} className="w-full overflow-visible">
+        {/* Baseline */}
+        <line x1="0" y1={H} x2={W} y2={H} style={{ stroke: 'hsl(var(--border))', strokeWidth: 1 }} />
+        {sorted.map((t, i) => {
+          const target = Number(t.target_amount);
+          const actual = Number(t.actual_amount);
+          const targetH = (target / maxVal) * H;
+          const actualH = (actual / maxVal) * H;
+          const cx = i * groupW + groupW / 2;
+          return (
+            <g key={t.id}>
+              <rect
+                x={cx - barW - gap / 2} y={H - targetH}
+                width={barW} height={targetH} rx="2"
+                style={{ fill: 'hsl(var(--muted-foreground) / 0.25)' }}
+              />
+              <rect
+                x={cx + gap / 2} y={H - actualH}
+                width={barW} height={actualH} rx="2"
+                style={{ fill: 'hsl(var(--primary))' }}
+              />
+              <text
+                x={cx} y={H + 14} textAnchor="middle"
+                style={{ fill: 'hsl(var(--muted-foreground))', fontSize: '10px' }}
+              >
+                {periodLabel(t)}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 interface RevenueTarget {
   id: string;
   period_type: string;
@@ -141,6 +214,9 @@ export default function Revenue() {
           <StatCard label="Total Actual" value={fmt(String(totalActual))} />
           <StatCard label="Avg Achievement" value={`${avgPct}%`} />
         </div>
+
+        {/* Chart */}
+        {!isLoading && <RevenueChart targets={targets} />}
 
         {/* Table */}
         {isLoading ? (

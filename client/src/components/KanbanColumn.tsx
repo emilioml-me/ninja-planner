@@ -12,7 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, MoreVertical, Calendar, AlertCircle, Trash2 } from 'lucide-react';
+import { Plus, MoreVertical, Calendar, AlertCircle, Trash2, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { KanbanCard } from './KanbanBoard';
 
@@ -53,6 +53,11 @@ function SortableCard({
 
   const borderClass = card.priority ? priorityBorder[card.priority] : '';
 
+  const isOverdue =
+    card.due_date &&
+    card.status !== 'done' &&
+    new Date(card.due_date + 'T23:59:59') < new Date();
+
   return (
     <div ref={setNodeRef} style={style} {...attributes}>
       <Card
@@ -63,7 +68,10 @@ function SortableCard({
             <h4 className="font-medium text-sm line-clamp-2">{card.title}</h4>
           </div>
           <div className="flex items-center gap-1">
-            {(card.priority === 'urgent' || card.priority === 'high') && (
+            {isOverdue && (
+              <Clock className="h-4 w-4 text-destructive flex-shrink-0" />
+            )}
+            {!isOverdue && (card.priority === 'urgent' || card.priority === 'high') && (
               <AlertCircle className="h-4 w-4 text-orange-500 flex-shrink-0" />
             )}
             <DropdownMenu>
@@ -100,7 +108,10 @@ function SortableCard({
 
           <div className="flex items-center gap-2 flex-wrap mb-2">
             {card.due_date && (
-              <Badge variant="outline" className="text-xs gap-1">
+              <Badge
+                variant="outline"
+                className={cn('text-xs gap-1', isOverdue && 'border-destructive text-destructive')}
+              >
                 <Calendar className="h-3 w-3" />
                 {format(new Date(card.due_date), 'MMM d')}
               </Badge>

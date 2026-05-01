@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
+import { useQuery } from '@tanstack/react-query';
+import { formatDistanceToNow } from 'date-fns';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -14,6 +16,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { Separator } from '@/components/ui/separator';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import {
   Select,
@@ -22,11 +25,36 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { useApiClient } from '@/lib/api';
 
 export interface WorkspaceMember {
   id: string;
   clerk_user_id: string;
   role: string;
+}
+
+interface TaskActivity {
+  id: string;
+  actor_clerk_id: string;
+  action: string;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+}
+
+function formatAction(action: string, payload: Record<string, unknown> | null): string {
+  switch (action) {
+    case 'created': return 'Created this task';
+    case 'moved': {
+      const status = payload?.status as string | undefined;
+      return status ? `Moved to ${status.replace('_', ' ')}` : 'Moved';
+    }
+    case 'updated': {
+      const keys = payload ? Object.keys(payload).join(', ') : '';
+      return keys ? `Updated ${keys}` : 'Updated';
+    }
+    case 'deleted': return 'Deleted';
+    default: return action;
+  }
 }
 
 export interface Task {
@@ -73,6 +101,15 @@ export function TaskFormDialog({
   members = [],
 }: TaskFormDialogProps) {
   const { userId } = useAuth();
+  const { apiRequest } = useApiClient();
+
+  const { data: taskDetail } = useQuery<{ task: Task; activity: TaskActivity[] }>({
+    queryKey: ['/api/tasks', task?.id],
+    queryFn: () => apiRequest(`GET`, `/api/tasks/${task!.id}`),
+    enabled: open && !!task?.id,
+  });
+
+  const activity = taskDetail?.activity ?? [];
 
   const form = useForm<TaskFormData>({
     resolver: zodResolver(taskFormSchema),
@@ -273,6 +310,31 @@ export function TaskFormDialog({
             </DialogFooter>
           </form>
         </Form>
+
+        {/* Activity log — edit mode only */}
+        {task && activity.length > 0 && (
+          <>
+            <Separator />
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Activity</p>
+              <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+                {[...activity].reverse().map((entry) => (
+                  <div key={entry.id} className="flex items-start gap-2 text-xs">
+                    <div className="h-5 w-5 rounded-full bg-muted flex items-center justify-center shrink-0 mt-0.5 text-[10px] font-medium text-muted-foreground">
+                      {entry.actor_clerk_id === userId ? 'Me' : entry.actor_clerk_id.slice(-2).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <span className="text-foreground">{formatAction(entry.action, entry.payload)}</span>
+                      <span className="text-muted-foreground ml-1.5">
+                        · {formatDistanceToNow(new Date(entry.created_at), { addSuffix: true })}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );
