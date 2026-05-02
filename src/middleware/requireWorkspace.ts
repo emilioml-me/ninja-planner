@@ -10,29 +10,22 @@ export async function requireWorkspace(req: Request, res: Response, next: NextFu
   }
 
   try {
-    const wsResult = await pool.query<{ id: string; name: string; plan: string }>(
-      'SELECT id, name, plan FROM workspaces WHERE clerk_org_id = $1',
-      [orgId],
+    // Single JOIN replaces two sequential queries
+    const result = await pool.query<{ id: string; name: string; plan: string; role: string }>(
+      `SELECT w.id, w.name, w.plan, wm.role
+       FROM workspaces w
+       JOIN workspace_members wm ON wm.workspace_id = w.id
+       WHERE w.clerk_org_id = $1 AND wm.clerk_user_id = $2`,
+      [orgId, userId],
     );
 
-    if (wsResult.rows.length === 0) {
-      res.status(403).json({ error: 'Workspace not found' });
+    if (result.rows.length === 0) {
+      res.status(403).json({ error: 'Access denied' });
       return;
     }
 
-    const workspace = wsResult.rows[0];
-
-    const memberResult = await pool.query<{ role: string }>(
-      'SELECT role FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
-      [workspace.id, userId],
-    );
-
-    if (memberResult.rows.length === 0) {
-      res.status(403).json({ error: 'Not a member of this workspace' });
-      return;
-    }
-
-    req.auth.memberRole = memberResult.rows[0].role;
+    const { role, ...workspace } = result.rows[0];
+    req.auth.memberRole = role;
     req.workspace = workspace;
     next();
   } catch (err) {

@@ -47,6 +47,10 @@ router.get('/me/members', requireWorkspace, async (req, res, next) => {
 // GET /api/workspaces/:id/members
 router.get('/:id/members', requireWorkspace, async (req, res, next) => {
   try {
+    if (req.params.id !== req.workspace.id) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
     const raw = await getMembersForWorkspace(req.workspace.id);
     res.json(await enrichMembers(raw));
   } catch (err) {
@@ -75,6 +79,10 @@ router.delete('/me/members/:memberId', requireWorkspace, async (req, res, next) 
 // DELETE /api/workspaces/:id/members/:memberId
 router.delete('/:id/members/:memberId', requireWorkspace, async (req, res, next) => {
   try {
+    if (req.params.id !== req.workspace.id) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
     if (req.auth.memberRole !== 'org:admin') {
       res.status(403).json({ error: 'Admin access required' });
       return;

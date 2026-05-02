@@ -58,6 +58,10 @@ router.patch('/:id', async (req, res, next) => {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+    if (Object.keys(parsed.data).length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
     const client = await updateClient(req.params.id, req.workspace.id, parsed.data);
     if (!client) {
       res.status(404).json({ error: 'Client not found' });

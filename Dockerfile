@@ -11,7 +11,7 @@ RUN npm install
 COPY tsconfig.json ./
 COPY vite.config.ts ./
 COPY tailwind.config.ts ./
-COPY postcss.config.ts ./
+COPY postcss.config.js ./
 
 # Source
 COPY src ./src

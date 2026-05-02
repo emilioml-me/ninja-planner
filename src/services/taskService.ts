@@ -35,7 +35,12 @@ export interface TaskFilters {
   due_after?: string;
 }
 
-export async function getTasks(workspaceId: string, filters: TaskFilters): Promise<Task[]> {
+export async function getTasks(
+  workspaceId: string,
+  filters: TaskFilters,
+  limit = 500,
+  offset = 0,
+): Promise<Task[]> {
   const conditions: string[] = ['workspace_id = $1', 'deleted_at IS NULL'];
   const values: unknown[] = [workspaceId];
   let i = 2;
@@ -65,8 +70,9 @@ export async function getTasks(workspaceId: string, filters: TaskFilters): Promi
     values.push(filters.due_after);
   }
 
+  values.push(Math.min(limit, 1000), offset);
   const result = await pool.query<Task>(
-    `SELECT * FROM tasks WHERE ${conditions.join(' AND ')} ORDER BY position, created_at`,
+    `SELECT * FROM tasks WHERE ${conditions.join(' AND ')} ORDER BY position, created_at LIMIT $${i++} OFFSET $${i}`,
     values,
   );
   return result.rows;
@@ -180,20 +186,41 @@ export async function softDeleteTask(taskId: string, workspaceId: string): Promi
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function reorderTasks(
-  updates: Array<{ id: string; position: number }>,
+// Atomically updates positions (batch or single) + status in one transaction
+export async function reorderTaskInTransaction(
+  taskId: string,
   workspaceId: string,
-): Promise<void> {
+  newStatus: string,
+  newPosition: number,
+  resequence?: Array<{ id: string; position: number }>,
+): Promise<Task | null> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    for (const { id, position } of updates) {
+
+    if (resequence && resequence.length > 0) {
+      for (const { id, position } of resequence) {
+        await client.query(
+          'UPDATE tasks SET position = $1 WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL',
+          [position, id, workspaceId],
+        );
+      }
+    } else {
       await client.query(
         'UPDATE tasks SET position = $1 WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL',
-        [position, id, workspaceId],
+        [newPosition, taskId, workspaceId],
       );
     }
+
+    const result = await client.query<Task>(
+      `UPDATE tasks SET status = $1
+       WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL
+       RETURNING *`,
+      [newStatus, taskId, workspaceId],
+    );
+
     await client.query('COMMIT');
+    return result.rows[0] ?? null;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

@@ -9,6 +9,7 @@ export function useApiClient() {
     data?: unknown,
   ): Promise<T> {
     const token = await getToken();
+    if (!token) throw new Error('Session expired — please sign in again');
 
     let res: Response;
     try {

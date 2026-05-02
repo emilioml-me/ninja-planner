@@ -57,6 +57,14 @@ export async function getReviewById(id: string, workspaceId: string): Promise<We
   return result.rows[0] ?? null;
 }
 
+export async function deleteReview(id: string, workspaceId: string): Promise<boolean> {
+  const result = await pool.query(
+    'DELETE FROM weekly_reviews WHERE id = $1 AND workspace_id = $2',
+    [id, workspaceId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 const REVIEW_UPDATABLE_COLUMNS = new Set(['wins', 'blockers', 'focus_next', 'health_score']);
 
 export async function updateReview(

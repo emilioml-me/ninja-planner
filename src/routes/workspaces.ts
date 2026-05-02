@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import {
   getWorkspacesForUser,
-  getWorkspaceById,
   updateWorkspace,
 } from '../services/workspaceService.js';
 
@@ -11,7 +10,7 @@ const router = Router();
 
 const updateSchema = z.object({
   name: z.string().min(1).max(255).optional(),
-  plan: z.string().min(1).max(50).optional(),
+  // plan is intentionally excluded — plan changes must go through billing
 });
 
 // GET /api/workspaces/me
@@ -25,22 +24,21 @@ router.get('/me', async (req, res, next) => {
 });
 
 // GET /api/workspaces/:id
-router.get('/:id', requireWorkspace, async (req, res, next) => {
-  try {
-    const workspace = await getWorkspaceById(req.workspace.id);
-    if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
-    }
-    res.json(workspace);
-  } catch (err) {
-    next(err);
+router.get('/:id', requireWorkspace, async (req, res) => {
+  if (req.params.id !== req.workspace.id) {
+    res.status(403).json({ error: 'Access denied' });
+    return;
   }
+  res.json(req.workspace);
 });
 
 // PATCH /api/workspaces/:id
 router.patch('/:id', requireWorkspace, async (req, res, next) => {
   try {
+    if (req.params.id !== req.workspace.id) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
     if (req.auth.memberRole !== 'org:admin') {
       res.status(403).json({ error: 'Admin access required' });
       return;
@@ -51,12 +49,12 @@ router.patch('/:id', requireWorkspace, async (req, res, next) => {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
-
-    const workspace = await updateWorkspace(req.workspace.id, parsed.data);
-    if (!workspace) {
+    if (Object.keys(parsed.data).length === 0) {
       res.status(400).json({ error: 'No fields to update' });
       return;
     }
+
+    const workspace = await updateWorkspace(req.workspace.id, parsed.data);
     res.json(workspace);
   } catch (err) {
     next(err);

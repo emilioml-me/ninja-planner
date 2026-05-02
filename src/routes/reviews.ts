@@ -6,6 +6,7 @@ import {
   createReview,
   getReviewById,
   updateReview,
+  deleteReview,
 } from '../services/reviewService.js';
 
 const router = Router();
@@ -73,12 +74,30 @@ router.patch('/:id', async (req, res, next) => {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+    if (Object.keys(parsed.data).length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
     const review = await updateReview(req.params.id, req.workspace.id, parsed.data);
     if (!review) {
       res.status(404).json({ error: 'Review not found' });
       return;
     }
     res.json(review);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/reviews/:id
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const deleted = await deleteReview(req.params.id, req.workspace.id);
+    if (!deleted) {
+      res.status(404).json({ error: 'Review not found' });
+      return;
+    }
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

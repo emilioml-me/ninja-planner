@@ -29,14 +29,6 @@ export async function getWorkspacesForUser(userId: string): Promise<Workspace[]>
   return result.rows;
 }
 
-export async function getWorkspaceById(workspaceId: string): Promise<Workspace | null> {
-  const result = await pool.query<Workspace>(
-    'SELECT id, name, clerk_org_id, plan, created_at, updated_at FROM workspaces WHERE id = $1',
-    [workspaceId],
-  );
-  return result.rows[0] ?? null;
-}
-
 export async function updateWorkspace(
   workspaceId: string,
   data: { name?: string; plan?: string },

@@ -9,17 +9,20 @@ import {
   updateTaskPosition,
   softDeleteTask,
   logTaskActivity,
-  reorderTasks,
+  reorderTaskInTransaction,
 } from '../services/taskService.js';
 
 const router = Router();
 router.use(requireWorkspace);
 
+const TASK_STATUSES = ['todo', 'in_progress', 'done', 'blocked'] as const;
+const TASK_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
+
 const createSchema = z.object({
   title:              z.string().min(1).max(500),
   description:        z.string().optional(),
-  status:             z.enum(['todo', 'in_progress', 'done', 'blocked']).optional(),
-  priority:           z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+  status:             z.enum(TASK_STATUSES).optional(),
+  priority:           z.enum(TASK_PRIORITIES).optional(),
   assignee_clerk_id:  z.string().optional(),
   due_date:           z.string().date().optional(),
   tags:               z.array(z.string()).optional(),
@@ -30,6 +33,17 @@ const updateSchema = createSchema.omit({ title: true }).extend({
   title: z.string().min(1).max(500).optional(),
 });
 
+const filterSchema = z.object({
+  status:     z.enum(TASK_STATUSES).optional(),
+  priority:   z.enum(TASK_PRIORITIES).optional(),
+  assignee:   z.string().optional(),
+  tag:        z.string().optional(),
+  due_before: z.string().date().optional(),
+  due_after:  z.string().date().optional(),
+  limit:      z.coerce.number().int().min(1).max(1000).optional(),
+  offset:     z.coerce.number().int().min(0).optional(),
+});
+
 const positionSchema = z.object({
   position: z.number().int().min(0),
 });
@@ -37,15 +51,13 @@ const positionSchema = z.object({
 // GET /api/tasks
 router.get('/', async (req, res, next) => {
   try {
-    const filters = {
-      status:     req.query.status     as string | undefined,
-      priority:   req.query.priority   as string | undefined,
-      assignee:   req.query.assignee   as string | undefined,
-      tag:        req.query.tag        as string | undefined,
-      due_before: req.query.due_before as string | undefined,
-      due_after:  req.query.due_after  as string | undefined,
-    };
-    const tasks = await getTasks(req.workspace.id, filters);
+    const parsed = filterSchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const { limit, offset, ...filters } = parsed.data;
+    const tasks = await getTasks(req.workspace.id, filters, limit, offset);
     res.json(tasks);
   } catch (err) {
     next(err);
@@ -68,12 +80,14 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// POST /api/tasks/reorder  — batch position update used by kanban drag-and-drop
+// POST /api/tasks/reorder  — batch position + status update (kanban drag-and-drop)
 const reorderSchema = z.object({
   taskId:      z.string().uuid(),
-  newStatus:   z.enum(['todo', 'in_progress', 'done', 'blocked']),
+  newStatus:   z.enum(TASK_STATUSES),
   newPosition: z.number().int().min(0),
-  resequence:  z.array(z.object({ id: z.string().uuid(), position: z.number().int().min(0) })).optional(),
+  resequence:  z.array(
+    z.object({ id: z.string().uuid(), position: z.number().int().min(0) }),
+  ).max(500).optional(),
 });
 
 router.post('/reorder', async (req, res, next) => {
@@ -85,15 +99,13 @@ router.post('/reorder', async (req, res, next) => {
     }
     const { taskId, newStatus, newPosition, resequence } = parsed.data;
 
-    // Apply batch resequence first (includes the moved task)
-    if (resequence && resequence.length > 0) {
-      await reorderTasks(resequence, req.workspace.id);
-    } else {
-      await updateTaskPosition(taskId, req.workspace.id, newPosition);
-    }
-
-    // Update status if column changed
-    const task = await updateTask(taskId, req.workspace.id, { status: newStatus });
+    const task = await reorderTaskInTransaction(
+      taskId,
+      req.workspace.id,
+      newStatus,
+      newPosition,
+      resequence,
+    );
     if (!task) {
       res.status(404).json({ error: 'Task not found' });
       return;
@@ -126,6 +138,10 @@ router.patch('/:id', async (req, res, next) => {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    if (Object.keys(parsed.data).length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
       return;
     }
     const task = await updateTask(req.params.id, req.workspace.id, parsed.data);
