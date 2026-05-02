@@ -4,7 +4,7 @@
 set -e
 
 echo "[entrypoint] Running database migrations…"
-node dist/migrate.js
+node dist/scripts/migrate.js
 
 echo "[entrypoint] Starting ninja-planner…"
 exec node dist/index.js
