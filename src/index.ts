@@ -42,8 +42,29 @@ const app = express();
 // Trust HAProxy → Nginx proxy chain
 app.set('trust proxy', 1);
 
-// Security headers
-app.use(helmet());
+// Security headers — allow Clerk proxy domain (derived from ALLOWED_ORIGIN)
+const clerkOrigin = process.env.ALLOWED_ORIGIN
+  ? `https://clerk.${new URL(process.env.ALLOWED_ORIGIN).host}`
+  : '';
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc:     ["'self'"],
+      baseUri:        ["'self'"],
+      fontSrc:        ["'self'", 'https:', 'data:'],
+      formAction:     ["'self'"],
+      frameAncestors: ["'self'"],
+      frameSrc:       ["'self'", ...(clerkOrigin ? [clerkOrigin] : [])],
+      imgSrc:         ["'self'", 'data:', 'https:'],
+      objectSrc:      ["'none'"],
+      scriptSrc:      ["'self'", "'unsafe-inline'", ...(clerkOrigin ? [clerkOrigin] : [])],
+      scriptSrcAttr:  ["'none'"],
+      connectSrc:     ["'self'", ...(clerkOrigin ? [clerkOrigin] : []), 'https://api.clerk.com'],
+      styleSrc:       ["'self'", 'https:', "'unsafe-inline'"],
+      upgradeInsecureRequests: [],
+    },
+  },
+}));
 
 // CORS locked to configured origin
 app.use(cors({
