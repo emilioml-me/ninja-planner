@@ -34,10 +34,10 @@ const pool = new Pool({
 });
 
 // Resolve migrations directory:
-//  In production: this script is at /app/dist/migrate.js → migrations at /app/migrations
-//  In dev (ts-node):              src/scripts/migrate.ts  → migrations at ./migrations
+//  In production: this script is at /app/dist/scripts/migrate.js → migrations at /app/migrations
+//  In dev (ts-node):              src/scripts/migrate.ts           → migrations at ./migrations
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_DIR = resolve(__dirname, '..', 'migrations');
+const MIGRATIONS_DIR = resolve(__dirname, '..', '..', 'migrations');
 
 async function run() {
   const client = await pool.connect();
