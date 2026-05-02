@@ -14,6 +14,7 @@ import Clients from './pages/Clients';
 import Roadmap from './pages/Roadmap';
 import Reviews from './pages/Reviews';
 import Members from './pages/Members';
+import MyTasks from './pages/MyTasks';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -34,6 +35,7 @@ function AuthenticatedApp() {
         <ErrorBoundary>
           <Switch>
             <Route path="/dashboard" component={Dashboard} />
+            <Route path="/my-tasks"  component={MyTasks} />
             <Route path="/tasks"     component={Tasks} />
             <Route path="/revenue"   component={Revenue} />
             <Route path="/clients"   component={Clients} />

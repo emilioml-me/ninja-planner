@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { format, isBefore, isToday, startOfDay } from 'date-fns';
 import { useApiClient } from '@/lib/api';
@@ -10,14 +10,21 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+  DropdownMenuSeparator, DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu';
-import { Plus, Search, X, LayoutGrid, List, MoreVertical, Pencil, Trash2, Clock, Calendar } from 'lucide-react';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from '@/components/ui/dialog';
+import {
+  Plus, Search, X, LayoutGrid, List, MoreVertical, Pencil, Trash2, Clock, Calendar,
+  CheckSquare, ChevronDown,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const COLUMNS: { id: Task['status']; title: string }[] = [
@@ -87,24 +94,32 @@ function TaskListView({
   onDelete,
   displayName,
   initials,
+  selectedIds,
+  onToggleSelect,
+  onToggleAll,
 }: {
   tasks: Task[];
   onEdit: (task: Task) => void;
   onDelete: (id: string) => void;
   displayName: (id: string | null | undefined) => string;
   initials: (id: string | null | undefined) => string;
+  selectedIds: Set<string>;
+  onToggleSelect: (id: string) => void;
+  onToggleAll: (ids: string[]) => void;
 }) {
   const now = new Date();
   const todayStart = startOfDay(now);
 
   const sorted = [...tasks].sort((a, b) => {
-    // Overdue first, then due today, then by position
     const aOverdue = a.due_date && isBefore(new Date(a.due_date + 'T23:59:59'), todayStart) && a.status !== 'done';
     const bOverdue = b.due_date && isBefore(new Date(b.due_date + 'T23:59:59'), todayStart) && b.status !== 'done';
     if (aOverdue && !bOverdue) return -1;
     if (!aOverdue && bOverdue) return 1;
     return a.position - b.position;
   });
+
+  const allSelected = sorted.length > 0 && sorted.every((t) => selectedIds.has(t.id));
+  const someSelected = sorted.some((t) => selectedIds.has(t.id));
 
   if (sorted.length === 0) {
     return (
@@ -119,6 +134,15 @@ function TaskListView({
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead className="w-10">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                onChange={() => onToggleAll(sorted.map((t) => t.id))}
+                className="rounded border-muted-foreground/30 accent-primary cursor-pointer"
+              />
+            </TableHead>
             <TableHead>Title</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Priority</TableHead>
@@ -133,12 +157,21 @@ function TaskListView({
             const isOverdue = task.due_date && task.status !== 'done' &&
               isBefore(new Date(task.due_date + 'T23:59:59'), todayStart);
             const dueToday = task.due_date && isToday(new Date(task.due_date));
+            const selected = selectedIds.has(task.id);
             return (
               <TableRow
                 key={task.id}
-                className="cursor-pointer hover:bg-muted/50"
+                className={cn('cursor-pointer hover:bg-muted/50', selected && 'bg-primary/5')}
                 onClick={() => onEdit(task)}
               >
+                <TableCell onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={() => onToggleSelect(task.id)}
+                    className="rounded border-muted-foreground/30 accent-primary cursor-pointer"
+                  />
+                </TableCell>
                 <TableCell className="font-medium max-w-64 truncate">{task.title}</TableCell>
                 <TableCell>
                   <Badge variant={STATUS_VARIANT[task.status]} className="text-xs">
@@ -209,6 +242,8 @@ function TaskListView({
   );
 }
 
+// ─── Main page ────────────────────────────────────────────────────────────────
+
 export default function Tasks() {
   const { apiRequest } = useApiClient();
   const queryClient = useQueryClient();
@@ -220,6 +255,8 @@ export default function Tasks() {
   const [search, setSearch] = useState('');
   const [priorityFilter, setPriorityFilter] = useState<Task['priority'] | 'all'>('all');
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
   const { data: tasks = [], isLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
@@ -227,6 +264,18 @@ export default function Tasks() {
   });
 
   const { members, displayName, initials } = useMembers();
+
+  // Listen for command palette "new task" event
+  const openNewTask = useCallback(() => {
+    setEditingTask(null);
+    setDefaultStatus('todo');
+    setDialogOpen(true);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener('plan-ninja:new-task', openNewTask);
+    return () => window.removeEventListener('plan-ninja:new-task', openNewTask);
+  }, [openNewTask]);
 
   const createMutation = useMutation({
     mutationFn: (data: Partial<Task> & { title: string }) =>
@@ -271,6 +320,56 @@ export default function Tasks() {
     onError: (err: Error) => toast({ title: 'Reorder failed', description: err.message, variant: 'destructive' }),
   });
 
+  // ─── Bulk actions ─────────────────────────────────────────────────────────
+
+  const bulkUpdateMutation = useMutation({
+    mutationFn: async ({ ids, update }: { ids: string[]; update: Partial<Task> }) => {
+      await Promise.all(
+        ids.map((id) => apiRequest('PATCH', `/api/tasks/${id}`, update)),
+      );
+    },
+    onSuccess: (_, { ids }) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      setSelectedIds(new Set());
+      toast({ title: `${ids.length} task${ids.length !== 1 ? 's' : ''} updated` });
+    },
+    onError: (err: Error) => toast({ title: 'Bulk update failed', description: err.message, variant: 'destructive' }),
+  });
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (ids: string[]) => {
+      await Promise.all(ids.map((id) => apiRequest('DELETE', `/api/tasks/${id}`)));
+    },
+    onSuccess: (_, ids) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      setSelectedIds(new Set());
+      setBulkDeleteConfirm(false);
+      toast({ title: `${ids.length} task${ids.length !== 1 ? 's' : ''} deleted` });
+    },
+    onError: (err: Error) => toast({ title: 'Bulk delete failed', description: err.message, variant: 'destructive' }),
+  });
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAll = (ids: string[]) => {
+    const allSelected = ids.every((id) => selectedIds.has(id));
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(ids));
+    }
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // ─── Filters ───────────────────────────────────────────────────────────────
+
   const filteredTasks = useMemo(() => {
     return tasks.filter((t) => {
       if (search && !t.title.toLowerCase().includes(search.toLowerCase())) return false;
@@ -286,6 +385,7 @@ export default function Tasks() {
   }));
 
   const hasFilters = search !== '' || priorityFilter !== 'all';
+  const selectedCount = selectedIds.size;
 
   const clearFilters = () => {
     setSearch('');
@@ -345,7 +445,7 @@ export default function Tasks() {
           {/* View toggle */}
           <div className="flex rounded-md border overflow-hidden">
             <button
-              onClick={() => setView('kanban')}
+              onClick={() => { setView('kanban'); clearSelection(); }}
               className={cn('px-2.5 py-1.5 transition-colors', view === 'kanban' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted')}
               title="Kanban view"
             >
@@ -413,9 +513,95 @@ export default function Tasks() {
             onDelete={(id) => deleteMutation.mutate(id)}
             displayName={displayName}
             initials={initials}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+            onToggleAll={toggleAll}
           />
         )}
       </div>
+
+      {/* Bulk action bar */}
+      {selectedCount > 0 && (
+        <div className="flex items-center gap-3 px-6 py-3 border-t bg-muted/50 shrink-0">
+          <div className="flex items-center gap-2">
+            <CheckSquare className="h-4 w-4 text-primary" />
+            <span className="text-sm font-medium">{selectedCount} selected</span>
+          </div>
+          <div className="flex items-center gap-2 ml-2">
+            {/* Bulk status change */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-1.5 h-8">
+                  Move to <ChevronDown className="h-3 w-3" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent>
+                <DropdownMenuLabel>Change status</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {COLUMNS.map((col) => (
+                  <DropdownMenuItem
+                    key={col.id}
+                    onClick={() => bulkUpdateMutation.mutate({
+                      ids: [...selectedIds],
+                      update: { status: col.id },
+                    })}
+                  >
+                    {col.title}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            {/* Bulk assign */}
+            {members.length > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-1.5 h-8">
+                    Assign to <ChevronDown className="h-3 w-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent>
+                  <DropdownMenuLabel>Assign member</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => bulkUpdateMutation.mutate({
+                      ids: [...selectedIds],
+                      update: { assignee_clerk_id: null },
+                    })}
+                  >
+                    Unassigned
+                  </DropdownMenuItem>
+                  {members.map((m) => (
+                    <DropdownMenuItem
+                      key={m.clerk_user_id}
+                      onClick={() => bulkUpdateMutation.mutate({
+                        ids: [...selectedIds],
+                        update: { assignee_clerk_id: m.clerk_user_id },
+                      })}
+                    >
+                      {m.display_name}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+
+            {/* Bulk delete */}
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setBulkDeleteConfirm(true)}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete
+            </Button>
+          </div>
+          <Button variant="ghost" size="sm" className="ml-auto h-8" onClick={clearSelection}>
+            <X className="h-3.5 w-3.5 mr-1" /> Clear
+          </Button>
+        </div>
+      )}
 
       <TaskFormDialog
         open={dialogOpen}
@@ -426,6 +612,28 @@ export default function Tasks() {
         isPending={createMutation.isPending || updateMutation.isPending}
         members={members}
       />
+
+      {/* Bulk delete confirm */}
+      <Dialog open={bulkDeleteConfirm} onOpenChange={setBulkDeleteConfirm}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete {selectedCount} task{selectedCount !== 1 ? 's' : ''}?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete the selected tasks. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setBulkDeleteConfirm(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => bulkDeleteMutation.mutate([...selectedIds])}
+              disabled={bulkDeleteMutation.isPending}
+            >
+              {bulkDeleteMutation.isPending ? 'Deleting…' : `Delete ${selectedCount}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

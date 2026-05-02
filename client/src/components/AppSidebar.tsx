@@ -10,6 +10,7 @@ import {
   Briefcase,
   X,
   UsersRound,
+  User,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -17,7 +18,8 @@ import { Button } from '@/components/ui/button';
 
 const NAV = [
   { href: '/dashboard', label: 'Dashboard',     icon: LayoutDashboard },
-  { href: '/tasks',     label: 'Tasks',         icon: CheckSquare },
+  { href: '/my-tasks',  label: 'My Tasks',      icon: User },
+  { href: '/tasks',     label: 'All Tasks',     icon: CheckSquare },
   { href: '/revenue',   label: 'Revenue',       icon: TrendingUp },
   { href: '/clients',   label: 'Clients',       icon: Users },
   { href: '/roadmap',   label: 'Roadmap',       icon: Map },
