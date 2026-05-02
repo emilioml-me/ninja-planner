@@ -57,9 +57,12 @@ app.use(helmet({
       frameSrc:       ["'self'", ...(clerkOrigin ? [clerkOrigin] : [])],
       imgSrc:         ["'self'", 'data:', 'https:'],
       objectSrc:      ["'none'"],
-      scriptSrc:      ["'self'", "'unsafe-inline'", ...(clerkOrigin ? [clerkOrigin] : [])],
+      scriptSrc:      ["'self'", "'unsafe-inline'", ...(clerkOrigin ? [clerkOrigin] : []), 'https://static.cloudflareinsights.com'],
       scriptSrcAttr:  ["'none'"],
-      connectSrc:     ["'self'", ...(clerkOrigin ? [clerkOrigin] : []), 'https://api.clerk.com'],
+      // Clerk creates a blob: worker for JWT polling — worker-src must allow it
+      // (without this directive, browsers fall back to script-src which lacks blob:)
+      workerSrc:      ["'self'", "blob:"],
+      connectSrc:     ["'self'", ...(clerkOrigin ? [clerkOrigin] : []), 'https://api.clerk.com', 'https://cloudflareinsights.com'],
       styleSrc:       ["'self'", 'https:', "'unsafe-inline'"],
       upgradeInsecureRequests: [],
     },
