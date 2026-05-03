@@ -38,6 +38,9 @@ import roadmapRouter      from './routes/roadmap.js';
 import reviewsRouter      from './routes/reviews.js';
 import notificationsRouter from './routes/notifications.js';
 import integrationsRouter from './routes/integrations.js';
+import goalsRouter        from './routes/goals.js';
+import sprintsRouter      from './routes/sprints.js';
+import shareRouter        from './routes/share.js';
 
 const app = express();
 
@@ -97,6 +100,9 @@ app.use('/webhooks', express.raw({ type: 'application/json' }), webhooksRouter);
 // ─── JSON body parsing for all API routes ────────────────────────────────────
 app.use(express.json());
 
+// ─── Public routes (no auth) ─────────────────────────────────────────────────
+app.use('/public', shareRouter);
+
 // ─── Protected API routes ────────────────────────────────────────────────────
 app.use('/api', requireAuth);
 
@@ -109,6 +115,8 @@ app.use('/api/roadmap',       roadmapRouter);
 app.use('/api/reviews',       reviewsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/integrations',  integrationsRouter);
+app.use('/api/goals',         goalsRouter);
+app.use('/api/sprints',       sprintsRouter);
 
 // ─── Static frontend (production) ────────────────────────────────────────────
 if (process.env.NODE_ENV === 'production') {

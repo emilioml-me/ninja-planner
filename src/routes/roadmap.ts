@@ -7,6 +7,7 @@ import {
   updateRoadmapItem,
   deleteRoadmapItem,
 } from '../services/roadmapService.js';
+import { upsertShareToken, getShareToken, revokeShareToken } from '../services/shareService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -87,6 +88,32 @@ router.delete('/:id', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// ─── Share token management ───────────────────────────────────────────────────
+
+// GET /api/roadmap/share  — get current token (null if none)
+router.get('/share', async (req, res, next) => {
+  try {
+    const st = await getShareToken(req.workspace.id, 'roadmap');
+    res.json({ token: st?.token ?? null });
+  } catch (err) { next(err); }
+});
+
+// POST /api/roadmap/share  — create or return existing token
+router.post('/share', async (req, res, next) => {
+  try {
+    const st = await upsertShareToken(req.workspace.id, 'roadmap', req.auth.userId);
+    res.json({ token: st.token });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/roadmap/share  — revoke token
+router.delete('/share', async (req, res, next) => {
+  try {
+    await revokeShareToken(req.workspace.id, 'roadmap');
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
 export default router;

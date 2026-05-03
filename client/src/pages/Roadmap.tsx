@@ -22,7 +22,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, MoreVertical, Pencil, Trash2 } from 'lucide-react';
+import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface RoadmapItem {
@@ -59,6 +59,8 @@ export default function Roadmap() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<RoadmapItem | null>(null);
   const [defaultStatus, setDefaultStatus] = useState<typeof STATUSES[number]>('idea');
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareToken, setShareToken] = useState<string | null>(null);
 
   const { data: items = [], isLoading } = useQuery<RoadmapItem[]>({
     queryKey: ['/api/roadmap'],
@@ -111,6 +113,38 @@ export default function Roadmap() {
     editing ? updateMut.mutate(d) : createMut.mutate(d);
   };
 
+  const openShare = async () => {
+    try {
+      const existing = await apiRequest<{ token: string | null }>('GET', '/api/roadmap/share');
+      setShareToken(existing.token);
+    } catch {}
+    setShareOpen(true);
+  };
+
+  const createShareLink = async () => {
+    try {
+      const { token } = await apiRequest<{ token: string }>('POST', '/api/roadmap/share');
+      setShareToken(token);
+    } catch (e: unknown) {
+      toast({ title: 'Error', description: (e as Error).message, variant: 'destructive' });
+    }
+  };
+
+  const revokeShareLink = async () => {
+    try {
+      await apiRequest('DELETE', '/api/roadmap/share');
+      setShareToken(null);
+      toast({ title: 'Share link revoked' });
+    } catch {}
+  };
+
+  const copyShareLink = () => {
+    if (!shareToken) return;
+    const url = `${window.location.origin}/r/${shareToken}`;
+    navigator.clipboard.writeText(url);
+    toast({ title: 'Link copied!' });
+  };
+
   const byStatus = (status: string) =>
     [...items.filter((i) => i.status === status)].sort((a, b) => a.priority - b.priority);
 
@@ -118,9 +152,14 @@ export default function Roadmap() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-6 py-4 border-b">
         <h1 className="text-xl font-semibold">Roadmap</h1>
-        <Button size="sm" className="gap-2" onClick={() => openCreate()}>
-          <Plus className="h-4 w-4" /> Add Item
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" className="gap-2" onClick={openShare}>
+            <Share2 className="h-4 w-4" /> Share
+          </Button>
+          <Button size="sm" className="gap-2" onClick={() => openCreate()}>
+            <Plus className="h-4 w-4" /> Add Item
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -254,6 +293,50 @@ export default function Roadmap() {
               </DialogFooter>
             </form>
           </Form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Share dialog */}
+      <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Share Public Roadmap</DialogTitle>
+            <DialogDescription>
+              Anyone with the link can view your roadmap (read-only, no login required).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {shareToken ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <Input
+                    readOnly
+                    value={`${window.location.origin}/r/${shareToken}`}
+                    className="text-xs font-mono"
+                  />
+                  <Button size="icon" variant="outline" onClick={copyShareLink} title="Copy link">
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">This link shows all non-archived roadmap items.</p>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">No public link yet. Create one to share your roadmap.</p>
+            )}
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            {shareToken ? (
+              <Button variant="destructive" size="sm" className="gap-2 mr-auto" onClick={revokeShareLink}>
+                <Trash className="h-3.5 w-3.5" /> Revoke link
+              </Button>
+            ) : null}
+            {!shareToken && (
+              <Button onClick={createShareLink} className="gap-2">
+                <Share2 className="h-4 w-4" /> Generate link
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => setShareOpen(false)}>Close</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

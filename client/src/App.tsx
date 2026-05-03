@@ -15,7 +15,10 @@ import Reviews from './pages/Reviews';
 import Members from './pages/Members';
 import MyTasks from './pages/MyTasks';
 import Workload from './pages/Workload';
+import Goals from './pages/Goals';
+import Sprints from './pages/Sprints';
 import Integrations from './pages/Integrations';
+import PublicRoadmap from './pages/PublicRoadmap';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -42,8 +45,10 @@ function AuthenticatedApp() {
             <Route path="/roadmap"       component={Roadmap} />
             <Route path="/reviews"   component={Reviews} />
             <Route path="/workload"      component={Workload} />
-            <Route path="/members"      component={Members} />
-            <Route path="/integrations" component={Integrations} />
+            <Route path="/goals"         component={Goals} />
+            <Route path="/sprints"       component={Sprints} />
+            <Route path="/members"       component={Members} />
+            <Route path="/integrations"  component={Integrations} />
             <Route component={() => <Redirect to="/dashboard" />} />
           </Switch>
         </ErrorBoundary>
@@ -57,6 +62,10 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <Switch>
         <Route path="/" component={Landing} />
+        {/* Public share pages — no auth required */}
+        <Route path="/r/:token">
+          {(params) => <PublicRoadmap token={params.token} />}
+        </Route>
         <Route component={AuthenticatedApp} />
       </Switch>
       <Toaster />

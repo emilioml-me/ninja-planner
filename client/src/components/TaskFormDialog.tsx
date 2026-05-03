@@ -67,6 +67,8 @@ export interface Task {
   tags: string[];
   position: number;
   assignee_clerk_id: string | null;
+  recurrence_rule?: string | null;
+  sprint_id?: string | null;
 }
 
 const taskFormSchema = z.object({
@@ -77,6 +79,7 @@ const taskFormSchema = z.object({
   due_date: z.string().optional(),
   tags: z.string().optional(),
   assignee_clerk_id: z.string().optional(),
+  recurrence_rule: z.enum(['daily', 'weekly', 'biweekly', 'monthly', '']).optional(),
 });
 
 type TaskFormData = z.infer<typeof taskFormSchema>;
@@ -217,6 +220,7 @@ export function TaskFormDialog({
       due_date: '',
       tags: '',
       assignee_clerk_id: '',
+      recurrence_rule: '',
     },
   });
 
@@ -230,6 +234,7 @@ export function TaskFormDialog({
         due_date: task?.due_date ? task.due_date.substring(0, 10) : '',
         tags: task?.tags?.join(', ') ?? '',
         assignee_clerk_id: task?.assignee_clerk_id ?? '',
+        recurrence_rule: (task?.recurrence_rule ?? '') as '' | 'daily' | 'weekly' | 'biweekly' | 'monthly',
       });
     }
   }, [open, task, defaultStatus, form]);
@@ -246,6 +251,7 @@ export function TaskFormDialog({
       due_date: data.due_date ? data.due_date : null,
       tags,
       assignee_clerk_id: data.assignee_clerk_id || null,
+      recurrence_rule: data.recurrence_rule || null,
     });
   };
 
@@ -359,6 +365,23 @@ export function TaskFormDialog({
                       </FormItem>
                     )} />
                   )}
+
+                  <FormField control={form.control} name="recurrence_rule" render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Recurrence</FormLabel>
+                      <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                        <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
+                        <SelectContent>
+                          <SelectItem value="">None</SelectItem>
+                          <SelectItem value="daily">Daily</SelectItem>
+                          <SelectItem value="weekly">Weekly</SelectItem>
+                          <SelectItem value="biweekly">Every 2 weeks</SelectItem>
+                          <SelectItem value="monthly">Monthly</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )} />
 
                   <DialogFooter>
                     <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
@@ -498,6 +521,23 @@ export function TaskFormDialog({
                 </FormItem>
               )} />
             )}
+
+            <FormField control={form.control} name="recurrence_rule" render={({ field }) => (
+              <FormItem>
+                <FormLabel>Recurrence</FormLabel>
+                <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                  <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
+                  <SelectContent>
+                    <SelectItem value="">None</SelectItem>
+                    <SelectItem value="daily">Daily</SelectItem>
+                    <SelectItem value="weekly">Weekly</SelectItem>
+                    <SelectItem value="biweekly">Every 2 weeks</SelectItem>
+                    <SelectItem value="monthly">Monthly</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )} />
 
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>

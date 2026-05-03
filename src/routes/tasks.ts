@@ -10,6 +10,7 @@ import {
   softDeleteTask,
   logTaskActivity,
   reorderTaskInTransaction,
+  spawnRecurringTask,
 } from '../services/taskService.js';
 import { getWorkload } from '../services/commentService.js';
 import { createNotification } from '../services/notificationService.js';
@@ -20,6 +21,8 @@ router.use(requireWorkspace);
 const TASK_STATUSES = ['todo', 'in_progress', 'done', 'blocked'] as const;
 const TASK_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
 
+const RECURRENCE_RULES = ['daily', 'weekly', 'biweekly', 'monthly'] as const;
+
 const createSchema = z.object({
   title:              z.string().min(1).max(500),
   description:        z.string().optional(),
@@ -29,6 +32,8 @@ const createSchema = z.object({
   due_date:           z.string().date().optional(),
   tags:               z.array(z.string()).optional(),
   position:           z.number().int().optional(),
+  sprint_id:          z.string().uuid().nullable().optional(),
+  recurrence_rule:    z.enum(RECURRENCE_RULES).nullable().optional(),
 });
 
 const updateSchema = createSchema.omit({ title: true }).extend({
@@ -187,6 +192,11 @@ router.patch('/:id', async (req, res, next) => {
         title: `You were assigned "${task.title}"`,
         link: '/tasks',
       }).catch(() => {});
+    }
+
+    // Spawn recurring copy when task is completed
+    if (parsed.data.status === 'done' && task.recurrence_rule) {
+      spawnRecurringTask(task).catch(() => {});
     }
 
     res.json(task);

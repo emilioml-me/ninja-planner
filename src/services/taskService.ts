@@ -12,6 +12,8 @@ export interface Task {
   tags: string[];
   position: number;
   created_by: string;
+  sprint_id: string | null;
+  recurrence_rule: string | null;
   deleted_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -89,13 +91,15 @@ export async function createTask(
     due_date?: string;
     tags?: string[];
     position?: number;
+    sprint_id?: string | null;
+    recurrence_rule?: string | null;
   },
   createdBy: string,
 ): Promise<Task> {
   const result = await pool.query<Task>(
     `INSERT INTO tasks
-       (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, sprint_id, recurrence_rule)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [
       workspaceId,
@@ -108,6 +112,8 @@ export async function createTask(
       data.tags ?? [],
       data.position ?? 0,
       createdBy,
+      data.sprint_id ?? null,
+      data.recurrence_rule ?? null,
     ],
   );
   return result.rows[0];
@@ -134,7 +140,7 @@ export async function getTaskById(
   return { task: taskResult.rows[0], activity: activityResult.rows };
 }
 
-const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'tags']);
+const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'tags', 'sprint_id', 'recurrence_rule']);
 
 export async function updateTask(
   taskId: string,
@@ -238,5 +244,41 @@ export async function logTaskActivity(
   await pool.query(
     'INSERT INTO task_activity (task_id, actor_clerk_id, action, payload) VALUES ($1, $2, $3, $4)',
     [taskId, actorId, action, payload ?? null],
+  );
+}
+
+const RECURRENCE_DAYS: Record<string, number> = {
+  daily: 1, weekly: 7, biweekly: 14, monthly: 30,
+};
+
+/**
+ * Spawns a fresh copy of a recurring task when the original is completed.
+ * The new task's due_date is bumped by the recurrence interval from today
+ * (or from the original due_date if it's in the future).
+ */
+export async function spawnRecurringTask(task: Task): Promise<Task> {
+  const days = RECURRENCE_DAYS[task.recurrence_rule!] ?? 7;
+  const base = task.due_date ? new Date(task.due_date) : new Date();
+  // If the original due_date has already passed, bump from today instead
+  if (base < new Date()) {
+    base.setTime(Date.now());
+  }
+  base.setDate(base.getDate() + days);
+  const newDueDate = base.toISOString().split('T')[0];
+
+  return createTask(
+    task.workspace_id,
+    {
+      title:             task.title,
+      description:       task.description ?? undefined,
+      status:            'todo',
+      priority:          task.priority,
+      assignee_clerk_id: task.assignee_clerk_id ?? undefined,
+      due_date:          newDueDate,
+      tags:              task.tags,
+      position:          0,
+      recurrence_rule:   task.recurrence_rule,
+    },
+    task.created_by,
   );
 }

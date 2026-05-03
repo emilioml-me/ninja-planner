@@ -23,8 +23,9 @@ import {
 } from '@/components/ui/dialog';
 import {
   Plus, Search, X, LayoutGrid, List, MoreVertical, Pencil, Trash2, Clock, Calendar,
-  CheckSquare, ChevronDown,
+  CheckSquare, ChevronDown, Download,
 } from 'lucide-react';
+import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 
 const COLUMNS: { id: Task['status']; title: string }[] = [
@@ -459,6 +460,23 @@ export default function Tasks() {
               <List className="h-4 w-4" />
             </button>
           </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-2"
+            onClick={() => downloadCsv('tasks.csv', tasks.map((t) => ({
+              title: t.title,
+              status: t.status,
+              priority: t.priority,
+              assignee: t.assignee_clerk_id ?? '',
+              due_date: t.due_date ?? '',
+              tags: t.tags.join(', '),
+              created_at: String(t.created_at),
+            })))}
+          >
+            <Download className="h-4 w-4" />
+            <span className="hidden sm:inline">Export</span>
+          </Button>
           <Button
             size="sm"
             className="gap-2"

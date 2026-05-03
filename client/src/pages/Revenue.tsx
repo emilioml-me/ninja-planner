@@ -28,7 +28,8 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Plus, MoreVertical, Pencil, Trash2, TrendingUp } from 'lucide-react';
+import { Plus, MoreVertical, Pencil, Trash2, TrendingUp, Download } from 'lucide-react';
+import { downloadCsv } from '@/lib/export-csv';
 
 // ─── Revenue bar chart (no external deps) ────────────────────────────────────
 
@@ -202,9 +203,22 @@ export default function Revenue() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-6 py-4 border-b">
         <h1 className="text-xl font-semibold">Revenue</h1>
-        <Button size="sm" className="gap-2" onClick={openCreate}>
-          <Plus className="h-4 w-4" /> Add Target
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" className="gap-2"
+            onClick={() => downloadCsv('revenue.csv', targets.map((t) => ({
+              period_type: t.period_type,
+              period_start: t.period_start,
+              target: t.target_amount,
+              actual: t.actual_amount,
+              notes: t.notes ?? '',
+            })))}>
+            <Download className="h-4 w-4" />
+            <span className="hidden sm:inline">Export</span>
+          </Button>
+          <Button size="sm" className="gap-2" onClick={openCreate}>
+            <Plus className="h-4 w-4" /> Add Target
+          </Button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
