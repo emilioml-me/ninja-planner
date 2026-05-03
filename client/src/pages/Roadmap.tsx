@@ -22,7 +22,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash } from 'lucide-react';
+import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface RoadmapItem {
@@ -32,6 +32,7 @@ interface RoadmapItem {
   phase: string | null;
   status: string;
   priority: number;
+  external_ref: string | null;
 }
 
 const STATUSES = ['idea', 'building', 'live', 'archived'] as const;
@@ -42,8 +43,22 @@ const formSchema = z.object({
   phase: z.string().max(100).optional(),
   status: z.enum(STATUSES),
   priority: z.coerce.number().int().min(0),
+  external_ref: z.string().url('Must be a valid URL').max(500).or(z.literal('')).optional(),
 });
 type FormData = z.infer<typeof formSchema>;
+
+function externalRefLabel(url: string): string {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    if (host.includes('github.com')) return 'GitHub';
+    if (host.includes('linear.app')) return 'Linear';
+    if (host.includes('jira')) return 'Jira';
+    if (host.includes('notion.so')) return 'Notion';
+    return host;
+  } catch {
+    return url;
+  }
+}
 
 const statusConfig: Record<string, { label: string; color: string; badge: 'default' | 'secondary' | 'outline' | 'destructive' }> = {
   idea:     { label: 'Idea',     color: 'border-purple-200 bg-purple-50 dark:border-purple-900 dark:bg-purple-950/30', badge: 'outline' },
@@ -69,13 +84,13 @@ export default function Roadmap() {
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
-    defaultValues: { title: '', description: '', phase: '', status: 'idea', priority: 0 },
+    defaultValues: { title: '', description: '', phase: '', status: 'idea', priority: 0, external_ref: '' },
   });
 
   const openCreate = (status: typeof STATUSES[number] = 'idea') => {
     setEditing(null);
     setDefaultStatus(status);
-    form.reset({ title: '', description: '', phase: '', status, priority: 0 });
+    form.reset({ title: '', description: '', phase: '', status, priority: 0, external_ref: '' });
     setOpen(true);
   };
 
@@ -87,6 +102,7 @@ export default function Roadmap() {
       phase: item.phase ?? '',
       status: item.status as typeof STATUSES[number],
       priority: item.priority,
+      external_ref: item.external_ref ?? '',
     });
     setOpen(true);
   };
@@ -212,9 +228,23 @@ export default function Roadmap() {
                           {item.description && (
                             <p className="text-xs text-muted-foreground line-clamp-2">{item.description}</p>
                           )}
-                          {item.phase && (
-                            <Badge variant="outline" className="text-xs">{item.phase}</Badge>
-                          )}
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {item.phase && (
+                              <Badge variant="outline" className="text-xs">{item.phase}</Badge>
+                            )}
+                            {item.external_ref && (
+                              <a
+                                href={item.external_ref}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                                {externalRefLabel(item.external_ref)}
+                              </a>
+                            )}
+                          </div>
                         </CardContent>
                       </Card>
                     ))}
@@ -282,6 +312,13 @@ export default function Roadmap() {
                 <FormItem>
                   <FormLabel>Priority (lower = higher priority)</FormLabel>
                   <FormControl><Input type="number" min="0" {...field} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={form.control} name="external_ref" render={({ field }) => (
+                <FormItem>
+                  <FormLabel>External Link <span className="text-muted-foreground font-normal">(optional)</span></FormLabel>
+                  <FormControl><Input placeholder="https://github.com/org/repo/issues/1" {...field} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )} />

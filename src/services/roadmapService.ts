@@ -8,6 +8,7 @@ export interface RoadmapItem {
   phase: string | null;
   status: string;
   priority: number;
+  external_ref: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -38,11 +39,12 @@ export async function createRoadmapItem(
     phase?: string;
     status?: string;
     priority?: number;
+    external_ref?: string;
   },
 ): Promise<RoadmapItem> {
   const result = await pool.query<RoadmapItem>(
-    `INSERT INTO roadmap_items (workspace_id, title, description, phase, status, priority)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO roadmap_items (workspace_id, title, description, phase, status, priority, external_ref)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
     [
       workspaceId,
@@ -51,17 +53,18 @@ export async function createRoadmapItem(
       data.phase ?? null,
       data.status ?? 'idea',
       data.priority ?? 0,
+      data.external_ref ?? null,
     ],
   );
   return result.rows[0];
 }
 
-const ROADMAP_UPDATABLE_COLUMNS = new Set(['title', 'description', 'phase', 'status', 'priority']);
+const ROADMAP_UPDATABLE_COLUMNS = new Set(['title', 'description', 'phase', 'status', 'priority', 'external_ref']);
 
 export async function updateRoadmapItem(
   id: string,
   workspaceId: string,
-  data: Partial<Pick<RoadmapItem, 'title' | 'description' | 'phase' | 'status' | 'priority'>>,
+  data: Partial<Pick<RoadmapItem, 'title' | 'description' | 'phase' | 'status' | 'priority' | 'external_ref'>>,
 ): Promise<RoadmapItem | null> {
   const fields: string[] = [];
   const values: unknown[] = [];

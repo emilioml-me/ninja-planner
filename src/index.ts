@@ -41,6 +41,7 @@ import integrationsRouter from './routes/integrations.js';
 import goalsRouter        from './routes/goals.js';
 import sprintsRouter      from './routes/sprints.js';
 import shareRouter        from './routes/share.js';
+import webhookEndpointsRouter from './routes/webhook-endpoints.js';
 
 const app = express();
 
@@ -117,6 +118,7 @@ app.use('/api/notifications', notificationsRouter);
 app.use('/api/integrations',  integrationsRouter);
 app.use('/api/goals',         goalsRouter);
 app.use('/api/sprints',       sprintsRouter);
+app.use('/api/webhooks',      webhookEndpointsRouter);
 
 // ─── Static frontend (production) ────────────────────────────────────────────
 if (process.env.NODE_ENV === 'production') {

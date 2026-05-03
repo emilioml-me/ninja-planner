@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { fetchAllSummaries, getIntegrationsStatus } from '../integrations/index.js';
+import { fetchCrmDeals } from '../integrations/crm.js';
+import { upsertActualRevenue } from '../services/revenueService.js';
 import type { IntegrationsSummary } from '../integrations/types.js';
 
 const router = Router();
@@ -66,6 +68,44 @@ router.get('/summary', requireWorkspace, async (req, res, next) => {
 
     res.setHeader('X-Cache', 'MISS');
     res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/integrations/sync-revenue
+ * Pulls closed_won deals from crm-ninja and upserts actual_amount per month.
+ * Returns a summary of what was synced.
+ */
+router.post('/sync-revenue', requireWorkspace, async (req, res, next) => {
+  try {
+    const result = await fetchCrmDeals('closed_won');
+    if (!result.configured) {
+      res.status(503).json({ error: 'CRM integration is not configured' });
+      return;
+    }
+    if (!result.data) {
+      res.status(502).json({ error: result.error ?? 'CRM fetch failed' });
+      return;
+    }
+
+    // Group deal values by first-of-month
+    const byMonth = new Map<string, number>();
+    for (const deal of result.data.deals) {
+      if (!deal.closed_at) continue;
+      const periodStart = deal.closed_at.slice(0, 7) + '-01'; // YYYY-MM-01
+      byMonth.set(periodStart, (byMonth.get(periodStart) ?? 0) + deal.value);
+    }
+
+    // Upsert each month
+    await Promise.all(
+      Array.from(byMonth.entries()).map(([periodStart, amount]) =>
+        upsertActualRevenue(req.workspace.id, periodStart, amount),
+      ),
+    );
+
+    res.json({ synced: byMonth.size, periods: Object.fromEntries(byMonth) });
   } catch (err) {
     next(err);
   }

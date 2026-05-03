@@ -20,6 +20,7 @@ const createSchema = z.object({
   phase:        z.string().max(100).optional(),
   status:       z.enum(STATUSES).optional(),
   priority:     z.number().int().min(0).optional(),
+  external_ref: z.string().url().max(500).nullable().optional(),
 });
 
 const updateSchema = createSchema.partial();

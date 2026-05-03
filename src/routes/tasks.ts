@@ -14,6 +14,7 @@ import {
 } from '../services/taskService.js';
 import { getWorkload } from '../services/commentService.js';
 import { createNotification } from '../services/notificationService.js';
+import { fireWebhooks } from '../services/webhookService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -102,6 +103,8 @@ router.post('/', async (req, res, next) => {
         link: '/tasks',
       }).catch(() => {});
     }
+
+    fireWebhooks(req.workspace.id, 'task.created', { task });
 
     res.status(201).json(task);
   } catch (err) {
@@ -199,6 +202,13 @@ router.patch('/:id', async (req, res, next) => {
       spawnRecurringTask(task).catch(() => {});
     }
 
+    // Fire webhooks
+    if (parsed.data.status === 'done') {
+      fireWebhooks(req.workspace.id, 'task.completed', { task });
+    } else {
+      fireWebhooks(req.workspace.id, 'task.updated', { task });
+    }
+
     res.json(task);
   } catch (err) {
     next(err);
@@ -233,6 +243,7 @@ router.delete('/:id', async (req, res, next) => {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
+    fireWebhooks(req.workspace.id, 'task.deleted', { taskId: req.params.id });
     res.status(204).send();
   } catch (err) {
     next(err);

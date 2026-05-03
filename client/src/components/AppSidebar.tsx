@@ -14,6 +14,7 @@ import {
   BarChart2,
   Target,
   Zap,
+  Webhook,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -31,6 +32,7 @@ const NAV = [
   { href: '/workload',     label: 'Workload',      icon: BarChart2 },
   { href: '/members',      label: 'Team',          icon: UsersRound },
   { href: '/integrations', label: 'Integrations',  icon: Plug },
+  { href: '/webhooks',     label: 'Webhooks',       icon: Webhook },
 ];
 
 interface AppSidebarProps {

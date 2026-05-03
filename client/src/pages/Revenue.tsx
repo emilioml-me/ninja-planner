@@ -28,7 +28,8 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Plus, MoreVertical, Pencil, Trash2, TrendingUp, Download } from 'lucide-react';
+import { Plus, MoreVertical, Pencil, Trash2, TrendingUp, Download, RefreshCw } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { downloadCsv } from '@/lib/export-csv';
 
 // ─── Revenue bar chart (no external deps) ────────────────────────────────────
@@ -185,6 +186,15 @@ export default function Revenue() {
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
+  const syncCrmMut = useMutation({
+    mutationFn: () => apiRequest<{ synced: number }>('POST', '/api/integrations/sync-revenue'),
+    onSuccess: (d) => {
+      qc.invalidateQueries({ queryKey: ['/api/revenue'] });
+      toast({ title: `CRM sync complete`, description: `${d.synced} period${d.synced !== 1 ? 's' : ''} updated` });
+    },
+    onError: (e: Error) => toast({ title: 'Sync failed', description: e.message, variant: 'destructive' }),
+  });
+
   const totalTarget = targets.reduce((s, t) => s + Number(t.target_amount), 0);
   const totalActual = targets.reduce((s, t) => s + Number(t.actual_amount), 0);
   const avgPct = targets.length ? Math.round(targets.reduce((s, t) => s + pct(t.actual_amount, t.target_amount), 0) / targets.length) : 0;
@@ -214,6 +224,17 @@ export default function Revenue() {
             })))}>
             <Download className="h-4 w-4" />
             <span className="hidden sm:inline">Export</span>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-2"
+            onClick={() => syncCrmMut.mutate()}
+            disabled={syncCrmMut.isPending}
+            title="Pull closed deals from CRM and update actual revenue"
+          >
+            <RefreshCw className={cn('h-4 w-4', syncCrmMut.isPending && 'animate-spin')} />
+            <span className="hidden sm:inline">Sync CRM</span>
           </Button>
           <Button size="sm" className="gap-2" onClick={openCreate}>
             <Plus className="h-4 w-4" /> Add Target

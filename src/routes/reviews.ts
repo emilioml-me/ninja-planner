@@ -9,6 +9,7 @@ import {
   deleteReview,
 } from '../services/reviewService.js';
 import { sendSlackMessage } from '../lib/slack.js';
+import { fireWebhooks } from '../services/webhookService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -50,6 +51,8 @@ router.post('/', async (req, res, next) => {
       (review.wins     ? `*Wins:* ${review.wins.slice(0, 200)}\n`     : '') +
       (review.blockers ? `*Blockers:* ${review.blockers.slice(0, 200)}` : ''),
     );
+
+    fireWebhooks(req.workspace.id, 'review.submitted', { review });
 
     res.status(201).json(review);
   } catch (err) {

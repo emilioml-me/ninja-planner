@@ -70,6 +70,25 @@ export async function updateRevenue(
   return result.rows[0] ?? null;
 }
 
+/**
+ * Upsert actual_amount for a monthly period.
+ * Creates the row with target_amount = 0 if it doesn't exist yet.
+ * Idempotent: sets actual_amount to the provided value (replaces, does not add).
+ */
+export async function upsertActualRevenue(
+  workspaceId: string,
+  periodStart: string,   // YYYY-MM-DD (first of month)
+  actualAmount: number,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO revenue_targets (workspace_id, period_type, period_start, target_amount, actual_amount, notes)
+     VALUES ($1, 'monthly', $2, 0, $3, 'synced from CRM')
+     ON CONFLICT (workspace_id, period_type, period_start)
+     DO UPDATE SET actual_amount = $3, notes = COALESCE(revenue_targets.notes, 'synced from CRM')`,
+    [workspaceId, periodStart, actualAmount],
+  );
+}
+
 export async function deleteRevenue(id: string, workspaceId: string): Promise<boolean> {
   const result = await pool.query(
     'DELETE FROM revenue_targets WHERE id = $1 AND workspace_id = $2',

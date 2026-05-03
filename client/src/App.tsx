@@ -18,6 +18,7 @@ import Workload from './pages/Workload';
 import Goals from './pages/Goals';
 import Sprints from './pages/Sprints';
 import Integrations from './pages/Integrations';
+import Webhooks from './pages/Webhooks';
 import PublicRoadmap from './pages/PublicRoadmap';
 
 function AuthenticatedApp() {
@@ -49,6 +50,7 @@ function AuthenticatedApp() {
             <Route path="/sprints"       component={Sprints} />
             <Route path="/members"       component={Members} />
             <Route path="/integrations"  component={Integrations} />
+            <Route path="/webhooks"      component={Webhooks} />
             <Route component={() => <Redirect to="/dashboard" />} />
           </Switch>
         </ErrorBoundary>

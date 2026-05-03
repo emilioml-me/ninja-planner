@@ -17,6 +17,20 @@ export interface CrmSummary {
   topClients: { name: string; mrr: number; stage: string }[];
 }
 
+export interface CrmDeal {
+  id: string;
+  name: string;
+  value: number;
+  currency: string;
+  stage: string;         // e.g. "closed_won", "proposal", "negotiation"
+  client_name: string;
+  closed_at: string | null;  // ISO date string
+}
+
+export interface CrmDealsResult {
+  deals: CrmDeal[];
+}
+
 // ─── payment-ninja ────────────────────────────────────────────────────────────
 export interface PaymentSummary {
   currentMonthRevenue: number;
