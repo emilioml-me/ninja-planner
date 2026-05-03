@@ -372,8 +372,14 @@ export default function Tasks() {
   // ─── Filters ───────────────────────────────────────────────────────────────
 
   const filteredTasks = useMemo(() => {
+    const q = search.toLowerCase().trim();
     return tasks.filter((t) => {
-      if (search && !t.title.toLowerCase().includes(search.toLowerCase())) return false;
+      if (q) {
+        const inTitle = t.title.toLowerCase().includes(q);
+        const inDesc  = t.description?.toLowerCase().includes(q) ?? false;
+        const inTags  = t.tags.some((tag) => tag.toLowerCase().includes(q));
+        if (!inTitle && !inDesc && !inTags) return false;
+      }
       if (priorityFilter !== 'all' && t.priority !== priorityFilter) return false;
       return true;
     });

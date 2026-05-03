@@ -3,7 +3,7 @@ import { useLocation } from 'wouter';
 import { useQueryClient } from '@tanstack/react-query';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Search, LayoutDashboard, CheckSquare, TrendingUp, Users, Map, ClipboardList, UsersRound, User, Plus, ArrowRight } from 'lucide-react';
+import { Search, LayoutDashboard, CheckSquare, TrendingUp, Map, ClipboardList, UsersRound, User, Plus, ArrowRight, Target, Zap, BarChart2, Plug, Webhook } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Task } from '@/components/TaskFormDialog';
 
@@ -18,14 +18,18 @@ interface CommandItem {
 }
 
 const NAV_ITEMS = [
-  { href: '/dashboard', label: 'Dashboard',     icon: LayoutDashboard },
-  { href: '/my-tasks',  label: 'My Tasks',      icon: User },
-  { href: '/tasks',     label: 'All Tasks',     icon: CheckSquare },
-  { href: '/revenue',   label: 'Revenue',       icon: TrendingUp },
-  { href: '/clients',   label: 'Clients',       icon: Users },
-  { href: '/roadmap',   label: 'Roadmap',       icon: Map },
-  { href: '/reviews',   label: 'Weekly Review', icon: ClipboardList },
-  { href: '/members',   label: 'Team',          icon: UsersRound },
+  { href: '/dashboard',    label: 'Dashboard',     icon: LayoutDashboard },
+  { href: '/my-tasks',     label: 'My Tasks',      icon: User },
+  { href: '/tasks',        label: 'All Tasks',     icon: CheckSquare },
+  { href: '/revenue',      label: 'Revenue',       icon: TrendingUp },
+  { href: '/roadmap',      label: 'Roadmap',       icon: Map },
+  { href: '/reviews',      label: 'Weekly Review', icon: ClipboardList },
+  { href: '/goals',        label: 'Goals',         icon: Target },
+  { href: '/sprints',      label: 'Sprints',       icon: Zap },
+  { href: '/workload',     label: 'Workload',      icon: BarChart2 },
+  { href: '/members',      label: 'Team',          icon: UsersRound },
+  { href: '/integrations', label: 'Integrations',  icon: Plug },
+  { href: '/webhooks',     label: 'Webhooks',      icon: Webhook },
 ];
 
 interface CommandPaletteProps {

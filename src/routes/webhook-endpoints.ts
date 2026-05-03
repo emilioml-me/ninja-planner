@@ -12,17 +12,49 @@ import {
 const router = Router();
 router.use(requireWorkspace);
 
+// ─── SSRF protection ──────────────────────────────────────────────────────────
+// Reject URLs that would cause the server to call itself or internal services.
+
+const PRIVATE_IP_RE = /^(
+  127\.\d+\.\d+\.\d+       | # 127.0.0.0/8 loopback
+  10\.\d+\.\d+\.\d+        | # 10.0.0.0/8  RFC-1918
+  172\.(1[6-9]|2\d|3[01])\.\d+\.\d+ | # 172.16-31.x  RFC-1918
+  192\.168\.\d+\.\d+       | # 192.168.0.0/16 RFC-1918
+  169\.254\.\d+\.\d+       | # 169.254.0.0/16 link-local
+  ::1$                     | # IPv6 loopback
+  fd[0-9a-f]{2}:           | # IPv6 ULA fc00::/7
+  0\.0\.0\.0
+)$/xi;
+
+const PRIVATE_HOST_RE = /^(localhost|.*\.local|.*\.internal|.*\.lan)$/i;
+
+function isSafeWebhookUrl(raw: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(raw);
+    if (protocol !== 'https:' && protocol !== 'http:') return false;
+    if (PRIVATE_HOST_RE.test(hostname)) return false;
+    if (PRIVATE_IP_RE.test(hostname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const safeUrl = z.string().url().max(2048).refine(isSafeWebhookUrl, {
+  message: 'URL must not point to a private or internal address',
+});
+
 const VALID_EVENTS = [
   'task.created', 'task.updated', 'task.completed', 'task.deleted', 'review.submitted',
 ] as const;
 
 const createSchema = z.object({
-  url:    z.string().url().max(2048),
+  url:    safeUrl,
   events: z.array(z.enum(VALID_EVENTS)).default([]),
 });
 
 const updateSchema = z.object({
-  url:    z.string().url().max(2048).optional(),
+  url:    safeUrl.optional(),
   events: z.array(z.enum(VALID_EVENTS)).optional(),
   active: z.boolean().optional(),
 });

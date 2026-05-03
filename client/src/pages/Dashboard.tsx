@@ -28,6 +28,9 @@ import {
   Users,
   HeadphonesIcon,
   CalendarDays,
+  Zap,
+  Circle,
+  CheckCircle2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -62,6 +65,24 @@ interface WeeklyReview {
   wins: string | null;
   focus_next: string | null;
   health_score: number | null;
+}
+
+interface Goal {
+  id: string;
+  title: string;
+  status: string;
+  total_tasks: number;
+  done_tasks: number;
+}
+
+interface Sprint {
+  id: string;
+  name: string;
+  status: string;
+  start_date: string | null;
+  end_date: string | null;
+  total_tasks: number;
+  done_tasks: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -144,6 +165,16 @@ export default function Dashboard() {
     queryFn: () => apiRequest<WeeklyReview[]>('GET', '/api/reviews'),
   });
 
+  const { data: goals = [] } = useQuery<Goal[]>({
+    queryKey: ['/api/goals'],
+    queryFn: () => apiRequest<Goal[]>('GET', '/api/goals'),
+  });
+
+  const { data: sprints = [] } = useQuery<Sprint[]>({
+    queryKey: ['/api/sprints'],
+    queryFn: () => apiRequest<Sprint[]>('GET', '/api/sprints'),
+  });
+
   // ── Derived: tasks ──────────────────────────────────────────────────────────
 
   const now = new Date();
@@ -179,6 +210,20 @@ export default function Dashboard() {
 
   const lastReview = [...reviews]
     .sort((a, b) => new Date(b.week_start).getTime() - new Date(a.week_start).getTime())[0] ?? null;
+
+  // ── Derived: goals ──────────────────────────────────────────────────────────
+
+  const activeGoals = goals.filter((g) => g.status === 'active');
+
+  // ── Derived: active sprint ──────────────────────────────────────────────────
+
+  const activeSprint = sprints.find((s) => s.status === 'active') ?? null;
+  const sprintPct = activeSprint && activeSprint.total_tasks > 0
+    ? Math.round((activeSprint.done_tasks / activeSprint.total_tasks) * 100)
+    : 0;
+  const sprintDaysLeft = activeSprint?.end_date
+    ? Math.max(0, Math.ceil((new Date(activeSprint.end_date).getTime() - now.getTime()) / 86_400_000))
+    : null;
 
   const isLoading = tLoading || rLoading || rmLoading || rvLoading;
 
@@ -483,6 +528,101 @@ export default function Dashboard() {
             </Link>
           </CardContent>
         </Card>
+
+        {/* ── Goals + Sprint row ───────────────────────────────────────── */}
+        {(activeGoals.length > 0 || activeSprint) && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+            {/* Active Goals */}
+            {activeGoals.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <Target className="h-4 w-4 text-primary" />
+                    Active Goals
+                    <Badge variant="secondary" className="ml-auto text-xs">{activeGoals.length}</Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {activeGoals.slice(0, 4).map((goal) => {
+                    const pct = goal.total_tasks > 0
+                      ? Math.round((goal.done_tasks / goal.total_tasks) * 100)
+                      : 0;
+                    return (
+                      <div key={goal.id} className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm truncate">{goal.title}</span>
+                          <span className="text-xs text-muted-foreground shrink-0">
+                            {goal.done_tasks}/{goal.total_tasks}
+                          </span>
+                        </div>
+                        <Progress value={pct} className="h-1.5" />
+                      </div>
+                    );
+                  })}
+                  {activeGoals.length > 4 && (
+                    <p className="text-xs text-muted-foreground">+{activeGoals.length - 4} more</p>
+                  )}
+                  <Separator className="mt-2 mb-1" />
+                  <Link href="/goals">
+                    <a className="text-xs text-primary hover:underline flex items-center gap-1">
+                      View all goals <ArrowRight className="h-3 w-3" />
+                    </a>
+                  </Link>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Active Sprint */}
+            {activeSprint && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <Zap className="h-4 w-4 text-primary" />
+                    Active Sprint
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-medium text-sm">{activeSprint.name}</p>
+                    {sprintDaysLeft !== null && (
+                      <span className={cn(
+                        'text-xs shrink-0 font-medium',
+                        sprintDaysLeft <= 2 ? 'text-destructive' : 'text-muted-foreground',
+                      )}>
+                        {sprintDaysLeft === 0 ? 'Ends today' : `${sprintDaysLeft}d left`}
+                      </span>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>Completion</span>
+                      <span>{sprintPct}%</span>
+                    </div>
+                    <Progress value={sprintPct} className="h-2" />
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                      {activeSprint.done_tasks} done
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Circle className="h-3.5 w-3.5" />
+                      {activeSprint.total_tasks - activeSprint.done_tasks} remaining
+                    </span>
+                  </div>
+                  <Separator className="mt-1 mb-1" />
+                  <Link href="/sprints">
+                    <a className="text-xs text-primary hover:underline flex items-center gap-1">
+                      View sprint <ArrowRight className="h-3 w-3" />
+                    </a>
+                  </Link>
+                </CardContent>
+              </Card>
+            )}
+
+          </div>
+        )}
 
       </div>
     </div>
