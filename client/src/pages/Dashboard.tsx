@@ -3,6 +3,7 @@ import { useUser } from '@clerk/clerk-react';
 import { format, isBefore, isToday, startOfDay } from 'date-fns';
 import { Link } from 'wouter';
 import { useApiClient } from '@/lib/api';
+import { useIntegrationsSummary } from '@/hooks/use-integrations';
 import { StatCard } from '@/components/StatCard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -24,6 +25,9 @@ import {
   Hammer,
   Rocket,
   Archive,
+  Users,
+  HeadphonesIcon,
+  CalendarDays,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -118,6 +122,7 @@ const roadmapStatuses = [
 export default function Dashboard() {
   const { apiRequest } = useApiClient();
   const { user } = useUser();
+  const { data: integrations } = useIntegrationsSummary();
 
   const { data: tasks = [],   isLoading: tLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
@@ -221,6 +226,40 @@ export default function Dashboard() {
               icon={<CheckSquare className="h-4 w-4" />}
             />
           </div>
+        )}
+
+        {/* ── Integration stat cards (only shown when configured) ─────── */}
+        {integrations && (
+          <>
+            {integrations.crm.configured && (
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <StatCard
+                  label="Active Clients"
+                  value={integrations.crm.data ? String(integrations.crm.data.activeClients) : '—'}
+                  icon={<Users className="h-4 w-4 text-blue-500" />}
+                />
+                <StatCard
+                  label="MRR"
+                  value={integrations.crm.data ? `$${integrations.crm.data.totalMRR.toLocaleString()}` : '—'}
+                  icon={<TrendingUp className="h-4 w-4 text-blue-500" />}
+                />
+                {integrations.helpdesk.configured && (
+                  <StatCard
+                    label="Open Tickets"
+                    value={integrations.helpdesk.data ? String(integrations.helpdesk.data.openTickets) : '—'}
+                    icon={<HeadphonesIcon className={cn('h-4 w-4', integrations.helpdesk.data?.urgentTickets ? 'text-destructive' : 'text-orange-500')} />}
+                  />
+                )}
+                {integrations.schedule.configured && (
+                  <StatCard
+                    label="Appointments Today"
+                    value={integrations.schedule.data ? String(integrations.schedule.data.todayCount) : '—'}
+                    icon={<CalendarDays className="h-4 w-4 text-purple-500" />}
+                  />
+                )}
+              </div>
+            )}
+          </>
         )}
 
         {/* ── Middle row ──────────────────────────────────────────────────── */}

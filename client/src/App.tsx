@@ -10,11 +10,11 @@ import Landing from './pages/Landing';
 import Dashboard from './pages/Dashboard';
 import Tasks from './pages/Tasks';
 import Revenue from './pages/Revenue';
-import Clients from './pages/Clients';
 import Roadmap from './pages/Roadmap';
 import Reviews from './pages/Reviews';
 import Members from './pages/Members';
 import MyTasks from './pages/MyTasks';
+import Integrations from './pages/Integrations';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -38,10 +38,10 @@ function AuthenticatedApp() {
             <Route path="/my-tasks"  component={MyTasks} />
             <Route path="/tasks"     component={Tasks} />
             <Route path="/revenue"   component={Revenue} />
-            <Route path="/clients"   component={Clients} />
-            <Route path="/roadmap"   component={Roadmap} />
+            <Route path="/roadmap"       component={Roadmap} />
             <Route path="/reviews"   component={Reviews} />
-            <Route path="/members"   component={Members} />
+            <Route path="/members"      component={Members} />
+            <Route path="/integrations" component={Integrations} />
             <Route component={() => <Redirect to="/dashboard" />} />
           </Switch>
         </ErrorBoundary>

@@ -4,13 +4,13 @@ import {
   LayoutDashboard,
   CheckSquare,
   TrendingUp,
-  Users,
   Map,
   ClipboardList,
   Briefcase,
   X,
   UsersRound,
   User,
+  Plug,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -20,11 +20,11 @@ const NAV = [
   { href: '/dashboard', label: 'Dashboard',     icon: LayoutDashboard },
   { href: '/my-tasks',  label: 'My Tasks',      icon: User },
   { href: '/tasks',     label: 'All Tasks',     icon: CheckSquare },
-  { href: '/revenue',   label: 'Revenue',       icon: TrendingUp },
-  { href: '/clients',   label: 'Clients',       icon: Users },
-  { href: '/roadmap',   label: 'Roadmap',       icon: Map },
+  { href: '/revenue',      label: 'Revenue',      icon: TrendingUp },
+  { href: '/roadmap',      label: 'Roadmap',      icon: Map },
   { href: '/reviews',   label: 'Weekly Review', icon: ClipboardList },
-  { href: '/members',   label: 'Team',          icon: UsersRound },
+  { href: '/members',      label: 'Team',          icon: UsersRound },
+  { href: '/integrations', label: 'Integrations',  icon: Plug },
 ];
 
 interface AppSidebarProps {
