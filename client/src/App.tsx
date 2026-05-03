@@ -14,6 +14,7 @@ import Roadmap from './pages/Roadmap';
 import Reviews from './pages/Reviews';
 import Members from './pages/Members';
 import MyTasks from './pages/MyTasks';
+import Workload from './pages/Workload';
 import Integrations from './pages/Integrations';
 
 function AuthenticatedApp() {
@@ -40,6 +41,7 @@ function AuthenticatedApp() {
             <Route path="/revenue"   component={Revenue} />
             <Route path="/roadmap"       component={Roadmap} />
             <Route path="/reviews"   component={Reviews} />
+            <Route path="/workload"      component={Workload} />
             <Route path="/members"      component={Members} />
             <Route path="/integrations" component={Integrations} />
             <Route component={() => <Redirect to="/dashboard" />} />

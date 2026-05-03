@@ -11,6 +11,7 @@ import {
   UsersRound,
   User,
   Plug,
+  BarChart2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -23,6 +24,7 @@ const NAV = [
   { href: '/revenue',      label: 'Revenue',      icon: TrendingUp },
   { href: '/roadmap',      label: 'Roadmap',      icon: Map },
   { href: '/reviews',   label: 'Weekly Review', icon: ClipboardList },
+  { href: '/workload',     label: 'Workload',      icon: BarChart2  },
   { href: '/members',      label: 'Team',          icon: UsersRound },
   { href: '/integrations', label: 'Integrations',  icon: Plug },
 ];

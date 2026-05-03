@@ -32,9 +32,11 @@ import webhooksRouter   from './routes/webhooks.js';
 import workspacesRouter from './routes/workspaces.js';
 import membersRouter    from './routes/members.js';
 import tasksRouter        from './routes/tasks.js';
+import commentsRouter     from './routes/comments.js';
 import revenueRouter      from './routes/revenue.js';
 import roadmapRouter      from './routes/roadmap.js';
 import reviewsRouter      from './routes/reviews.js';
+import notificationsRouter from './routes/notifications.js';
 import integrationsRouter from './routes/integrations.js';
 
 const app = express();
@@ -100,11 +102,13 @@ app.use('/api', requireAuth);
 
 app.use('/api/workspaces', workspacesRouter);
 app.use('/api/workspaces', membersRouter);
-app.use('/api/tasks',        tasksRouter);
-app.use('/api/revenue',      revenueRouter);
-app.use('/api/roadmap',      roadmapRouter);
-app.use('/api/reviews',      reviewsRouter);
-app.use('/api/integrations', integrationsRouter);
+app.use('/api/tasks',                       tasksRouter);
+app.use('/api/tasks/:taskId/comments',      commentsRouter);  // mergeParams passes :taskId
+app.use('/api/revenue',       revenueRouter);
+app.use('/api/roadmap',       roadmapRouter);
+app.use('/api/reviews',       reviewsRouter);
+app.use('/api/notifications', notificationsRouter);
+app.use('/api/integrations',  integrationsRouter);
 
 // ─── Static frontend (production) ────────────────────────────────────────────
 if (process.env.NODE_ENV === 'production') {

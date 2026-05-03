@@ -11,6 +11,8 @@ import {
   logTaskActivity,
   reorderTaskInTransaction,
 } from '../services/taskService.js';
+import { getWorkload } from '../services/commentService.js';
+import { createNotification } from '../services/notificationService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -48,6 +50,16 @@ const positionSchema = z.object({
   position: z.number().int().min(0),
 });
 
+// GET /api/tasks/workload  — task counts per assignee per status (must be before /:id)
+router.get('/workload', async (req, res, next) => {
+  try {
+    const rows = await getWorkload(req.workspace.id);
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/tasks
 router.get('/', async (req, res, next) => {
   try {
@@ -74,6 +86,18 @@ router.post('/', async (req, res, next) => {
     }
     const task = await createTask(req.workspace.id, parsed.data, req.auth.userId);
     await logTaskActivity(task.id, req.auth.userId, 'created');
+
+    // Notify assignee if set and not self-assigning
+    if (task.assignee_clerk_id && task.assignee_clerk_id !== req.auth.userId) {
+      createNotification({
+        workspaceId: req.workspace.id,
+        recipientClerkId: task.assignee_clerk_id,
+        type: 'task_assigned',
+        title: `You were assigned "${task.title}"`,
+        link: '/tasks',
+      }).catch(() => {});
+    }
+
     res.status(201).json(task);
   } catch (err) {
     next(err);
@@ -150,6 +174,21 @@ router.patch('/:id', async (req, res, next) => {
       return;
     }
     await logTaskActivity(task.id, req.auth.userId, 'updated', parsed.data as Record<string, unknown>);
+
+    // Notify new assignee (if changed and not self-assigning)
+    if (
+      parsed.data.assignee_clerk_id &&
+      parsed.data.assignee_clerk_id !== req.auth.userId
+    ) {
+      createNotification({
+        workspaceId: req.workspace.id,
+        recipientClerkId: parsed.data.assignee_clerk_id,
+        type: 'task_assigned',
+        title: `You were assigned "${task.title}"`,
+        link: '/tasks',
+      }).catch(() => {});
+    }
+
     res.json(task);
   } catch (err) {
     next(err);

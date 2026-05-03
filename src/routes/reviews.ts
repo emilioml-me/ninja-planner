@@ -8,6 +8,7 @@ import {
   updateReview,
   deleteReview,
 } from '../services/reviewService.js';
+import { sendSlackMessage } from '../lib/slack.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -41,6 +42,15 @@ router.post('/', async (req, res, next) => {
       return;
     }
     const review = await createReview(req.workspace.id, parsed.data, req.auth.userId);
+
+    // Slack notification — fire-and-forget
+    const score = review.health_score ? ` · Health ${review.health_score}/5` : '';
+    sendSlackMessage(
+      `:clipboard: *Weekly review submitted* for week of ${review.week_start}${score}\n` +
+      (review.wins     ? `*Wins:* ${review.wins.slice(0, 200)}\n`     : '') +
+      (review.blockers ? `*Blockers:* ${review.blockers.slice(0, 200)}` : ''),
+    );
+
     res.status(201).json(review);
   } catch (err) {
     // Unique constraint violation (duplicate week_start for workspace)
