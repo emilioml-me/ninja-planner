@@ -23,7 +23,8 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2 } from 'lucide-react';
+import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight } from 'lucide-react';
+import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
 
@@ -70,6 +71,7 @@ export default function Sprints() {
   const [editing, setEditing] = useState<Sprint | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Sprint | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [closePrompt, setClosePrompt] = useState<{ sprint: Sprint; incompleteCount: number } | null>(null);
 
   const { data: sprints = [], isLoading } = useQuery<Sprint[]>({
     queryKey: ['/api/sprints'],
@@ -101,14 +103,31 @@ export default function Sprints() {
     mutationFn: (data: FormData) => {
       const payload = { ...data, goal: data.goal || undefined, start_date: data.start_date || undefined, end_date: data.end_date || undefined };
       return editing
-        ? apiRequest('PATCH', `/api/sprints/${editing.id}`, payload)
-        : apiRequest('POST', '/api/sprints', payload);
+        ? apiRequest<{ sprint: Sprint; incomplete_count: number }>('PATCH', `/api/sprints/${editing.id}`, payload)
+        : apiRequest<Sprint>('POST', '/api/sprints', payload);
     },
-    onSuccess: () => {
+    onSuccess: (result, variables) => {
       qc.invalidateQueries({ queryKey: ['/api/sprints'] });
       setOpen(false);
       toast({ title: editing ? 'Sprint updated' : 'Sprint created' });
+      // If completing a sprint with incomplete tasks, show the close prompt
+      if (editing && variables.status === 'completed') {
+        const { sprint, incomplete_count } = result as { sprint: Sprint; incomplete_count: number };
+        if (incomplete_count > 0) {
+          setClosePrompt({ sprint, incompleteCount: incomplete_count });
+        }
+      }
     },
+  });
+
+  const moveToBacklogMut = useMutation({
+    mutationFn: (sprintId: string) => apiRequest<{ moved: number }>('POST', `/api/sprints/${sprintId}/move-to-backlog`),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['/api/sprints'] });
+      setClosePrompt(null);
+      toast({ title: `${data.moved} task${data.moved !== 1 ? 's' : ''} moved to backlog` });
+    },
+    onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
@@ -129,6 +148,22 @@ export default function Sprints() {
   };
 
   const memberMap = Object.fromEntries(members.map((m) => [m.clerk_user_id, m]));
+
+  const exportSprint = async (sprint: Sprint) => {
+    try {
+      const tasks = await apiRequest<SprintTask[]>('GET', `/api/sprints/${sprint.id}/tasks`);
+      const rows = tasks.map((t) => ({
+        sprint: sprint.name,
+        title: t.title,
+        status: t.status,
+        priority: t.priority,
+        assignee: t.assignee_clerk_id ? (memberMap[t.assignee_clerk_id]?.display_name ?? t.assignee_clerk_id) : '',
+      }));
+      downloadCsv(`sprint-${sprint.name.replace(/\s+/g, '-').toLowerCase()}.csv`, rows);
+    } catch (e: unknown) {
+      toast({ title: 'Export failed', description: (e as Error).message, variant: 'destructive' });
+    }
+  };
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
@@ -194,6 +229,7 @@ export default function Sprints() {
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => openEdit(sprint)}><Pencil className="h-3.5 w-3.5 mr-2" />Edit</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => exportSprint(sprint)}><Download className="h-3.5 w-3.5 mr-2" />Export CSV</DropdownMenuItem>
                           <DropdownMenuItem className="text-destructive" onClick={() => setDeleteTarget(sprint)}><Trash2 className="h-3.5 w-3.5 mr-2" />Delete</DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -259,6 +295,30 @@ export default function Sprints() {
               </DialogFooter>
             </form>
           </Form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Auto-close prompt */}
+      <Dialog open={!!closePrompt} onOpenChange={(o) => !o && setClosePrompt(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <MoveRight className="h-4 w-4 text-orange-500" /> Sprint completed
+            </DialogTitle>
+            <DialogDescription>
+              <strong>{closePrompt?.incompleteCount}</strong> task{closePrompt?.incompleteCount !== 1 ? 's are' : ' is'} still incomplete in{' '}
+              <strong>"{closePrompt?.sprint.name}"</strong>. Move them to the backlog?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setClosePrompt(null)}>Leave as-is</Button>
+            <Button
+              onClick={() => closePrompt && moveToBacklogMut.mutate(closePrompt.sprint.id)}
+              disabled={moveToBacklogMut.isPending}
+            >
+              {moveToBacklogMut.isPending ? 'Moving…' : 'Move to backlog'}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

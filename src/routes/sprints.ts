@@ -88,7 +88,40 @@ router.patch('/:id', async (req, res, next) => {
     if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
     const sprint = await updateSprint(req.params.id, req.workspace.id, parsed.data);
     if (!sprint) { res.status(404).json({ error: 'Sprint not found' }); return; }
-    res.json(sprint);
+
+    // When completing a sprint, include the count of still-incomplete tasks
+    if (parsed.data.status === 'completed') {
+      const incompleteResult = await pool.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM tasks
+         WHERE sprint_id = $1 AND workspace_id = $2 AND status <> 'done' AND deleted_at IS NULL`,
+        [req.params.id, req.workspace.id],
+      );
+      res.json({ sprint, incomplete_count: incompleteResult.rows[0].count });
+    } else {
+      res.json({ sprint, incomplete_count: 0 });
+    }
+  } catch (err) { next(err); }
+});
+
+// POST /api/sprints/:id/move-to-backlog — unassign all non-done tasks from sprint
+router.post('/:id/move-to-backlog', async (req, res, next) => {
+  try {
+    const sprintCheck = await pool.query<{ id: string }>(
+      'SELECT id FROM sprints WHERE id = $1 AND workspace_id = $2',
+      [req.params.id, req.workspace.id],
+    );
+    if (sprintCheck.rows.length === 0) { res.status(404).json({ error: 'Sprint not found' }); return; }
+
+    const result = await pool.query<{ count: number }>(
+      `WITH moved AS (
+         UPDATE tasks SET sprint_id = NULL
+         WHERE sprint_id = $1 AND workspace_id = $2 AND status <> 'done' AND deleted_at IS NULL
+         RETURNING id
+       )
+       SELECT COUNT(*)::int AS count FROM moved`,
+      [req.params.id, req.workspace.id],
+    );
+    res.json({ moved: result.rows[0].count });
   } catch (err) { next(err); }
 });
 
