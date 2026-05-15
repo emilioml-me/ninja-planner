@@ -11,6 +11,9 @@ export interface RoadmapItem {
   external_ref: string | null;
   created_at: Date;
   updated_at: Date;
+  // Computed from roadmap_task_links
+  linked_tasks: number;
+  linked_done: number;
 }
 
 export async function getRoadmap(
@@ -25,7 +28,15 @@ export async function getRoadmap(
   if (filters.phase)  { conditions.push(`phase = $${i++}`);  values.push(filters.phase); }
 
   const result = await pool.query<RoadmapItem>(
-    `SELECT * FROM roadmap_items WHERE ${conditions.join(' AND ')} ORDER BY priority, created_at`,
+    `SELECT ri.*,
+            COALESCE(COUNT(rtl.task_id) FILTER (WHERE t.deleted_at IS NULL), 0)::int             AS linked_tasks,
+            COALESCE(COUNT(rtl.task_id) FILTER (WHERE t.status = 'done' AND t.deleted_at IS NULL), 0)::int AS linked_done
+     FROM roadmap_items ri
+     LEFT JOIN roadmap_task_links rtl ON rtl.roadmap_item_id = ri.id
+     LEFT JOIN tasks t ON t.id = rtl.task_id AND t.workspace_id = $1
+     WHERE ${conditions.map((c) => `ri.${c}`).join(' AND ')}
+     GROUP BY ri.id
+     ORDER BY ri.priority, ri.created_at`,
     values,
   );
   return result.rows;

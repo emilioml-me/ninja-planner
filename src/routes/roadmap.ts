@@ -120,6 +120,68 @@ router.delete('/:id', async (req, res, next) => {
   }
 });
 
+// ─── Task links ──────────────────────────────────────────────────────────────
+
+// GET /api/roadmap/:id/tasks  — list tasks linked to this roadmap item
+router.get('/:id/tasks', async (req, res, next) => {
+  try {
+    // Verify item belongs to workspace
+    const itemCheck = await pool.query<{ id: string }>(
+      'SELECT id FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
+      [req.params.id, req.workspace.id],
+    );
+    if (itemCheck.rows.length === 0) { res.status(404).json({ error: 'Roadmap item not found' }); return; }
+
+    const result = await pool.query(
+      `SELECT t.id, t.title, t.status, t.priority, t.assignee_clerk_id
+       FROM roadmap_task_links rtl
+       JOIN tasks t ON t.id = rtl.task_id
+       WHERE rtl.roadmap_item_id = $1 AND t.deleted_at IS NULL
+       ORDER BY t.created_at`,
+      [req.params.id],
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// POST /api/roadmap/:id/tasks  — link a task
+router.post('/:id/tasks', async (req, res, next) => {
+  try {
+    const parsed = z.object({ taskId: z.string().uuid() }).safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+
+    // Verify both item and task belong to the workspace
+    const [itemCheck, taskCheck] = await Promise.all([
+      pool.query<{ id: string }>('SELECT id FROM roadmap_items WHERE id = $1 AND workspace_id = $2', [req.params.id, req.workspace.id]),
+      pool.query<{ id: string }>('SELECT id FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL', [parsed.data.taskId, req.workspace.id]),
+    ]);
+    if (itemCheck.rows.length === 0) { res.status(404).json({ error: 'Roadmap item not found' }); return; }
+    if (taskCheck.rows.length === 0) { res.status(404).json({ error: 'Task not found' }); return; }
+
+    await pool.query(
+      `INSERT INTO roadmap_task_links (roadmap_item_id, task_id, workspace_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [req.params.id, parsed.data.taskId, req.workspace.id],
+    );
+    res.status(201).json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/roadmap/:id/tasks/:taskId  — unlink a task
+router.delete('/:id/tasks/:taskId', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM roadmap_task_links
+       WHERE roadmap_item_id = $1 AND task_id = $2
+         AND workspace_id = $3`,
+      [req.params.id, req.params.taskId, req.workspace.id],
+    );
+    if ((result.rowCount ?? 0) === 0) { res.status(404).json({ error: 'Link not found' }); return; }
+    res.status(204).send();
+  } catch (err) { next(err); }
+});
+
 // ─── Share token management ───────────────────────────────────────────────────
 
 // GET /api/roadmap/share  — get current token (null if none)

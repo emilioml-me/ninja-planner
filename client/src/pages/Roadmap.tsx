@@ -25,6 +25,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Progress } from '@/components/ui/progress';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from '@/components/ui/dialog';
@@ -39,7 +40,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink, Search, X } from 'lucide-react';
+import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink, Search, X, Link, CheckSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface RoadmapItem {
@@ -50,6 +51,16 @@ interface RoadmapItem {
   status: string;
   priority: number;
   external_ref: string | null;
+  linked_tasks: number;
+  linked_done: number;
+}
+
+interface LinkedTask {
+  id: string;
+  title: string;
+  status: string;
+  priority: string;
+  assignee_clerk_id: string | null;
 }
 
 const STATUSES = ['idea', 'building', 'live', 'archived'] as const;
@@ -96,6 +107,7 @@ export default function Roadmap() {
   const [searchQuery, setSearchQuery] = useState('');
   const [phaseFilter, setPhaseFilter] = useState('');
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [linkTaskItem, setLinkTaskItem] = useState<RoadmapItem | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -156,6 +168,20 @@ export default function Roadmap() {
       qc.invalidateQueries({ queryKey: ['/api/roadmap'] });
       toast({ title: 'Reorder failed', variant: 'destructive' });
     },
+  });
+
+  const linkTaskMut = useMutation({
+    mutationFn: ({ itemId, taskId }: { itemId: string; taskId: string }) =>
+      apiRequest('POST', `/api/roadmap/${itemId}/tasks`, { taskId }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/roadmap'] }); },
+    onError: (e: Error) => toast({ title: 'Link failed', description: e.message, variant: 'destructive' }),
+  });
+
+  const unlinkTaskMut = useMutation({
+    mutationFn: ({ itemId, taskId }: { itemId: string; taskId: string }) =>
+      apiRequest('DELETE', `/api/roadmap/${itemId}/tasks/${taskId}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/roadmap'] }); },
+    onError: (e: Error) => toast({ title: 'Unlink failed', description: e.message, variant: 'destructive' }),
   });
 
   const handleDragStart = (event: DragStartEvent) => setActiveId(String(event.active.id));
@@ -330,6 +356,7 @@ export default function Roadmap() {
                             cfg={cfg}
                             onEdit={openEdit}
                             onDelete={(id) => deleteMut.mutate(id)}
+                            onLinkTasks={setLinkTaskItem}
                           />
                         ))}
                         {col.length === 0 && (
@@ -354,6 +381,16 @@ export default function Roadmap() {
             })}
           </div>
         </div>
+      )}
+
+      {/* Link Tasks Dialog */}
+      {linkTaskItem && (
+        <LinkTasksDialog
+          item={linkTaskItem}
+          onClose={() => setLinkTaskItem(null)}
+          onLink={(taskId) => linkTaskMut.mutate({ itemId: linkTaskItem.id, taskId })}
+          onUnlink={(taskId) => unlinkTaskMut.mutate({ itemId: linkTaskItem.id, taskId })}
+        />
       )}
 
       {/* Dialog */}
@@ -485,11 +522,13 @@ function SortableRoadmapCard({
   cfg,
   onEdit,
   onDelete,
+  onLinkTasks,
 }: {
   item: RoadmapItem;
   cfg: CardCfg;
   onEdit: (item: RoadmapItem) => void;
   onDelete: (id: string) => void;
+  onLinkTasks: (item: RoadmapItem) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
   const style = {
@@ -506,6 +545,7 @@ function SortableRoadmapCard({
         dragHandleProps={{ ...attributes, ...listeners }}
         onEdit={onEdit}
         onDelete={onDelete}
+        onLinkTasks={onLinkTasks}
       />
     </div>
   );
@@ -517,6 +557,7 @@ function RoadmapCardContent({
   dragHandleProps,
   onEdit,
   onDelete,
+  onLinkTasks,
   overlay,
 }: {
   item: RoadmapItem;
@@ -524,8 +565,13 @@ function RoadmapCardContent({
   dragHandleProps?: Record<string, unknown>;
   onEdit?: (item: RoadmapItem) => void;
   onDelete?: (id: string) => void;
+  onLinkTasks?: (item: RoadmapItem) => void;
   overlay?: boolean;
 }) {
+  const taskPct = item.linked_tasks > 0
+    ? Math.round((item.linked_done / item.linked_tasks) * 100)
+    : null;
+
   return (
     <Card className={cn('group', cfg.color, overlay && 'shadow-lg rotate-1')}>
       <CardHeader className="p-3 pb-1">
@@ -547,6 +593,11 @@ function RoadmapCardContent({
                 <DropdownMenuItem onClick={() => onEdit(item)}>
                   <Pencil className="h-4 w-4 mr-2" /> Edit
                 </DropdownMenuItem>
+                {onLinkTasks && (
+                  <DropdownMenuItem onClick={() => onLinkTasks(item)}>
+                    <Link className="h-4 w-4 mr-2" /> Link tasks
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="text-destructive"
                   onClick={() => onDelete(item.id)}
@@ -579,7 +630,133 @@ function RoadmapCardContent({
             </a>
           )}
         </div>
+        {taskPct !== null && !overlay && (
+          <div className="space-y-1 pt-0.5">
+            <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <CheckSquare className="h-3 w-3" />
+                {item.linked_done}/{item.linked_tasks} tasks
+              </span>
+              <span>{taskPct}%</span>
+            </div>
+            <Progress value={taskPct} className="h-1" />
+          </div>
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+// ─── Link Tasks Dialog ────────────────────────────────────────────────────────
+
+function LinkTasksDialog({
+  item,
+  onClose,
+  onLink,
+  onUnlink,
+}: {
+  item: RoadmapItem;
+  onClose: () => void;
+  onLink: (taskId: string) => void;
+  onUnlink: (taskId: string) => void;
+}) {
+  const { apiRequest } = useApiClient();
+  const [search, setSearch] = useState('');
+
+  const { data: linkedTasks = [], isLoading: linkedLoading } = useQuery<LinkedTask[]>({
+    queryKey: ['/api/roadmap', item.id, 'tasks'],
+    queryFn: () => apiRequest<LinkedTask[]>('GET', `/api/roadmap/${item.id}/tasks`),
+  });
+
+  const { data: allTasks = [] } = useQuery<LinkedTask[]>({
+    queryKey: ['/api/tasks'],
+    queryFn: () => apiRequest<LinkedTask[]>('GET', '/api/tasks'),
+    staleTime: 30_000,
+  });
+
+  const linkedIds = new Set(linkedTasks.map((t) => t.id));
+
+  const filtered = allTasks.filter((t) => {
+    if (linkedIds.has(t.id)) return false; // show linked ones separately
+    if (!search.trim()) return true;
+    return t.title.toLowerCase().includes(search.toLowerCase());
+  }).slice(0, 10);
+
+  const statusDot: Record<string, string> = {
+    todo: 'bg-slate-400', in_progress: 'bg-blue-500', done: 'bg-green-500', blocked: 'bg-red-500',
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Link className="h-4 w-4" /> Link Tasks
+          </DialogTitle>
+          <DialogDescription>
+            Attach tasks to <span className="font-medium">"{item.title}"</span> to track execution.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          {/* Currently linked */}
+          {linkedLoading ? (
+            <p className="text-xs text-muted-foreground">Loading…</p>
+          ) : linkedTasks.length > 0 ? (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Linked</p>
+              {linkedTasks.map((t) => (
+                <div key={t.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 bg-muted/50">
+                  <span className={cn('h-2 w-2 rounded-full shrink-0', statusDot[t.status] ?? 'bg-muted-foreground')} />
+                  <span className="flex-1 text-sm truncate">{t.title}</span>
+                  <Button
+                    variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                    onClick={() => onUnlink(t.id)}
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {/* Search to add */}
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add task</p>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search tasks…"
+                className="w-full pl-8 pr-3 py-1.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            {filtered.length > 0 ? (
+              <div className="space-y-1">
+                {filtered.map((t) => (
+                  <button
+                    key={t.id}
+                    className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted/60 transition-colors"
+                    onClick={() => { onLink(t.id); setSearch(''); }}
+                  >
+                    <span className={cn('h-2 w-2 rounded-full shrink-0', statusDot[t.status] ?? 'bg-muted-foreground')} />
+                    <span className="flex-1 text-sm truncate">{t.title}</span>
+                    <Plus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                  </button>
+                ))}
+              </div>
+            ) : search ? (
+              <p className="text-xs text-muted-foreground py-2 text-center">No matching tasks found.</p>
+            ) : null}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Done</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
