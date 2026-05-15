@@ -19,8 +19,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Loader2, Trash2, Users, Crown, Shield, User, CheckCircle2, Clock, Zap, MessageSquare, TrendingUp, AlertTriangle } from 'lucide-react';
+import { Loader2, Trash2, Users, Crown, Shield, User, CheckCircle2, Clock, Zap, MessageSquare, TrendingUp, AlertTriangle, Link2, Copy, RefreshCw, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Input } from '@/components/ui/input';
 
 interface MemberStats {
   total: number;
@@ -48,6 +49,7 @@ export default function Members() {
   const queryClient = useQueryClient();
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [statsTarget, setStatsTarget] = useState<{ clerkUserId: string; name: string; imageUrl: string | null } | null>(null);
+  const [inviteOpen, setInviteOpen] = useState(false);
 
   const isAdmin = orgRole === 'org:admin' || orgRole === 'org:owner';
 
@@ -71,12 +73,17 @@ export default function Members() {
     <div className="p-6 max-w-3xl mx-auto space-y-6">
       <div className="flex items-center gap-3">
         <Users className="h-6 w-6 text-primary" />
-        <div>
+        <div className="flex-1">
           <h1 className="text-2xl font-bold">Team Members</h1>
           <p className="text-sm text-muted-foreground">
             {members.length} member{members.length !== 1 ? 's' : ''} in this workspace
           </p>
         </div>
+        {isAdmin && (
+          <Button size="sm" className="gap-2" onClick={() => setInviteOpen(true)}>
+            <Link2 className="h-4 w-4" /> Invite Link
+          </Button>
+        )}
       </div>
 
       <Card>
@@ -147,6 +154,9 @@ export default function Members() {
           )}
         </CardContent>
       </Card>
+
+      {/* Invite link dialog */}
+      {inviteOpen && <InviteDialog onClose={() => setInviteOpen(false)} />}
 
       {/* Member stats dialog */}
       {statsTarget && (
@@ -277,6 +287,119 @@ function MemberStatsDialog({
         ) : (
           <p className="text-sm text-muted-foreground py-4 text-center">No stats available.</p>
         )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Invite Link Dialog ────────────────────────────────────────────────────────
+
+function InviteDialog({ onClose }: { onClose: () => void }) {
+  const { apiRequest } = useApiClient();
+  const { toast } = useToast();
+  const qc = useQueryClient();
+
+  const { data: active, isLoading } = useQuery<{ token: string; expires_at: string } | null>({
+    queryKey: ['/api/workspaces/me/invites/active'],
+    queryFn: () => apiRequest<{ token: string; expires_at: string } | null>('GET', '/api/workspaces/me/invites/active'),
+    staleTime: 30_000,
+  });
+
+  const generateMut = useMutation({
+    mutationFn: () => apiRequest<{ token: string; expires_at: string }>('POST', '/api/workspaces/me/invites'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/workspaces/me/invites/active'] }),
+  });
+
+  const revokeMut = useMutation({
+    mutationFn: () => apiRequest('DELETE', '/api/workspaces/me/invites'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/workspaces/me/invites/active'] });
+      toast({ title: 'Invite link revoked' });
+    },
+  });
+
+  const inviteUrl = active
+    ? `${window.location.origin}/invite/${active.token}`
+    : null;
+
+  const copyLink = () => {
+    if (!inviteUrl) return;
+    navigator.clipboard.writeText(inviteUrl).then(() => toast({ title: 'Link copied!' }));
+  };
+
+  const expiresLabel = active
+    ? `Expires ${new Date(active.expires_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+    : null;
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Link2 className="h-4 w-4" /> Workspace Invite Link
+          </DialogTitle>
+          <DialogDescription>
+            Anyone with this link can join this workspace as a member. The link expires after 7 days and can only be used once.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-2">
+          {isLoading ? (
+            <div className="flex justify-center py-4">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : inviteUrl ? (
+            <>
+              <div className="flex gap-2">
+                <Input readOnly value={inviteUrl} className="text-xs font-mono" />
+                <Button size="icon" variant="outline" onClick={copyLink} title="Copy link">
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">{expiresLabel}</p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-2"
+                  disabled={generateMut.isPending}
+                  onClick={() => generateMut.mutate()}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" /> Regenerate
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-2 text-destructive hover:text-destructive"
+                  disabled={revokeMut.isPending}
+                  onClick={() => revokeMut.mutate()}
+                >
+                  <X className="h-3.5 w-3.5" /> Revoke
+                </Button>
+              </div>
+            </>
+          ) : (
+            <div className="text-center py-4 space-y-3">
+              <p className="text-sm text-muted-foreground">No active invite link.</p>
+              <Button
+                size="sm"
+                className="gap-2"
+                disabled={generateMut.isPending}
+                onClick={() => generateMut.mutate()}
+              >
+                {generateMut.isPending
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <Link2 className="h-4 w-4" />
+                }
+                Generate Invite Link
+              </Button>
+            </div>
+          )}
+        </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Close</Button>

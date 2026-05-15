@@ -42,6 +42,7 @@ import goalsRouter        from './routes/goals.js';
 import sprintsRouter      from './routes/sprints.js';
 import shareRouter        from './routes/share.js';
 import webhookEndpointsRouter from './routes/webhook-endpoints.js';
+import invitesRouter          from './routes/invites.js';
 
 const app = express();
 
@@ -119,6 +120,8 @@ app.use('/api/integrations',  integrationsRouter);
 app.use('/api/goals',         goalsRouter);
 app.use('/api/sprints',       sprintsRouter);
 app.use('/api/webhooks',      webhookEndpointsRouter);
+app.use('/api/workspaces',    invitesRouter);   // /api/workspaces/me/invites
+app.use('/api/invites',       invitesRouter);   // /api/invites/:token + /accept
 
 // ─── Static frontend (production) ────────────────────────────────────────────
 if (process.env.NODE_ENV === 'production') {

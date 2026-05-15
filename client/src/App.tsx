@@ -20,6 +20,7 @@ import Sprints from './pages/Sprints';
 import Integrations from './pages/Integrations';
 import Webhooks from './pages/Webhooks';
 import PublicRoadmap from './pages/PublicRoadmap';
+import AcceptInvite from './pages/AcceptInvite';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -67,6 +68,10 @@ export default function App() {
         {/* Public share pages — no auth required */}
         <Route path="/r/:token">
           {(params) => <PublicRoadmap token={params.token} />}
+        </Route>
+        {/* Workspace invite accept page */}
+        <Route path="/invite/:token">
+          {(params) => <AcceptInvite token={params.token} />}
         </Route>
         <Route component={AuthenticatedApp} />
       </Switch>
