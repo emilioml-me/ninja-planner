@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
+import { useState } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { format, isBefore, isToday, startOfDay } from 'date-fns';
 import { Link } from 'wouter';
@@ -7,6 +8,9 @@ import { useIntegrationsSummary } from '@/hooks/use-integrations';
 import { StatCard } from '@/components/StatCard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useToast } from '@/hooks/use-toast';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -34,6 +38,8 @@ import {
   Webhook,
   CheckCircle,
   XCircle,
+  Bell,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -153,7 +159,26 @@ const roadmapStatuses = [
 export default function Dashboard() {
   const { apiRequest } = useApiClient();
   const { user } = useUser();
+  const isAdmin = useIsAdmin();
+  const { toast } = useToast();
+  const [alertResult, setAlertResult] = useState<{ overdue: number; skipped?: boolean; alerted?: boolean } | null>(null);
   const { data: integrations } = useIntegrationsSummary();
+
+  const alertMut = useMutation({
+    mutationFn: () => apiRequest<{ ok: boolean; overdue: number; skipped?: boolean; alerted?: boolean }>(
+      'POST', '/api/tasks/alert-check',
+    ),
+    onSuccess: (data) => {
+      setAlertResult(data);
+      if (data.skipped) {
+        toast({ title: 'Already alerted recently', description: 'Overdue alert was sent in the last 20 hours.' });
+      } else if (data.alerted) {
+        toast({ title: `Overdue alert sent`, description: `${data.overdue} overdue task${data.overdue !== 1 ? 's' : ''} reported to Slack.` });
+      } else {
+        toast({ title: 'No overdue tasks', description: 'All tasks are on track!' });
+      }
+    },
+  });
 
   const { data: tasks = [],   isLoading: tLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
@@ -688,6 +713,46 @@ export default function Dashboard() {
                   Manage webhooks <ArrowRight className="h-3 w-3" />
                 </a>
               </Link>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* ── Overdue alert widget (admins only) ─────────────────────────── */}
+        {isAdmin && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Bell className="h-4 w-4 text-primary" />
+                Overdue Task Alert
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Send a Slack message listing all overdue tasks. Deduped — won't re-send within 20 hours.
+              </p>
+              {alertResult && !alertResult.skipped && (
+                <p className={cn(
+                  'text-xs font-medium',
+                  alertResult.overdue === 0 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400',
+                )}>
+                  {alertResult.overdue === 0
+                    ? '✓ No overdue tasks'
+                    : `${alertResult.overdue} overdue task${alertResult.overdue !== 1 ? 's' : ''} reported`}
+                </p>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-2"
+                disabled={alertMut.isPending}
+                onClick={() => alertMut.mutate()}
+              >
+                {alertMut.isPending
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  : <Bell className="h-3.5 w-3.5" />
+                }
+                Check &amp; Alert
+              </Button>
             </CardContent>
           </Card>
         )}

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
+import { sendSlackMessage } from '../lib/slack.js';
 import {
   getTasks,
   createTask,
@@ -14,6 +15,7 @@ import {
   spawnRecurringTask,
 } from '../services/taskService.js';
 import { getWorkload } from '../services/commentService.js';
+import { pool } from '../config/db.js';
 import { createNotification } from '../services/notificationService.js';
 import { fireWebhooks } from '../services/webhookService.js';
 import { getGoalProgressForTask } from '../services/goalService.js';
@@ -69,6 +71,71 @@ const filterSchema = z.object({
 
 const positionSchema = z.object({
   position: z.number().int().min(0),
+});
+
+// POST /api/tasks/alert-check  — send Slack alert for overdue tasks  [admin only]
+// Deduped: skips if an overdue_alert notification was sent for this workspace in last 20h
+router.post('/alert-check', requireAdmin, async (req, res, next) => {
+  try {
+    // Dedup check — skip if already alerted in the last 20 hours
+    const dedupCheck = await pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM notifications
+       WHERE workspace_id = $1
+         AND type = 'overdue_alert'
+         AND created_at > now() - INTERVAL '20 hours'`,
+      [req.workspace.id],
+    );
+    if (parseInt(dedupCheck.rows[0].count, 10) > 0) {
+      res.json({ ok: true, skipped: true, reason: 'Already alerted in the last 20 hours' });
+      return;
+    }
+
+    // Query overdue tasks
+    const overdueResult = await pool.query<{
+      id: string; title: string; due_date: string;
+      assignee_clerk_id: string | null; status: string;
+    }>(
+      `SELECT id, title, due_date, assignee_clerk_id, status
+       FROM tasks
+       WHERE workspace_id = $1
+         AND status <> 'done'
+         AND deleted_at IS NULL
+         AND due_date < CURRENT_DATE
+       ORDER BY due_date ASC
+       LIMIT 50`,
+      [req.workspace.id],
+    );
+
+    const tasks = overdueResult.rows;
+    if (tasks.length === 0) {
+      res.json({ ok: true, overdue: 0, alerted: false });
+      return;
+    }
+
+    // Build Slack message
+    const lines = tasks.slice(0, 15).map((t) =>
+      `• *${t.title}* — due ${t.due_date} (${t.status.replace('_', ' ')})`,
+    );
+    const more = tasks.length > 15 ? `\n_…and ${tasks.length - 15} more_` : '';
+    const msg =
+      `:warning: *${tasks.length} overdue task${tasks.length === 1 ? '' : 's'}* in your workspace:\n` +
+      lines.join('\n') + more;
+
+    sendSlackMessage(msg);
+
+    // In-app notification for workspace admins (the requesting admin at minimum)
+    await createNotification({
+      workspaceId: req.workspace.id,
+      recipientClerkId: req.auth.userId,
+      type: 'overdue_alert',
+      title: `${tasks.length} overdue task${tasks.length === 1 ? '' : 's'} in this workspace`,
+      link: '/tasks?status=overdue',
+    });
+
+    res.json({ ok: true, overdue: tasks.length, alerted: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /api/tasks/workload  — task counts per assignee per status (must be before /:id)
