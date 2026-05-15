@@ -15,6 +15,7 @@ import {
 import { getWorkload } from '../services/commentService.js';
 import { createNotification } from '../services/notificationService.js';
 import { fireWebhooks } from '../services/webhookService.js';
+import { getGoalProgressForTask } from '../services/goalService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -105,6 +106,17 @@ router.post('/', async (req, res, next) => {
     }
 
     fireWebhooks(req.workspace.id, 'task.created', { task });
+
+    // Due-date reminder — notify assignee when a due date is set at creation
+    if (task.assignee_clerk_id && task.due_date && task.assignee_clerk_id !== req.auth.userId) {
+      createNotification({
+        workspaceId: req.workspace.id,
+        recipientClerkId: task.assignee_clerk_id,
+        type: 'due_date_set',
+        title: `"${task.title}" is due on ${task.due_date}`,
+        link: '/tasks',
+      }).catch(() => {});
+    }
 
     res.status(201).json(task);
   } catch (err) {
@@ -200,6 +212,50 @@ router.patch('/:id', async (req, res, next) => {
     // Spawn recurring copy when task is completed
     if (parsed.data.status === 'done' && task.recurrence_rule) {
       spawnRecurringTask(task).catch(() => {});
+    }
+
+    // Due-date reminder — notify assignee when due_date is explicitly set/changed
+    if (parsed.data.due_date !== undefined && task.assignee_clerk_id && task.assignee_clerk_id !== req.auth.userId) {
+      createNotification({
+        workspaceId: req.workspace.id,
+        recipientClerkId: task.assignee_clerk_id,
+        type: 'due_date_set',
+        title: task.due_date
+          ? `"${task.title}" is due on ${task.due_date}`
+          : `Due date removed from "${task.title}"`,
+        link: '/tasks',
+      }).catch(() => {});
+    }
+
+    // Goal milestone notifications — when task marked done, check 50%/100% crossings
+    if (parsed.data.status === 'done') {
+      getGoalProgressForTask(task.id, req.workspace.id).then((goals) => {
+        for (const goal of goals) {
+          if (goal.total_tasks === 0) continue;
+          const pct = goal.done_tasks / goal.total_tasks;
+          const prevPct = (goal.done_tasks - 1) / goal.total_tasks;
+          const crossed50  = pct >= 0.5 && prevPct < 0.5;
+          const crossed100 = goal.done_tasks === goal.total_tasks && goal.done_tasks > 0;
+
+          if (crossed100) {
+            createNotification({
+              workspaceId: req.workspace.id,
+              recipientClerkId: goal.created_by,
+              type: 'goal_milestone',
+              title: `🎉 Goal complete: "${goal.title}"`,
+              link: '/goals',
+            }).catch(() => {});
+          } else if (crossed50) {
+            createNotification({
+              workspaceId: req.workspace.id,
+              recipientClerkId: goal.created_by,
+              type: 'goal_milestone',
+              title: `Halfway there on "${goal.title}" (50%)`,
+              link: '/goals',
+            }).catch(() => {});
+          }
+        }
+      }).catch(() => {});
     }
 
     // Fire webhooks

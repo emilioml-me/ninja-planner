@@ -9,7 +9,8 @@ const router = Router({ mergeParams: true }); // inherit :taskId from parent
 router.use(requireWorkspace);
 
 const createSchema = z.object({
-  body: z.string().min(1).max(5000),
+  body:     z.string().min(1).max(5000),
+  mentions: z.array(z.string()).max(20).optional(), // clerk_ids of mentioned workspace members
 });
 
 // GET /api/tasks/:taskId/comments
@@ -57,7 +58,32 @@ router.post('/', async (req, res, next) => {
         title: `New comment on "${task.title}"`,
         body: parsed.data.body.slice(0, 120),
         link: `/tasks`,
-      }).catch(() => {}); // fire-and-forget, don't block response
+      }).catch(() => {});
+    }
+
+    // @mention notifications — validate mentions are workspace members, then notify
+    if (parsed.data.mentions?.length) {
+      const mentionIds = parsed.data.mentions;
+      // Validate all mentioned IDs are actually workspace members
+      const memberCheck = await pool.query<{ clerk_user_id: string }>(
+        `SELECT clerk_user_id FROM workspace_members
+         WHERE workspace_id = $1 AND clerk_user_id = ANY($2)`,
+        [req.workspace.id, mentionIds],
+      );
+      const validMentions = new Set(memberCheck.rows.map((r) => r.clerk_user_id));
+      validMentions.delete(req.auth.userId); // don't notify self
+
+      for (const mentionedId of validMentions) {
+        if (recipients.has(mentionedId)) continue; // already notified above
+        createNotification({
+          workspaceId: req.workspace.id,
+          recipientClerkId: mentionedId,
+          type: 'mention',
+          title: `You were mentioned in "${task.title}"`,
+          body: parsed.data.body.slice(0, 120),
+          link: `/tasks`,
+        }).catch(() => {});
+      }
     }
 
     res.status(201).json(comment);

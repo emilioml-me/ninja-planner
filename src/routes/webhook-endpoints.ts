@@ -59,6 +59,31 @@ const updateSchema = z.object({
   active: z.boolean().optional(),
 });
 
+// GET /api/webhooks/health  — summary for dashboard widget (must be before /:id)
+router.get('/health', async (req, res, next) => {
+  try {
+    const { pool } = await import('../config/db.js');
+    const result = await pool.query<{
+      total: number; active: number; last_status: string | null; last_delivered_at: string | null;
+    }>(
+      `SELECT
+         COUNT(we.id)::int                                                                     AS total,
+         COUNT(we.id) FILTER (WHERE we.active = true)::int                                    AS active,
+         (SELECT wd.status FROM webhook_deliveries wd
+          JOIN webhook_endpoints we2 ON we2.id = wd.endpoint_id
+          WHERE we2.workspace_id = $1
+          ORDER BY wd.created_at DESC LIMIT 1)                                                AS last_status,
+         (SELECT wd.delivered_at::text FROM webhook_deliveries wd
+          JOIN webhook_endpoints we2 ON we2.id = wd.endpoint_id
+          WHERE we2.workspace_id = $1
+          ORDER BY wd.created_at DESC LIMIT 1)                                                AS last_delivered_at
+       FROM webhook_endpoints we WHERE we.workspace_id = $1`,
+      [req.workspace.id],
+    );
+    res.json(result.rows[0] ?? { total: 0, active: 0, last_status: null, last_delivered_at: null });
+  } catch (err) { next(err); }
+});
+
 // GET /api/webhooks
 router.get('/', async (req, res, next) => {
   try {

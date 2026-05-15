@@ -121,6 +121,33 @@ export async function addGoalLink(
   return result.rows[0];
 }
 
+/**
+ * Returns goals linked to a given task, with current progress counts.
+ * Call AFTER the task status has already been updated in the DB.
+ * Used to detect 50% / 100% milestone crossings.
+ */
+export async function getGoalProgressForTask(
+  taskId: string,
+  workspaceId: string,
+): Promise<{ id: string; title: string; created_by: string; total_tasks: number; done_tasks: number }[]> {
+  const result = await pool.query<{
+    id: string; title: string; created_by: string; total_tasks: number; done_tasks: number;
+  }>(
+    `SELECT
+       g.id, g.title, g.created_by,
+       COUNT(gl2.id) FILTER (WHERE gl2.entity_type = 'task')::int                                     AS total_tasks,
+       COUNT(t2.id)  FILTER (WHERE gl2.entity_type = 'task' AND t2.status = 'done' AND t2.deleted_at IS NULL)::int AS done_tasks
+     FROM goal_links gl
+     JOIN goals g ON g.id = gl.goal_id AND g.workspace_id = $2
+     LEFT JOIN goal_links gl2 ON gl2.goal_id = g.id
+     LEFT JOIN tasks t2 ON t2.id = gl2.entity_id
+     WHERE gl.entity_id = $1 AND gl.entity_type = 'task'
+     GROUP BY g.id, g.title, g.created_by`,
+    [taskId, workspaceId],
+  );
+  return result.rows;
+}
+
 export async function removeGoalLink(
   goalId: string,
   workspaceId: string,
