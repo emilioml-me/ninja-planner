@@ -32,35 +32,107 @@ import { Plus, MoreVertical, Pencil, Trash2, TrendingUp, Download, RefreshCw } f
 import { cn } from '@/lib/utils';
 import { downloadCsv } from '@/lib/export-csv';
 
-// ─── Revenue bar chart (no external deps) ────────────────────────────────────
+// ─── Revenue bar chart with forecast line ────────────────────────────────────
+
+/** Simple ordinary least squares for y = a + b*x */
+function linearRegression(points: { x: number; y: number }[]): { slope: number; intercept: number } | null {
+  const n = points.length;
+  if (n < 2) return null;
+  const sumX  = points.reduce((s, p) => s + p.x, 0);
+  const sumY  = points.reduce((s, p) => s + p.y, 0);
+  const sumXY = points.reduce((s, p) => s + p.x * p.y, 0);
+  const sumXX = points.reduce((s, p) => s + p.x * p.x, 0);
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return null;
+  const slope     = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  return { slope, intercept };
+}
+
+function addMonths(dateStr: string, n: number): string {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setMonth(d.getMonth() + n);
+  return d.toISOString().slice(0, 10);
+}
 
 function RevenueChart({ targets }: { targets: RevenueTarget[] }) {
+  const monthlyTargets = targets.filter((t) => t.period_type === 'monthly');
+
   const sorted = [...targets]
     .sort((a, b) => new Date(a.period_start).getTime() - new Date(b.period_start).getTime())
     .slice(-8);
 
   if (sorted.length < 2) return null;
 
+  // Build forecast from monthly actuals with real values
+  const monthlyWithActual = [...monthlyTargets]
+    .filter((t) => Number(t.actual_amount) > 0)
+    .sort((a, b) => new Date(a.period_start).getTime() - new Date(b.period_start).getTime())
+    .slice(-6); // use last 6 data points
+
+  const regressionPoints = monthlyWithActual.map((t, i) => ({ x: i, y: Number(t.actual_amount) }));
+  const regression = regressionPoints.length >= 3 ? linearRegression(regressionPoints) : null;
+
+  // Projected months: 2 months after the last in `sorted`
+  const lastSortedDate = sorted[sorted.length - 1].period_start;
+  const forecastMonths = regression ? [1, 2].map((offset) => ({
+    period_start: addMonths(lastSortedDate, offset),
+    projected: Math.max(0, regression.intercept + regression.slope * (regressionPoints.length - 1 + offset)),
+  })) : [];
+
+  const allForDisplay = [
+    ...sorted,
+    ...forecastMonths.map((f, i) => ({
+      id: `forecast-${i}`,
+      period_type: 'monthly',
+      period_start: f.period_start,
+      target_amount: '0',
+      actual_amount: String(f.projected),
+      notes: null,
+      _forecast: true,
+    } as RevenueTarget & { _forecast?: boolean })),
+  ];
+
   const maxVal = Math.max(
-    ...sorted.flatMap((t) => [Number(t.target_amount), Number(t.actual_amount)]),
+    ...allForDisplay.flatMap((t) => [Number(t.target_amount), Number(t.actual_amount)]),
     1,
   );
 
   const W = 560, H = 140, LABEL_H = 20;
-  const groupW = W / sorted.length;
+  const groupW = W / allForDisplay.length;
   const barW = Math.min(groupW * 0.32, 28);
   const gap = 3;
 
-  function periodLabel(t: RevenueTarget) {
+  function periodLabel(t: RevenueTarget & { _forecast?: boolean }) {
     const d = new Date(t.period_start + 'T00:00:00');
     if (t.period_type === 'yearly')    return String(d.getFullYear());
     if (t.period_type === 'quarterly') return `Q${Math.ceil((d.getMonth() + 1) / 3)} ${String(d.getFullYear()).slice(2)}`;
     return format(d, 'MMM yy');
   }
 
+  // Build polyline path for actual values (only historical)
+  const actualPoints = sorted
+    .map((t, i) => {
+      const actual = Number(t.actual_amount);
+      if (!actual) return null;
+      const cx = i * groupW + groupW / 2;
+      return { x: cx, y: H - (actual / maxVal) * H };
+    })
+    .filter((p): p is { x: number; y: number } => p !== null);
+
+  // Extend with forecast points
+  const forecastPolyline = forecastMonths.map((f, i) => {
+    const cx = (sorted.length + i) * groupW + groupW / 2;
+    return { x: cx, y: H - (f.projected / maxVal) * H };
+  });
+
+  const trendlinePoints = actualPoints.length >= 2
+    ? [...actualPoints.slice(-1), ...forecastPolyline]
+    : [];
+
   return (
     <div className="rounded-lg border bg-card p-4">
-      <div className="flex items-center gap-4 mb-3 text-xs text-muted-foreground">
+      <div className="flex items-center gap-4 mb-3 text-xs text-muted-foreground flex-wrap">
         <div className="flex items-center gap-1.5">
           <div className="h-2.5 w-2.5 rounded-sm" style={{ background: 'hsl(var(--muted-foreground) / 0.25)' }} />
           Target
@@ -69,11 +141,43 @@ function RevenueChart({ targets }: { targets: RevenueTarget[] }) {
           <div className="h-2.5 w-2.5 rounded-sm" style={{ background: 'hsl(var(--primary))' }} />
           Actual
         </div>
+        {forecastMonths.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <svg width="18" height="10"><line x1="0" y1="5" x2="18" y2="5" stroke="hsl(var(--primary))" strokeWidth="2" strokeDasharray="4 3" strokeOpacity="0.6" /></svg>
+            Forecast
+          </div>
+        )}
       </div>
       <svg viewBox={`0 0 ${W} ${H + LABEL_H}`} className="w-full overflow-visible">
         {/* Baseline */}
         <line x1="0" y1={H} x2={W} y2={H} style={{ stroke: 'hsl(var(--border))', strokeWidth: 1 }} />
-        {sorted.map((t, i) => {
+
+        {/* Forecast separator */}
+        {forecastMonths.length > 0 && (
+          <line
+            x1={sorted.length * groupW} y1="0"
+            x2={sorted.length * groupW} y2={H}
+            stroke="hsl(var(--muted-foreground))"
+            strokeOpacity="0.2"
+            strokeWidth="1"
+            strokeDasharray="4 3"
+          />
+        )}
+
+        {/* Trend / forecast line */}
+        {trendlinePoints.length >= 2 && (
+          <polyline
+            points={trendlinePoints.map((p) => `${p.x},${p.y}`).join(' ')}
+            fill="none"
+            stroke="hsl(var(--primary))"
+            strokeOpacity="0.55"
+            strokeWidth="2"
+            strokeDasharray="5 4"
+          />
+        )}
+
+        {allForDisplay.map((t, i) => {
+          const isForecast = (t as RevenueTarget & { _forecast?: boolean })._forecast;
           const target = Number(t.target_amount);
           const actual = Number(t.actual_amount);
           const targetH = (target / maxVal) * H;
@@ -81,21 +185,34 @@ function RevenueChart({ targets }: { targets: RevenueTarget[] }) {
           const cx = i * groupW + groupW / 2;
           return (
             <g key={t.id}>
-              <rect
-                x={cx - barW - gap / 2} y={H - targetH}
-                width={barW} height={targetH} rx="2"
-                style={{ fill: 'hsl(var(--muted-foreground) / 0.25)' }}
-              />
-              <rect
-                x={cx + gap / 2} y={H - actualH}
-                width={barW} height={actualH} rx="2"
-                style={{ fill: 'hsl(var(--primary))' }}
-              />
+              {!isForecast && target > 0 && (
+                <rect
+                  x={cx - barW - gap / 2} y={H - targetH}
+                  width={barW} height={targetH} rx="2"
+                  style={{ fill: 'hsl(var(--muted-foreground) / 0.25)' }}
+                />
+              )}
+              {actual > 0 && (
+                <rect
+                  x={cx + gap / 2} y={H - actualH}
+                  width={barW} height={actualH} rx="2"
+                  style={{
+                    fill: isForecast ? 'hsl(var(--primary) / 0.25)' : 'hsl(var(--primary))',
+                    stroke: isForecast ? 'hsl(var(--primary))' : 'none',
+                    strokeWidth: isForecast ? 1.5 : 0,
+                    strokeDasharray: isForecast ? '4 3' : 'none',
+                  }}
+                />
+              )}
               <text
                 x={cx} y={H + 14} textAnchor="middle"
-                style={{ fill: 'hsl(var(--muted-foreground))', fontSize: '10px' }}
+                style={{
+                  fill: isForecast ? 'hsl(var(--primary) / 0.6)' : 'hsl(var(--muted-foreground))',
+                  fontSize: '10px',
+                  fontStyle: isForecast ? 'italic' : 'normal',
+                }}
               >
-                {periodLabel(t)}
+                {periodLabel(t as RevenueTarget & { _forecast?: boolean })}
               </text>
             </g>
           );

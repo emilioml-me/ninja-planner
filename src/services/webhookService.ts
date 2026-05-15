@@ -142,6 +142,13 @@ async function _deliver(
   );
 }
 
+/** Retry delays: immediate → 10 s → 60 s */
+const RETRY_DELAYS_MS = [0, 10_000, 60_000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function _deliverToEndpoint(
   endpoint: WebhookEndpoint,
   eventType: string,
@@ -154,24 +161,42 @@ async function _deliverToEndpoint(
   let error: string | null = null;
   let status = 'failed';
 
-  try {
-    const res = await fetch(endpoint.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Ninja-Event': eventType,
-        'X-Ninja-Signature': signature,
-        'X-Ninja-Delivery': deliveryId,
-      },
-      body,
-      signal: AbortSignal.timeout(8_000),
-    });
-    httpStatus = res.status;
-    status = res.ok ? 'success' : 'failed';
-    if (!res.ok) error = `HTTP ${res.status}`;
-  } catch (err) {
-    error = err instanceof Error ? err.message : String(err);
-    logger.warn({ endpointId: endpoint.id, url: endpoint.url, eventType, error }, 'Webhook delivery failed');
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) await sleep(RETRY_DELAYS_MS[attempt]);
+
+    try {
+      const res = await fetch(endpoint.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Ninja-Event': eventType,
+          'X-Ninja-Signature': signature,
+          'X-Ninja-Delivery': deliveryId,
+          'X-Ninja-Retry': String(attempt),
+        },
+        body,
+        signal: AbortSignal.timeout(8_000),
+      });
+      httpStatus = res.status;
+      if (res.ok) {
+        status = 'success';
+        error = null;
+        break; // ✓ delivered
+      }
+      error = `HTTP ${res.status}`;
+      if (res.status < 500) break; // 4xx — receiver issue, don't retry
+      // 5xx — try again
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      // Network / timeout error — will retry if attempts remain
+    }
+  }
+
+  if (status !== 'success') {
+    logger.warn(
+      { endpointId: endpoint.id, url: endpoint.url, eventType, error, attempts: RETRY_DELAYS_MS.length },
+      'Webhook delivery failed after retries',
+    );
   }
 
   // Log delivery (best-effort, don't block or throw)

@@ -5,6 +5,7 @@ import {
   getSprints, createSprint, updateSprint, deleteSprint, getSprintTasks,
 } from '../services/sprintService.js';
 import { pool } from '../config/db.js';
+import { createNotification } from '../services/notificationService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -24,9 +25,51 @@ const updateSchema = createSchema.partial();
 // GET /api/sprints
 router.get('/', async (req, res, next) => {
   try {
-    res.json(await getSprints(req.workspace.id));
+    const sprints = await getSprints(req.workspace.id);
+    res.json(sprints);
+
+    // Fire-and-forget: check for sprints ending soon (≤ 2 days) and notify if not already notified today
+    checkSprintEndAlerts(req.workspace.id, req.auth.userId, sprints).catch(() => {});
   } catch (err) { next(err); }
 });
+
+async function checkSprintEndAlerts(
+  workspaceId: string,
+  userId: string,
+  sprints: Awaited<ReturnType<typeof getSprints>>,
+): Promise<void> {
+  const now = Date.now();
+  const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+
+  for (const sprint of sprints) {
+    if (sprint.status !== 'active' || !sprint.end_date) continue;
+    const endsAt = new Date(sprint.end_date + 'T23:59:59').getTime();
+    const msLeft = endsAt - now;
+    if (msLeft <= 0 || msLeft > twoDaysMs) continue;
+
+    // Dedup: only send if no sprint-ending notification for this sprint in last 20 hours
+    const recent = await pool.query<{ id: string }>(
+      `SELECT id FROM notifications
+       WHERE workspace_id = $1
+         AND type = 'sprint_ending'
+         AND body = $2
+         AND created_at > NOW() - INTERVAL '20 hours'
+       LIMIT 1`,
+      [workspaceId, sprint.id],
+    );
+    if (recent.rows.length > 0) continue;
+
+    const daysLeft = Math.ceil(msLeft / 86_400_000);
+    createNotification({
+      workspaceId,
+      recipientClerkId: userId,
+      type: 'sprint_ending',
+      title: `Sprint "${sprint.name}" ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}`,
+      body: sprint.id, // store sprint id for dedup
+      link: '/sprints',
+    }).catch(() => {});
+  }
+}
 
 // POST /api/sprints
 router.post('/', async (req, res, next) => {
