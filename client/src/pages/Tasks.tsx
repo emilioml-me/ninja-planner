@@ -24,10 +24,20 @@ import {
 } from '@/components/ui/dialog';
 import {
   Plus, Search, X, LayoutGrid, List, MoreVertical, Pencil, Trash2, Clock, Calendar,
-  CheckSquare, ChevronDown, Download,
+  CheckSquare, ChevronDown, Download, FileText,
 } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
+
+interface TaskTemplate {
+  id: string;
+  name: string;
+  title: string;
+  description: string | null;
+  priority: Task['priority'];
+  tags: string[];
+  checklist: { id: string; text: string; done: boolean }[];
+}
 
 const COLUMNS: { id: Task['status']; title: string }[] = [
   { id: 'todo',        title: 'To Do' },
@@ -260,6 +270,7 @@ export default function Tasks() {
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
 
   const { data: tasks = [], isLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
@@ -268,6 +279,12 @@ export default function Tasks() {
 
   const { members, displayName, initials } = useMembers();
   const isAdmin = useIsAdmin();
+
+  const { data: templates = [] } = useQuery<TaskTemplate[]>({
+    queryKey: ['/api/task-templates'],
+    queryFn: () => apiRequest<TaskTemplate[]>('GET', '/api/task-templates'),
+    staleTime: 60_000,
+  });
 
   // Listen for command palette "new task" event
   const openNewTask = useCallback(() => {
@@ -422,8 +439,33 @@ export default function Tasks() {
     reorderMutation.mutate({ taskId: cardId, newStatus, newPosition, resequence });
   };
 
+  const handleSelectTemplate = (tpl: TaskTemplate) => {
+    setTemplatePickerOpen(false);
+    setEditingTask({
+      id: '',
+      title: tpl.title,
+      description: tpl.description,
+      status: 'todo',
+      priority: tpl.priority,
+      tags: tpl.tags,
+      checklist: tpl.checklist.map((item) => ({ ...item, done: false })),
+      assignee_clerk_id: null,
+      due_date: null,
+      position: 0,
+      created_by: '',
+      workspace_id: '',
+      sprint_id: null,
+      recurrence_rule: null,
+      created_at: '',
+      updated_at: '',
+      deleted_at: null,
+    } as Task);
+    setDefaultStatus('todo');
+    setDialogOpen(true);
+  };
+
   const handleSubmit = (data: Partial<Task> & { title: string }) => {
-    if (editingTask) {
+    if (editingTask?.id) {
       updateMutation.mutate({ ...data, id: editingTask.id });
     } else {
       createMutation.mutate({ ...data, status: data.status ?? defaultStatus });
@@ -486,6 +528,17 @@ export default function Tasks() {
             <Download className="h-4 w-4" />
             <span className="hidden sm:inline">Export</span>
           </Button>
+          {templates.length > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-2"
+              onClick={() => setTemplatePickerOpen(true)}
+            >
+              <FileText className="h-4 w-4" />
+              <span className="hidden sm:inline">From Template</span>
+            </Button>
+          )}
           <Button
             size="sm"
             className="gap-2"
@@ -659,6 +712,37 @@ export default function Tasks() {
               {bulkDeleteMutation.isPending ? 'Deleting…' : `Delete ${selectedCount}`}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Template picker */}
+      <Dialog open={templatePickerOpen} onOpenChange={setTemplatePickerOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileText className="h-4 w-4" /> Choose a Template
+            </DialogTitle>
+            <DialogDescription>Select a template to pre-fill the task form.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {templates.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4">No templates yet.</p>
+            ) : templates.map((tpl) => (
+              <button
+                key={tpl.id}
+                className="w-full text-left rounded-lg border p-3 hover:bg-muted/50 transition-colors space-y-1"
+                onClick={() => handleSelectTemplate(tpl)}
+              >
+                <p className="text-sm font-medium">{tpl.name}</p>
+                <p className="text-xs text-muted-foreground truncate">{tpl.title}</p>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="capitalize">{tpl.priority}</span>
+                  {tpl.tags.length > 0 && <span>· {tpl.tags.slice(0,3).map((t) => `#${t}`).join(' ')}</span>}
+                  {tpl.checklist.length > 0 && <span>· {tpl.checklist.length} checklist item{tpl.checklist.length !== 1 ? 's' : ''}</span>}
+                </div>
+              </button>
+            ))}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

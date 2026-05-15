@@ -44,6 +44,7 @@ import shareRouter        from './routes/share.js';
 import webhookEndpointsRouter from './routes/webhook-endpoints.js';
 import invitesRouter          from './routes/invites.js';
 import keyResultsRouter       from './routes/keyResults.js';
+import taskTemplatesRouter    from './routes/taskTemplates.js';
 
 const app = express();
 
@@ -120,6 +121,7 @@ app.use('/api/notifications', notificationsRouter);
 app.use('/api/integrations',  integrationsRouter);
 app.use('/api/goals',         goalsRouter);
 app.use('/api/goals/:goalId/key-results', keyResultsRouter); // mergeParams passes :goalId
+app.use('/api/task-templates',            taskTemplatesRouter);
 app.use('/api/sprints',       sprintsRouter);
 app.use('/api/webhooks',      webhookEndpointsRouter);
 app.use('/api/workspaces',    invitesRouter);   // /api/workspaces/me/invites
