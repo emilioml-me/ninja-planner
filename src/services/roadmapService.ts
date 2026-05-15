@@ -50,7 +50,7 @@ export async function createRoadmapItem(
     phase?: string;
     status?: string;
     priority?: number;
-    external_ref?: string;
+    external_ref?: string | null;
   },
 ): Promise<RoadmapItem> {
   const result = await pool.query<RoadmapItem>(

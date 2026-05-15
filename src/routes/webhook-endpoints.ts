@@ -15,16 +15,8 @@ router.use(requireWorkspace);
 // ─── SSRF protection ──────────────────────────────────────────────────────────
 // Reject URLs that would cause the server to call itself or internal services.
 
-const PRIVATE_IP_RE = /^(
-  127\.\d+\.\d+\.\d+       | # 127.0.0.0/8 loopback
-  10\.\d+\.\d+\.\d+        | # 10.0.0.0/8  RFC-1918
-  172\.(1[6-9]|2\d|3[01])\.\d+\.\d+ | # 172.16-31.x  RFC-1918
-  192\.168\.\d+\.\d+       | # 192.168.0.0/16 RFC-1918
-  169\.254\.\d+\.\d+       | # 169.254.0.0/16 link-local
-  ::1$                     | # IPv6 loopback
-  fd[0-9a-f]{2}:           | # IPv6 ULA fc00::/7
-  0\.0\.0\.0
-)$/xi;
+// Matches loopback, RFC-1918, link-local, IPv6 ULA, and unspecified addresses
+const PRIVATE_IP_RE = /^(127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|::1$|fd[0-9a-f]{2}:|0\.0\.0\.0)$/i;
 
 const PRIVATE_HOST_RE = /^(localhost|.*\.local|.*\.internal|.*\.lan)$/i;
 

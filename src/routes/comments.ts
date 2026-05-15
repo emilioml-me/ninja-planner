@@ -4,6 +4,7 @@ import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { getComments, createComment, deleteComment } from '../services/commentService.js';
 import { createNotification } from '../services/notificationService.js';
 import { pool } from '../config/db.js';
+import { sendCommentMentionEmail, resolveClerkEmail } from '../services/emailService.js';
 
 const router = Router({ mergeParams: true }); // inherit :taskId from parent
 router.use(requireWorkspace);
@@ -16,7 +17,7 @@ const createSchema = z.object({
 // GET /api/tasks/:taskId/comments
 router.get('/', async (req, res, next) => {
   try {
-    const comments = await getComments(req.params.taskId, req.workspace.id);
+    const comments = await getComments((req.params as Record<string, string>).taskId, req.workspace.id);
     res.json(comments);
   } catch (err) {
     next(err);
@@ -36,30 +37,57 @@ router.post('/', async (req, res, next) => {
     const taskResult = await pool.query<{ id: string; title: string; assignee_clerk_id: string | null; created_by: string }>(
       `SELECT id, title, assignee_clerk_id, created_by FROM tasks
        WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
-      [req.params.taskId, req.workspace.id],
+      [(req.params as Record<string, string>).taskId, req.workspace.id],
     );
     if (taskResult.rows.length === 0) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
 
-    const comment = await createComment(req.params.taskId, req.auth.userId, parsed.data.body);
+    const comment = await createComment((req.params as Record<string, string>).taskId, req.auth.userId, parsed.data.body);
 
     // Notify task owner + assignee (not the commenter themselves)
     const task = taskResult.rows[0];
     const recipients = new Set([task.created_by, task.assignee_clerk_id].filter(Boolean) as string[]);
     recipients.delete(req.auth.userId);
 
-    for (const recipientClerkId of recipients) {
-      createNotification({
-        workspaceId: req.workspace.id,
-        recipientClerkId,
-        type: 'comment_added',
-        title: `New comment on "${task.title}"`,
-        body: parsed.data.body.slice(0, 120),
-        link: `/tasks`,
-      }).catch(() => {});
-    }
+    // Resolve commenter name once for email (fire-and-forget)
+    resolveClerkEmail(req.auth.userId).then((commenter) => {
+      for (const recipientClerkId of recipients) {
+        createNotification({
+          workspaceId: req.workspace.id,
+          recipientClerkId,
+          type: 'comment_added',
+          title: `New comment on "${task.title}"`,
+          body: parsed.data.body.slice(0, 120),
+          link: `/tasks`,
+        }).catch(() => {});
+
+        resolveClerkEmail(recipientClerkId).then((recipient) => {
+          if (!recipient) return;
+          return sendCommentMentionEmail({
+            to: recipient.email,
+            recipientName: recipient.name,
+            commenter: commenter?.name ?? 'A teammate',
+            taskTitle: task.title,
+            commentBody: parsed.data.body,
+            workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+          });
+        }).catch(() => {});
+      }
+    }).catch(() => {
+      // Fallback: still send in-app notifications even if email resolution fails
+      for (const recipientClerkId of recipients) {
+        createNotification({
+          workspaceId: req.workspace.id,
+          recipientClerkId,
+          type: 'comment_added',
+          title: `New comment on "${task.title}"`,
+          body: parsed.data.body.slice(0, 120),
+          link: `/tasks`,
+        }).catch(() => {});
+      }
+    });
 
     // @mention notifications — validate mentions are workspace members, then notify
     if (parsed.data.mentions?.length) {
@@ -82,6 +110,22 @@ router.post('/', async (req, res, next) => {
           title: `You were mentioned in "${task.title}"`,
           body: parsed.data.body.slice(0, 120),
           link: `/tasks`,
+        }).catch(() => {});
+
+        // Email: @mention
+        Promise.all([
+          resolveClerkEmail(mentionedId),
+          resolveClerkEmail(req.auth.userId),
+        ]).then(([recipient, commenter]) => {
+          if (!recipient) return;
+          return sendCommentMentionEmail({
+            to: recipient.email,
+            recipientName: recipient.name,
+            commenter: commenter?.name ?? 'A teammate',
+            taskTitle: task.title,
+            commentBody: parsed.data.body,
+            workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+          });
         }).catch(() => {});
       }
     }

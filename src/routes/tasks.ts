@@ -16,6 +16,12 @@ import { getWorkload } from '../services/commentService.js';
 import { createNotification } from '../services/notificationService.js';
 import { fireWebhooks } from '../services/webhookService.js';
 import { getGoalProgressForTask } from '../services/goalService.js';
+import {
+  sendTaskAssignedEmail,
+  sendDueDateReminderEmail,
+  sendGoalMilestoneEmail,
+  resolveClerkEmail,
+} from '../services/emailService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -110,6 +116,18 @@ router.post('/', async (req, res, next) => {
         title: `You were assigned "${task.title}"`,
         link: '/tasks',
       }).catch(() => {});
+
+      // Email: task assigned
+      resolveClerkEmail(task.assignee_clerk_id).then((user) => {
+        if (!user) return;
+        return sendTaskAssignedEmail({
+          to: user.email,
+          recipientName: user.name,
+          taskTitle: task.title,
+          assigner: req.auth.userId,
+          workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+        });
+      }).catch(() => {});
     }
 
     fireWebhooks(req.workspace.id, 'task.created', { task });
@@ -122,6 +140,18 @@ router.post('/', async (req, res, next) => {
         type: 'due_date_set',
         title: `"${task.title}" is due on ${task.due_date}`,
         link: '/tasks',
+      }).catch(() => {});
+
+      // Email: due date reminder
+      resolveClerkEmail(task.assignee_clerk_id).then((user) => {
+        if (!user) return;
+        return sendDueDateReminderEmail({
+          to: user.email,
+          recipientName: user.name,
+          taskTitle: task.title,
+          dueDate: task.due_date!,
+          workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+        });
       }).catch(() => {});
     }
 
@@ -214,6 +244,18 @@ router.patch('/:id', async (req, res, next) => {
         title: `You were assigned "${task.title}"`,
         link: '/tasks',
       }).catch(() => {});
+
+      // Email: task assigned
+      resolveClerkEmail(parsed.data.assignee_clerk_id).then((user) => {
+        if (!user) return;
+        return sendTaskAssignedEmail({
+          to: user.email,
+          recipientName: user.name,
+          taskTitle: task.title,
+          assigner: req.auth.userId,
+          workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+        });
+      }).catch(() => {});
     }
 
     // Spawn recurring copy when task is completed
@@ -232,6 +274,20 @@ router.patch('/:id', async (req, res, next) => {
           : `Due date removed from "${task.title}"`,
         link: '/tasks',
       }).catch(() => {});
+
+      // Email: due date reminder (only when a date is actually set, not cleared)
+      if (task.due_date) {
+        resolveClerkEmail(task.assignee_clerk_id).then((user) => {
+          if (!user) return;
+          return sendDueDateReminderEmail({
+            to: user.email,
+            recipientName: user.name,
+            taskTitle: task.title,
+            dueDate: task.due_date!,
+            workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+          });
+        }).catch(() => {});
+      }
     }
 
     // Goal milestone notifications — when task marked done, check 50%/100% crossings
@@ -252,6 +308,16 @@ router.patch('/:id', async (req, res, next) => {
               title: `🎉 Goal complete: "${goal.title}"`,
               link: '/goals',
             }).catch(() => {});
+            resolveClerkEmail(goal.created_by).then((user) => {
+              if (!user) return;
+              return sendGoalMilestoneEmail({
+                to: user.email,
+                recipientName: user.name,
+                goalTitle: goal.title,
+                milestone: '100%',
+                workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+              });
+            }).catch(() => {});
           } else if (crossed50) {
             createNotification({
               workspaceId: req.workspace.id,
@@ -259,6 +325,16 @@ router.patch('/:id', async (req, res, next) => {
               type: 'goal_milestone',
               title: `Halfway there on "${goal.title}" (50%)`,
               link: '/goals',
+            }).catch(() => {});
+            resolveClerkEmail(goal.created_by).then((user) => {
+              if (!user) return;
+              return sendGoalMilestoneEmail({
+                to: user.email,
+                recipientName: user.name,
+                goalTitle: goal.title,
+                milestone: '50%',
+                workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+              });
             }).catch(() => {});
           }
         }
