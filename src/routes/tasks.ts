@@ -25,6 +25,12 @@ const TASK_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
 
 const RECURRENCE_RULES = ['daily', 'weekly', 'biweekly', 'monthly'] as const;
 
+const checklistItemSchema = z.object({
+  id:   z.string().min(1).max(64),
+  text: z.string().min(1).max(500),
+  done: z.boolean(),
+});
+
 const createSchema = z.object({
   title:              z.string().min(1).max(500),
   description:        z.string().optional(),
@@ -36,6 +42,7 @@ const createSchema = z.object({
   position:           z.number().int().optional(),
   sprint_id:          z.string().uuid().nullable().optional(),
   recurrence_rule:    z.enum(RECURRENCE_RULES).nullable().optional(),
+  checklist:          z.array(checklistItemSchema).max(50).optional(),
 });
 
 const updateSchema = createSchema.omit({ title: true }).extend({

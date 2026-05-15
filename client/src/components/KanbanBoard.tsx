@@ -26,6 +26,7 @@ export interface KanbanCard {
   priority?: 'low' | 'medium' | 'high' | 'urgent';
   due_date?: string | null;
   assignee_clerk_id?: string | null;
+  checklist?: { id: string; text: string; done: boolean }[];
 }
 
 export interface KanbanColumnData {

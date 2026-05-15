@@ -30,7 +30,7 @@ import {
 import { useApiClient } from '@/lib/api';
 import { type WorkspaceMember } from '@/hooks/use-members';
 import { useTaskComments, useAddComment, useDeleteComment } from '@/hooks/use-notifications';
-import { Send, Trash2, MessageSquare } from 'lucide-react';
+import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface TaskActivity {
@@ -57,6 +57,12 @@ function formatAction(action: string, payload: Record<string, unknown> | null): 
   }
 }
 
+export interface ChecklistItem {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -69,6 +75,7 @@ export interface Task {
   assignee_clerk_id: string | null;
   recurrence_rule?: string | null;
   sprint_id?: string | null;
+  checklist?: ChecklistItem[];
 }
 
 const taskFormSchema = z.object({
@@ -92,6 +99,104 @@ interface TaskFormDialogProps {
   defaultStatus?: Task['status'];
   isPending?: boolean;
   members?: WorkspaceMember[];
+}
+
+// ─── Checklist tab ────────────────────────────────────────────────────────────
+
+function ChecklistTab({
+  items,
+  onChange,
+}: {
+  items: ChecklistItem[];
+  onChange: (items: ChecklistItem[]) => void;
+}) {
+  const [newText, setNewText] = useState('');
+  const doneCount = items.filter((i) => i.done).length;
+
+  const addItem = () => {
+    const text = newText.trim();
+    if (!text) return;
+    onChange([...items, { id: crypto.randomUUID(), text, done: false }]);
+    setNewText('');
+  };
+
+  const toggleItem = (id: string) =>
+    onChange(items.map((i) => (i.id === id ? { ...i, done: !i.done } : i)));
+
+  const removeItem = (id: string) => onChange(items.filter((i) => i.id !== id));
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') { e.preventDefault(); addItem(); }
+  };
+
+  return (
+    <div className="space-y-3">
+      {items.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
+            <span>{doneCount} of {items.length} done</span>
+            <span>{items.length > 0 ? Math.round((doneCount / items.length) * 100) : 0}%</span>
+          </div>
+          <div className="h-1 rounded-full bg-muted overflow-hidden">
+            <div
+              className="h-full bg-primary transition-all rounded-full"
+              style={{ width: `${items.length > 0 ? (doneCount / items.length) * 100 : 0}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-1 max-h-52 overflow-y-auto pr-1">
+        {items.length === 0 && (
+          <p className="text-xs text-muted-foreground text-center py-4">No checklist items yet.</p>
+        )}
+        {items.map((item) => (
+          <div
+            key={item.id}
+            className="flex items-center gap-2 group rounded-md px-1 py-1 hover:bg-muted/40"
+          >
+            <button
+              type="button"
+              onClick={() => toggleItem(item.id)}
+              className="shrink-0 text-muted-foreground hover:text-primary transition-colors"
+            >
+              {item.done
+                ? <CheckSquare2 className="h-4 w-4 text-primary" />
+                : <Square className="h-4 w-4" />}
+            </button>
+            <span className={cn('flex-1 text-sm', item.done && 'line-through text-muted-foreground')}>
+              {item.text}
+            </span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity"
+              onClick={() => removeItem(item.id)}
+            >
+              <Trash2 className="h-3 w-3 text-muted-foreground" />
+            </Button>
+          </div>
+        ))}
+      </div>
+
+      <Separator />
+
+      <div className="flex gap-2">
+        <Input
+          placeholder="Add an item…"
+          value={newText}
+          onChange={(e) => setNewText(e.target.value)}
+          onKeyDown={handleKeyDown}
+          className="flex-1 h-8 text-sm"
+          maxLength={500}
+        />
+        <Button type="button" size="sm" variant="outline" onClick={addItem} disabled={!newText.trim()}>
+          <Plus className="h-3.5 w-3.5 mr-1" /> Add
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 // ─── Comments tab ─────────────────────────────────────────────────────────────
@@ -226,6 +331,7 @@ export function TaskFormDialog({
 }: TaskFormDialogProps) {
   const { userId } = useAuth();
   const { apiRequest } = useApiClient();
+  const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
 
   const { data: taskDetail } = useQuery<{ task: Task; activity: TaskActivity[] }>({
     queryKey: ['/api/tasks', task?.id],
@@ -261,6 +367,7 @@ export function TaskFormDialog({
         assignee_clerk_id: task?.assignee_clerk_id ?? '',
         recurrence_rule: (task?.recurrence_rule ?? '') as '' | 'daily' | 'weekly' | 'biweekly' | 'monthly',
       });
+      setChecklist(task?.checklist ?? []);
     }
   }, [open, task, defaultStatus, form]);
 
@@ -277,6 +384,7 @@ export function TaskFormDialog({
       tags,
       assignee_clerk_id: data.assignee_clerk_id || null,
       recurrence_rule: data.recurrence_rule || null,
+      checklist,
     });
   };
 
@@ -293,6 +401,14 @@ export function TaskFormDialog({
           <Tabs defaultValue="details" className="mt-1">
             <TabsList className="w-full">
               <TabsTrigger value="details" className="flex-1">Details</TabsTrigger>
+              <TabsTrigger value="checklist" className="flex-1 gap-1.5">
+                Checklist
+                {checklist.length > 0 && (
+                  <span className="text-[10px] bg-primary/15 text-primary rounded px-1 font-medium">
+                    {checklist.filter((i) => i.done).length}/{checklist.length}
+                  </span>
+                )}
+              </TabsTrigger>
               <TabsTrigger value="comments" className="flex-1">Comments</TabsTrigger>
               {activity.length > 0 && (
                 <TabsTrigger value="activity" className="flex-1">Activity</TabsTrigger>
@@ -416,6 +532,11 @@ export function TaskFormDialog({
                   </DialogFooter>
                 </form>
               </Form>
+            </TabsContent>
+
+            {/* ── Checklist tab ────────────────────────────────────────────── */}
+            <TabsContent value="checklist" className="mt-4">
+              <ChecklistTab items={checklist} onChange={setChecklist} />
             </TabsContent>
 
             {/* ── Comments tab ────────────────────────────────────────────── */}

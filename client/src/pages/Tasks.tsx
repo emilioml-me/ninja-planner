@@ -54,6 +54,7 @@ function taskToCard(task: Task): KanbanCard {
     priority: task.priority,
     due_date: task.due_date,
     assignee_clerk_id: task.assignee_clerk_id,
+    checklist: task.checklist,
   };
 }
 

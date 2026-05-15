@@ -12,7 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, MoreVertical, Calendar, AlertCircle, Trash2, Clock } from 'lucide-react';
+import { Plus, MoreVertical, Calendar, AlertCircle, Trash2, Clock, CheckSquare2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { KanbanCard } from './KanbanBoard';
 import { type WorkspaceMember } from '@/hooks/use-members';
@@ -126,6 +126,24 @@ function SortableCard({
               </Badge>
             ))}
           </div>
+
+          {card.checklist && card.checklist.length > 0 && (() => {
+            const total = card.checklist.length;
+            const done = card.checklist.filter((i) => i.done).length;
+            const pct = Math.round((done / total) * 100);
+            return (
+              <div className="flex items-center gap-2 mb-2">
+                <CheckSquare2 className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                <div className="flex-1 bg-muted rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className={cn('h-full rounded-full transition-all', done === total ? 'bg-green-500' : 'bg-primary')}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="text-xs text-muted-foreground whitespace-nowrap">{done}/{total}</span>
+              </div>
+            );
+          })()}
 
           {card.assignee_clerk_id && (() => {
             const member = members.find((m) => m.clerk_user_id === card.assignee_clerk_id);
