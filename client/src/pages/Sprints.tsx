@@ -23,7 +23,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X } from 'lucide-react';
+import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
 
@@ -132,6 +132,11 @@ export default function Sprints() {
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
+      {/* Velocity chart */}
+      {sprints.filter((s) => s.status === 'completed').length >= 2 && (
+        <VelocityChart sprints={sprints.filter((s) => s.status === 'completed')} />
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -273,6 +278,121 @@ export default function Sprints() {
     </div>
   );
 }
+
+// ─── Velocity Chart ───────────────────────────────────────────────────────────
+
+function VelocityChart({ sprints }: { sprints: Sprint[] }) {
+  const last = sprints.slice(-8); // last 8 completed sprints
+  const maxDone = Math.max(...last.map((s) => s.done_tasks), 1);
+  const maxTotal = Math.max(...last.map((s) => s.total_tasks), 1);
+  const chartHeight = 100;
+  const barWidth = 24;
+  const gap = 12;
+  const chartWidth = last.length * (barWidth * 2 + gap + 4);
+
+  const avg = Math.round(last.reduce((sum, s) => sum + s.done_tasks, 0) / last.length);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <BarChart2 className="h-4 w-4 text-primary" />
+          Sprint Velocity
+          <span className="ml-auto text-xs font-normal text-muted-foreground">
+            avg {avg} tasks/sprint
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <svg width={Math.max(chartWidth, 300)} height={chartHeight + 36} className="overflow-visible">
+            {/* Y-axis guideline */}
+            <line x1="0" y1={chartHeight} x2={Math.max(chartWidth, 300)} y2={chartHeight} stroke="currentColor" strokeOpacity="0.1" strokeWidth="1" />
+            {/* Average line */}
+            {avg > 0 && (
+              <>
+                <line
+                  x1="0"
+                  y1={chartHeight - (avg / maxDone) * chartHeight}
+                  x2={Math.max(chartWidth, 300)}
+                  y2={chartHeight - (avg / maxDone) * chartHeight}
+                  stroke="hsl(var(--primary))"
+                  strokeOpacity="0.4"
+                  strokeWidth="1"
+                  strokeDasharray="4 3"
+                />
+                <text
+                  x={Math.max(chartWidth, 300) - 2}
+                  y={chartHeight - (avg / maxDone) * chartHeight - 3}
+                  fontSize="9"
+                  textAnchor="end"
+                  fill="hsl(var(--primary))"
+                  fillOpacity="0.7"
+                >
+                  avg
+                </text>
+              </>
+            )}
+            {last.map((sprint, i) => {
+              const x = i * (barWidth * 2 + gap + 4);
+              const totalH = maxTotal > 0 ? (sprint.total_tasks / maxTotal) * chartHeight : 0;
+              const doneH  = maxDone  > 0 ? (sprint.done_tasks  / maxDone)  * chartHeight : 0;
+              const label  = sprint.name.length > 10 ? sprint.name.slice(0, 9) + '…' : sprint.name;
+              return (
+                <g key={sprint.id}>
+                  {/* Total bar (ghost) */}
+                  <rect
+                    x={x}
+                    y={chartHeight - totalH}
+                    width={barWidth}
+                    height={totalH}
+                    rx={3}
+                    className="fill-muted-foreground/20"
+                  />
+                  {/* Done bar */}
+                  <rect
+                    x={x}
+                    y={chartHeight - doneH}
+                    width={barWidth}
+                    height={doneH}
+                    rx={3}
+                    className="fill-primary/70"
+                  />
+                  {/* Done count label */}
+                  {doneH > 12 && (
+                    <text x={x + barWidth / 2} y={chartHeight - doneH + 11} fontSize="9" textAnchor="middle" className="fill-primary-foreground font-medium">
+                      {sprint.done_tasks}
+                    </text>
+                  )}
+                  {/* Sprint name */}
+                  <text
+                    x={x + barWidth / 2}
+                    y={chartHeight + 14}
+                    fontSize="9"
+                    textAnchor="middle"
+                    className="fill-muted-foreground"
+                  >
+                    {label}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+        <div className="flex items-center gap-4 mt-1 text-[10px] text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-2 w-3 rounded-sm bg-primary/70" /> Completed
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-2 w-3 rounded-sm bg-muted-foreground/20" /> Total
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const STATUS_COLORS: Record<string, string> = {
   todo:        'bg-slate-200 text-slate-700',

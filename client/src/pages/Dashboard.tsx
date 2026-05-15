@@ -31,6 +31,9 @@ import {
   Zap,
   Circle,
   CheckCircle2,
+  Webhook,
+  CheckCircle,
+  XCircle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -83,6 +86,13 @@ interface Sprint {
   end_date: string | null;
   total_tasks: number;
   done_tasks: number;
+}
+
+interface WebhookHealth {
+  total: number;
+  active: number;
+  last_status: string | null;
+  last_delivered_at: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -173,6 +183,12 @@ export default function Dashboard() {
   const { data: sprints = [] } = useQuery<Sprint[]>({
     queryKey: ['/api/sprints'],
     queryFn: () => apiRequest<Sprint[]>('GET', '/api/sprints'),
+  });
+
+  const { data: webhookHealth } = useQuery<WebhookHealth>({
+    queryKey: ['/api/webhooks/health'],
+    queryFn: () => apiRequest<WebhookHealth>('GET', '/api/webhooks/health'),
+    staleTime: 60_000,
   });
 
   // ── Derived: tasks ──────────────────────────────────────────────────────────
@@ -622,6 +638,58 @@ export default function Dashboard() {
             )}
 
           </div>
+        )}
+
+        {/* ── Webhook health ──────────────────────────────────────────────── */}
+        {webhookHealth && webhookHealth.total > 0 && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Webhook className="h-4 w-4 text-primary" />
+                Webhook Health
+                <Badge
+                  variant={webhookHealth.last_status === 'success' ? 'default' : webhookHealth.last_status === 'failed' ? 'destructive' : 'secondary'}
+                  className="ml-auto text-xs"
+                >
+                  {webhookHealth.active}/{webhookHealth.total} active
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-6 text-sm">
+                <div className="flex items-center gap-2">
+                  {webhookHealth.last_status === 'success' ? (
+                    <CheckCircle className="h-4 w-4 text-green-500" />
+                  ) : webhookHealth.last_status === 'failed' ? (
+                    <XCircle className="h-4 w-4 text-destructive" />
+                  ) : (
+                    <Circle className="h-4 w-4 text-muted-foreground" />
+                  )}
+                  <span className="text-muted-foreground">
+                    Last delivery:{' '}
+                    <span className={cn(
+                      'font-medium',
+                      webhookHealth.last_status === 'success' ? 'text-green-600 dark:text-green-400' :
+                      webhookHealth.last_status === 'failed'  ? 'text-destructive' : 'text-muted-foreground',
+                    )}>
+                      {webhookHealth.last_status ?? 'none'}
+                    </span>
+                  </span>
+                </div>
+                {webhookHealth.last_delivered_at && (
+                  <span className="text-xs text-muted-foreground">
+                    {format(new Date(webhookHealth.last_delivered_at), 'MMM d, HH:mm')}
+                  </span>
+                )}
+              </div>
+              <Separator className="mt-4 mb-3" />
+              <Link href="/webhooks">
+                <a className="text-xs text-primary hover:underline flex items-center gap-1">
+                  Manage webhooks <ArrowRight className="h-3 w-3" />
+                </a>
+              </Link>
+            </CardContent>
+          </Card>
         )}
 
       </div>

@@ -22,7 +22,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink } from 'lucide-react';
+import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface RoadmapItem {
@@ -76,6 +76,8 @@ export default function Roadmap() {
   const [defaultStatus, setDefaultStatus] = useState<typeof STATUSES[number]>('idea');
   const [shareOpen, setShareOpen] = useState(false);
   const [shareToken, setShareToken] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [phaseFilter, setPhaseFilter] = useState('');
 
   const { data: items = [], isLoading } = useQuery<RoadmapItem[]>({
     queryKey: ['/api/roadmap'],
@@ -161,8 +163,17 @@ export default function Roadmap() {
     toast({ title: 'Link copied!' });
   };
 
+  const allPhases = [...new Set(items.map((i) => i.phase).filter(Boolean))] as string[];
+
+  const filteredItems = items.filter((item) => {
+    const q = searchQuery.toLowerCase().trim();
+    if (q && !item.title.toLowerCase().includes(q) && !item.description?.toLowerCase().includes(q)) return false;
+    if (phaseFilter && item.phase !== phaseFilter) return false;
+    return true;
+  });
+
   const byStatus = (status: string) =>
-    [...items.filter((i) => i.status === status)].sort((a, b) => a.priority - b.priority);
+    [...filteredItems.filter((i) => i.status === status)].sort((a, b) => a.priority - b.priority);
 
   return (
     <div className="flex flex-col h-full">
@@ -176,6 +187,62 @@ export default function Roadmap() {
             <Plus className="h-4 w-4" /> Add Item
           </Button>
         </div>
+      </div>
+
+      {/* Filter bar */}
+      <div className="flex items-center gap-2 px-6 py-2 border-b bg-muted/30 flex-wrap">
+        <div className="relative flex-1 min-w-48 max-w-72">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search items…"
+            className="w-full pl-8 pr-8 py-1.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        {allPhases.length > 0 && (
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="text-xs text-muted-foreground">Phase:</span>
+            <button
+              onClick={() => setPhaseFilter('')}
+              className={cn(
+                'text-xs px-2 py-1 rounded-md border transition-colors',
+                phaseFilter === '' ? 'bg-primary text-primary-foreground border-primary' : 'border-input hover:bg-muted',
+              )}
+            >
+              All
+            </button>
+            {allPhases.map((p) => (
+              <button
+                key={p}
+                onClick={() => setPhaseFilter(p === phaseFilter ? '' : p)}
+                className={cn(
+                  'text-xs px-2 py-1 rounded-md border transition-colors',
+                  phaseFilter === p ? 'bg-primary text-primary-foreground border-primary' : 'border-input hover:bg-muted',
+                )}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        )}
+        {(searchQuery || phaseFilter) && (
+          <button
+            onClick={() => { setSearchQuery(''); setPhaseFilter(''); }}
+            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+          >
+            <X className="h-3 w-3" /> Clear
+          </button>
+        )}
       </div>
 
       {isLoading ? (

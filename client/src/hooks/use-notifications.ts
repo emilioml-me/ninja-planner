@@ -80,8 +80,8 @@ export function useAddComment(taskId: string) {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: string) =>
-      apiRequest('POST', `/api/tasks/${taskId}/comments`, { body }),
+    mutationFn: ({ body, mentions }: { body: string; mentions?: string[] }) =>
+      apiRequest('POST', `/api/tasks/${taskId}/comments`, { body, mentions }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['/api/tasks', taskId, 'comments'] });
     },

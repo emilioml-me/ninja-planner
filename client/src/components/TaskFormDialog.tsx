@@ -96,6 +96,15 @@ interface TaskFormDialogProps {
 
 // ─── Comments tab ─────────────────────────────────────────────────────────────
 
+/** Extract @word tokens from text and match against member display names */
+function parseMentions(text: string, members: WorkspaceMember[]): WorkspaceMember[] {
+  const words = Array.from(text.matchAll(/@(\w+)/g)).map((m) => m[1].toLowerCase());
+  if (!words.length) return [];
+  return members.filter((m) =>
+    words.some((w) => m.display_name.toLowerCase().split(/\s+/).some((part) => part.startsWith(w))),
+  );
+}
+
 function CommentsTab({ task, members }: { task: Task; members: WorkspaceMember[] }) {
   const { userId } = useAuth();
   const [draft, setDraft] = useState('');
@@ -105,10 +114,14 @@ function CommentsTab({ task, members }: { task: Task; members: WorkspaceMember[]
 
   const memberMap = Object.fromEntries(members.map((m) => [m.clerk_user_id, m]));
 
+  // Live mention detection
+  const mentionedMembers = parseMentions(draft, members.filter((m) => m.clerk_user_id !== userId));
+
   const handleSend = () => {
     const body = draft.trim();
     if (!body) return;
-    addComment(body, { onSuccess: () => setDraft('') });
+    const mentions = mentionedMembers.map((m) => m.clerk_user_id);
+    addComment({ body, mentions: mentions.length ? mentions : undefined }, { onSuccess: () => setDraft('') });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -165,24 +178,36 @@ function CommentsTab({ task, members }: { task: Task; members: WorkspaceMember[]
       </div>
 
       {/* New comment input */}
-      <div className="flex gap-2">
-        <Textarea
-          placeholder="Write a comment… (⌘Enter to send)"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKeyDown}
-          rows={2}
-          className="flex-1 resize-none text-sm"
-          maxLength={5000}
-        />
-        <Button
-          size="icon"
-          className="shrink-0 self-end"
-          onClick={handleSend}
-          disabled={!draft.trim() || adding}
-        >
-          <Send className="h-4 w-4" />
-        </Button>
+      <div className="space-y-1.5">
+        <div className="flex gap-2">
+          <Textarea
+            placeholder="Write a comment… use @name to mention. ⌘Enter to send."
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleKeyDown}
+            rows={2}
+            className="flex-1 resize-none text-sm"
+            maxLength={5000}
+          />
+          <Button
+            size="icon"
+            className="shrink-0 self-end"
+            onClick={handleSend}
+            disabled={!draft.trim() || adding}
+          >
+            <Send className="h-4 w-4" />
+          </Button>
+        </div>
+        {mentionedMembers.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap px-0.5">
+            <span className="text-[10px] text-muted-foreground">Mentioning:</span>
+            {mentionedMembers.map((m) => (
+              <span key={m.clerk_user_id} className="text-[10px] bg-primary/10 text-primary rounded px-1.5 py-0.5 font-medium">
+                @{m.display_name.split(' ')[0]}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
