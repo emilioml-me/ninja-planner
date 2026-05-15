@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getTasks,
   createTask,
@@ -374,8 +375,8 @@ router.patch('/:id/position', async (req, res, next) => {
   }
 });
 
-// DELETE /api/tasks/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/tasks/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await softDeleteTask(req.params.id, req.workspace.id);
     if (!deleted) {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getGoals, createGoal, updateGoal, deleteGoal,
   getGoalLinks, addGoalLink, removeGoalLink,
@@ -55,8 +56,8 @@ router.patch('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/goals/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/goals/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await deleteGoal(req.params.id, req.workspace.id);
     if (!deleted) { res.status(404).json({ error: 'Goal not found' }); return; }

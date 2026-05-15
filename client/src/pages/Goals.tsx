@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Target, Plus, MoreVertical, Pencil, Trash2, CheckCircle2, Circle, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useIsAdmin } from '@/hooks/use-is-admin';
 
 interface Goal {
   id: string;
@@ -54,6 +55,7 @@ export default function Goals() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
+  const isAdmin = useIsAdmin();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Goal | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Goal | null>(null);
@@ -145,7 +147,7 @@ export default function Goals() {
             .map(({ title, items }) => (
               <div key={title} className="space-y-3">
                 <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{title}</h2>
-                {items.map((goal) => <GoalCard key={goal.id} goal={goal} onEdit={openEdit} onDelete={setDeleteTarget} onStatusChange={(s) => statusMutation.mutate({ id: goal.id, status: s })} />)}
+                {items.map((goal) => <GoalCard key={goal.id} goal={goal} onEdit={openEdit} onDelete={isAdmin ? setDeleteTarget : undefined} onStatusChange={(s) => statusMutation.mutate({ id: goal.id, status: s })} />)}
               </div>
             ))}
         </>
@@ -198,7 +200,7 @@ export default function Goals() {
 function GoalCard({ goal, onEdit, onDelete, onStatusChange }: {
   goal: Goal;
   onEdit: (g: Goal) => void;
-  onDelete: (g: Goal) => void;
+  onDelete?: (g: Goal) => void;
   onStatusChange: (status: string) => void;
 }) {
   const pct = goal.total_tasks > 0 ? Math.round((goal.done_tasks / goal.total_tasks) * 100) : 0;
@@ -232,7 +234,7 @@ function GoalCard({ goal, onEdit, onDelete, onStatusChange }: {
                 {goal.status !== 'completed' && <DropdownMenuItem onClick={() => onStatusChange('completed')}><CheckCircle2 className="h-3.5 w-3.5 mr-2" />Mark completed</DropdownMenuItem>}
                 {goal.status !== 'active' && <DropdownMenuItem onClick={() => onStatusChange('active')}><Circle className="h-3.5 w-3.5 mr-2" />Reopen</DropdownMenuItem>}
                 {goal.status !== 'cancelled' && <DropdownMenuItem onClick={() => onStatusChange('cancelled')}><XCircle className="h-3.5 w-3.5 mr-2" />Cancel</DropdownMenuItem>}
-                <DropdownMenuItem className="text-destructive" onClick={() => onDelete(goal)}><Trash2 className="h-3.5 w-3.5 mr-2" />Delete</DropdownMenuItem>
+                {onDelete && <DropdownMenuItem className="text-destructive" onClick={() => onDelete(goal)}><Trash2 className="h-3.5 w-3.5 mr-2" />Delete</DropdownMenuItem>}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

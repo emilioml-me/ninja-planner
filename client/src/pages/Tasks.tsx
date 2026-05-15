@@ -4,6 +4,7 @@ import { format, isBefore, isToday, startOfDay } from 'date-fns';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { useMembers } from '@/hooks/use-members';
+import { useIsAdmin } from '@/hooks/use-is-admin';
 import { KanbanBoard, type KanbanCard, type KanbanColumnData } from '@/components/KanbanBoard';
 import { TaskFormDialog, type Task } from '@/components/TaskFormDialog';
 import { Button } from '@/components/ui/button';
@@ -266,6 +267,7 @@ export default function Tasks() {
   });
 
   const { members, displayName, initials } = useMembers();
+  const isAdmin = useIsAdmin();
 
   // Listen for command palette "new task" event
   const openNewTask = useCallback(() => {
@@ -528,7 +530,7 @@ export default function Tasks() {
             onAddCard={handleAddCard}
             onCardClick={handleCardClick}
             onReorder={handleReorder}
-            onDeleteCard={(id) => deleteMutation.mutate(id)}
+            onDeleteCard={isAdmin ? (id) => deleteMutation.mutate(id) : undefined}
             members={members}
           />
         ) : (

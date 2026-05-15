@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getEndpoints,
   createEndpoint,
@@ -85,8 +86,8 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/webhooks
-router.post('/', async (req, res, next) => {
+// POST /api/webhooks  [admin only]
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -96,8 +97,8 @@ router.post('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /api/webhooks/:id
-router.patch('/:id', async (req, res, next) => {
+// PATCH /api/webhooks/:id  [admin only]
+router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -109,8 +110,8 @@ router.patch('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/webhooks/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/webhooks/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await deleteEndpoint(req.params.id, req.workspace.id);
     if (!deleted) { res.status(404).json({ error: 'Endpoint not found' }); return; }

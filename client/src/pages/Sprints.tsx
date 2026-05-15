@@ -27,6 +27,7 @@ import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, 
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
+import { useIsAdmin } from '@/hooks/use-is-admin';
 
 interface Sprint {
   id: string;
@@ -67,6 +68,7 @@ export default function Sprints() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const { members } = useMembers();
+  const isAdmin = useIsAdmin();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Sprint | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Sprint | null>(null);
@@ -181,7 +183,7 @@ export default function Sprints() {
             <p className="text-sm text-muted-foreground">Time-boxed cycles to focus the team's effort.</p>
           </div>
         </div>
-        <Button onClick={openCreate} className="gap-2"><Plus className="h-4 w-4" />New Sprint</Button>
+        {isAdmin && <Button onClick={openCreate} className="gap-2"><Plus className="h-4 w-4" />New Sprint</Button>}
       </div>
 
       {isLoading ? (
@@ -191,7 +193,7 @@ export default function Sprints() {
           <Zap className="h-10 w-10 text-muted-foreground/30 mb-3" />
           <p className="text-sm font-medium">No sprints yet</p>
           <p className="text-xs text-muted-foreground mt-1">Create a sprint to group and time-box your tasks.</p>
-          <Button className="mt-4 gap-2" onClick={openCreate}><Plus className="h-4 w-4" />Create first sprint</Button>
+          {isAdmin && <Button className="mt-4 gap-2" onClick={openCreate}><Plus className="h-4 w-4" />Create first sprint</Button>}
         </div>
       ) : (
         <div className="space-y-3">
@@ -230,7 +232,7 @@ export default function Sprints() {
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => openEdit(sprint)}><Pencil className="h-3.5 w-3.5 mr-2" />Edit</DropdownMenuItem>
                           <DropdownMenuItem onClick={() => exportSprint(sprint)}><Download className="h-3.5 w-3.5 mr-2" />Export CSV</DropdownMenuItem>
-                          <DropdownMenuItem className="text-destructive" onClick={() => setDeleteTarget(sprint)}><Trash2 className="h-3.5 w-3.5 mr-2" />Delete</DropdownMenuItem>
+                          {isAdmin && <DropdownMenuItem className="text-destructive" onClick={() => setDeleteTarget(sprint)}><Trash2 className="h-3.5 w-3.5 mr-2" />Delete</DropdownMenuItem>}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </div>

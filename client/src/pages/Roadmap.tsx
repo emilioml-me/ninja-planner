@@ -42,6 +42,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink, Search, X, Link, CheckSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useIsAdmin } from '@/hooks/use-is-admin';
 
 interface RoadmapItem {
   id: string;
@@ -99,6 +100,7 @@ export default function Roadmap() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
+  const isAdmin = useIsAdmin();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<RoadmapItem | null>(null);
   const [defaultStatus, setDefaultStatus] = useState<typeof STATUSES[number]>('idea');
@@ -256,12 +258,16 @@ export default function Roadmap() {
       <div className="flex items-center justify-between px-6 py-4 border-b">
         <h1 className="text-xl font-semibold">Roadmap</h1>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" className="gap-2" onClick={openShare}>
-            <Share2 className="h-4 w-4" /> Share
-          </Button>
-          <Button size="sm" className="gap-2" onClick={() => openCreate()}>
-            <Plus className="h-4 w-4" /> Add Item
-          </Button>
+          {isAdmin && (
+            <Button size="sm" variant="outline" className="gap-2" onClick={openShare}>
+              <Share2 className="h-4 w-4" /> Share
+            </Button>
+          )}
+          {isAdmin && (
+            <Button size="sm" className="gap-2" onClick={() => openCreate()}>
+              <Plus className="h-4 w-4" /> Add Item
+            </Button>
+          )}
         </div>
       </div>
 
@@ -354,8 +360,8 @@ export default function Roadmap() {
                             key={item.id}
                             item={item}
                             cfg={cfg}
-                            onEdit={openEdit}
-                            onDelete={(id) => deleteMut.mutate(id)}
+                            onEdit={isAdmin ? openEdit : undefined}
+                            onDelete={isAdmin ? (id) => deleteMut.mutate(id) : undefined}
                             onLinkTasks={setLinkTaskItem}
                           />
                         ))}

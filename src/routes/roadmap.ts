@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getRoadmap,
   createRoadmapItem,
@@ -40,8 +41,8 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// POST /api/roadmap
-router.post('/', async (req, res, next) => {
+// POST /api/roadmap  [admin only]
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -55,8 +56,8 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// PATCH /api/roadmap/:id
-router.patch('/:id', async (req, res, next) => {
+// PATCH /api/roadmap/:id  [admin only]
+router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -78,9 +79,9 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// PATCH /api/roadmap/reorder  — bulk priority update for drag-to-reorder
+// PATCH /api/roadmap/reorder  — bulk priority update for drag-to-reorder  [admin only]
 // Body: { items: [{ id: string, priority: number }] }
-router.patch('/reorder', async (req, res, next) => {
+router.patch('/reorder', requireAdmin, async (req, res, next) => {
   try {
     const schema = z.object({
       items: z.array(z.object({ id: z.string().uuid(), priority: z.number().int().min(0) })).min(1).max(200),
@@ -106,8 +107,8 @@ router.patch('/reorder', async (req, res, next) => {
   }
 });
 
-// DELETE /api/roadmap/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/roadmap/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await deleteRoadmapItem(req.params.id, req.workspace.id);
     if (!deleted) {
@@ -192,16 +193,16 @@ router.get('/share', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/roadmap/share  — create or return existing token
-router.post('/share', async (req, res, next) => {
+// POST /api/roadmap/share  — create or return existing token  [admin only]
+router.post('/share', requireAdmin, async (req, res, next) => {
   try {
     const st = await upsertShareToken(req.workspace.id, 'roadmap', req.auth.userId);
     res.json({ token: st.token });
   } catch (err) { next(err); }
 });
 
-// DELETE /api/roadmap/share  — revoke token
-router.delete('/share', async (req, res, next) => {
+// DELETE /api/roadmap/share  — revoke token  [admin only]
+router.delete('/share', requireAdmin, async (req, res, next) => {
   try {
     await revokeShareToken(req.workspace.id, 'roadmap');
     res.json({ ok: true });

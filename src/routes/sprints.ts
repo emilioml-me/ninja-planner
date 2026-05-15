@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getSprints, createSprint, updateSprint, deleteSprint, getSprintTasks,
 } from '../services/sprintService.js';
@@ -71,8 +72,8 @@ async function checkSprintEndAlerts(
   }
 }
 
-// POST /api/sprints
-router.post('/', async (req, res, next) => {
+// POST /api/sprints  [admin only]
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -125,8 +126,8 @@ router.post('/:id/move-to-backlog', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/sprints/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/sprints/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await deleteSprint(req.params.id, req.workspace.id);
     if (!deleted) { res.status(404).json({ error: 'Sprint not found' }); return; }
