@@ -23,7 +23,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Target, Plus, MoreVertical, Pencil, Trash2, CheckCircle2, Circle, XCircle } from 'lucide-react';
+import { Target, Plus, MoreVertical, Pencil, Trash2, CheckCircle2, Circle, XCircle, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 
@@ -36,6 +36,16 @@ interface Goal {
   total_tasks: number;
   done_tasks: number;
   created_at: string;
+}
+
+interface KeyResult {
+  id: string;
+  goal_id: string;
+  title: string;
+  target_value: number;
+  current_value: number;
+  unit: string;
+  position: number;
 }
 
 const STATUS_META: Record<string, { label: string; icon: React.ElementType; color: string }> = {
@@ -203,10 +213,65 @@ function GoalCard({ goal, onEdit, onDelete, onStatusChange }: {
   onDelete?: (g: Goal) => void;
   onStatusChange: (status: string) => void;
 }) {
+  const { apiRequest } = useApiClient();
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [krExpanded, setKrExpanded] = useState(false);
+  const [addingKr, setAddingKr] = useState(false);
+  const [newKrTitle, setNewKrTitle] = useState('');
+  const [newKrTarget, setNewKrTarget] = useState('100');
+  const [newKrUnit, setNewKrUnit] = useState('%');
+  const [editingKr, setEditingKr] = useState<string | null>(null);
+  const [editKrCurrent, setEditKrCurrent] = useState('');
+
   const pct = goal.total_tasks > 0 ? Math.round((goal.done_tasks / goal.total_tasks) * 100) : 0;
   const meta = STATUS_META[goal.status] ?? STATUS_META.active;
   const StatusIcon = meta.icon;
   const overdue = goal.due_date && goal.status === 'active' && isPast(new Date(goal.due_date));
+
+  const { data: keyResults = [], isLoading: krLoading } = useQuery<KeyResult[]>({
+    queryKey: ['/api/goals', goal.id, 'key-results'],
+    queryFn: () => apiRequest<KeyResult[]>('GET', `/api/goals/${goal.id}/key-results`),
+    enabled: krExpanded,
+    staleTime: 30_000,
+  });
+
+  const addKrMut = useMutation({
+    mutationFn: (data: { title: string; target_value: number; unit: string }) =>
+      apiRequest('POST', `/api/goals/${goal.id}/key-results`, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/goals', goal.id, 'key-results'] });
+      setAddingKr(false);
+      setNewKrTitle('');
+      setNewKrTarget('100');
+      setNewKrUnit('%');
+    },
+  });
+
+  const updateKrMut = useMutation({
+    mutationFn: ({ id, current_value }: { id: string; current_value: number }) =>
+      apiRequest('PATCH', `/api/goals/${goal.id}/key-results/${id}`, { current_value }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/goals', goal.id, 'key-results'] });
+      setEditingKr(null);
+    },
+  });
+
+  const deleteKrMut = useMutation({
+    mutationFn: (id: string) =>
+      apiRequest('DELETE', `/api/goals/${goal.id}/key-results/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/goals', goal.id, 'key-results'] });
+      toast({ title: 'Key result removed' });
+    },
+  });
+
+  const avgKrPct = keyResults.length > 0
+    ? Math.round(keyResults.reduce((sum, kr) => {
+        const t = kr.target_value > 0 ? kr.target_value : 1;
+        return sum + Math.min(100, (kr.current_value / t) * 100);
+      }, 0) / keyResults.length)
+    : null;
 
   return (
     <Card className={cn(goal.status !== 'active' && 'opacity-70')}>
@@ -240,8 +305,10 @@ function GoalCard({ goal, onEdit, onDelete, onStatusChange }: {
           </div>
         </div>
       </CardHeader>
-      {goal.total_tasks > 0 && (
-        <CardContent className="px-4 pb-4">
+
+      <CardContent className="px-4 pb-4 space-y-3">
+        {/* Task progress */}
+        {goal.total_tasks > 0 && (
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>{goal.done_tasks} / {goal.total_tasks} tasks done</span>
@@ -249,13 +316,144 @@ function GoalCard({ goal, onEdit, onDelete, onStatusChange }: {
             </div>
             <Progress value={pct} className="h-1.5" />
           </div>
-        </CardContent>
-      )}
-      {goal.total_tasks === 0 && (
-        <CardContent className="px-4 pb-3">
-          <p className="text-xs text-muted-foreground">No tasks linked yet. Assign tasks to this goal from the Tasks page.</p>
-        </CardContent>
-      )}
+        )}
+        {goal.total_tasks === 0 && (
+          <p className="text-xs text-muted-foreground">No tasks linked yet.</p>
+        )}
+
+        {/* Key results toggle */}
+        <button
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
+          onClick={() => setKrExpanded((v) => !v)}
+        >
+          {krExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          Key Results
+          {avgKrPct !== null && !krExpanded && (
+            <span className="ml-auto font-medium text-foreground">{avgKrPct}% avg</span>
+          )}
+        </button>
+
+        {krExpanded && (
+          <div className="space-y-2 pl-1">
+            {krLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : keyResults.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No key results yet.</p>
+            ) : (
+              keyResults.map((kr) => {
+                const t = kr.target_value > 0 ? kr.target_value : 1;
+                const krPct = Math.min(100, Math.round((kr.current_value / t) * 100));
+                return (
+                  <div key={kr.id} className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs flex-1 truncate">{kr.title}</span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {editingKr === kr.id ? (
+                          <>
+                            <Input
+                              type="number"
+                              className="h-6 w-20 text-xs px-1.5"
+                              value={editKrCurrent}
+                              onChange={(e) => setEditKrCurrent(e.target.value)}
+                            />
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6"
+                              disabled={updateKrMut.isPending}
+                              onClick={() => updateKrMut.mutate({ id: kr.id, current_value: parseFloat(editKrCurrent) || 0 })}
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                            </Button>
+                            <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => setEditingKr(null)}>
+                              <XCircle className="h-3.5 w-3.5" />
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-xs text-muted-foreground">
+                              {kr.current_value}/{kr.target_value} {kr.unit}
+                            </span>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6 opacity-50 hover:opacity-100"
+                              onClick={() => { setEditingKr(kr.id); setEditKrCurrent(String(kr.current_value)); }}
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6 opacity-50 hover:opacity-100 hover:text-destructive"
+                              onClick={() => deleteKrMut.mutate(kr.id)}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <Progress value={krPct} className="h-1" />
+                  </div>
+                );
+              })
+            )}
+
+            {/* Add key result */}
+            {addingKr ? (
+              <div className="space-y-2 border rounded-md p-2 bg-muted/30">
+                <Input
+                  placeholder="Key result title"
+                  className="h-7 text-xs"
+                  value={newKrTitle}
+                  onChange={(e) => setNewKrTitle(e.target.value)}
+                  autoFocus
+                />
+                <div className="flex gap-1.5">
+                  <Input
+                    type="number"
+                    placeholder="Target"
+                    className="h-7 text-xs w-24"
+                    value={newKrTarget}
+                    onChange={(e) => setNewKrTarget(e.target.value)}
+                  />
+                  <Input
+                    placeholder="Unit"
+                    className="h-7 text-xs w-20"
+                    value={newKrUnit}
+                    onChange={(e) => setNewKrUnit(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    disabled={!newKrTitle.trim() || addKrMut.isPending}
+                    onClick={() => addKrMut.mutate({
+                      title: newKrTitle.trim(),
+                      target_value: parseFloat(newKrTarget) || 100,
+                      unit: newKrUnit.trim() || '%',
+                    })}
+                  >
+                    {addKrMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Add'}
+                  </Button>
+                  <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setAddingKr(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-xs gap-1 text-muted-foreground hover:text-foreground"
+                onClick={() => setAddingKr(true)}
+              >
+                <Plus className="h-3 w-3" /> Add key result
+              </Button>
+            )}
+          </div>
+        )}
+      </CardContent>
     </Card>
   );
 }
