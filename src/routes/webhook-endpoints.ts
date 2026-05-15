@@ -19,7 +19,9 @@ router.use(requireWorkspace);
 // Matches loopback, RFC-1918, link-local, IPv6 ULA, and unspecified addresses
 const PRIVATE_IP_RE = /^(127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|::1$|fd[0-9a-f]{2}:|0\.0\.0\.0)$/i;
 
-const PRIVATE_HOST_RE = /^(localhost|.*\.local|.*\.internal|.*\.lan)$/i;
+// Blocks localhost, .local/.internal/.lan TLDs, bare cloud metadata hostnames,
+// and common cloud provider internal endpoints.
+const PRIVATE_HOST_RE = /^(localhost|.*\.local|.*\.internal|.*\.lan|metadata|instance-data|computemetadata|169\.254\.169\.254)$/i;
 
 function isSafeWebhookUrl(raw: string): boolean {
   try {
@@ -119,8 +121,8 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/webhooks/:id/deliveries
-router.get('/:id/deliveries', async (req, res, next) => {
+// GET /api/webhooks/:id/deliveries  [admin only]
+router.get('/:id/deliveries', requireAdmin, async (req, res, next) => {
   try {
     const deliveries = await getDeliveries(req.params.id, req.workspace.id);
     res.json(deliveries);

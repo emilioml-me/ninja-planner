@@ -43,7 +43,7 @@ router.patch('/read-all', async (req, res, next) => {
 // PATCH /api/notifications/:id/read
 router.patch('/:id/read', async (req, res, next) => {
   try {
-    const ok = await markRead(req.params.id, req.auth.userId);
+    const ok = await markRead(req.params.id, req.auth.userId, req.workspace.id);
     if (!ok) {
       res.status(404).json({ error: 'Notification not found' });
       return;

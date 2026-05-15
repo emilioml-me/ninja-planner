@@ -172,6 +172,17 @@ router.post('/', async (req, res, next) => {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+    // Validate assignee is a member of this workspace (prevents external email spam)
+    if (parsed.data.assignee_clerk_id) {
+      const memberCheck = await pool.query(
+        'SELECT id FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+        [req.workspace.id, parsed.data.assignee_clerk_id],
+      );
+      if (memberCheck.rows.length === 0) {
+        res.status(400).json({ error: 'Assignee is not a member of this workspace' });
+        return;
+      }
+    }
     const task = await createTask(req.workspace.id, parsed.data, req.auth.userId);
     await logTaskActivity(task.id, req.auth.userId, 'created');
 
@@ -292,6 +303,17 @@ router.patch('/:id', async (req, res, next) => {
     if (Object.keys(parsed.data).length === 0) {
       res.status(400).json({ error: 'No fields to update' });
       return;
+    }
+    // Validate assignee is a member of this workspace (prevents external email spam)
+    if (parsed.data.assignee_clerk_id) {
+      const memberCheck = await pool.query(
+        'SELECT id FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+        [req.workspace.id, parsed.data.assignee_clerk_id],
+      );
+      if (memberCheck.rows.length === 0) {
+        res.status(400).json({ error: 'Assignee is not a member of this workspace' });
+        return;
+      }
     }
     const task = await updateTask(req.params.id, req.workspace.id, parsed.data);
     if (!task) {

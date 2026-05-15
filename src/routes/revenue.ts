@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getRevenue,
   createRevenue,
@@ -31,8 +32,8 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// POST /api/revenue
-router.post('/', async (req, res, next) => {
+// POST /api/revenue  [admin only]
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -46,8 +47,8 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// PATCH /api/revenue/:id
-router.patch('/:id', async (req, res, next) => {
+// PATCH /api/revenue/:id  [admin only]
+router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -69,8 +70,8 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// DELETE /api/revenue/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/revenue/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await deleteRevenue(req.params.id, req.workspace.id);
     if (!deleted) {

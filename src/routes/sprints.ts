@@ -29,18 +29,26 @@ router.get('/', async (req, res, next) => {
     const sprints = await getSprints(req.workspace.id);
     res.json(sprints);
 
-    // Fire-and-forget: check for sprints ending soon (≤ 2 days) and notify if not already notified today
-    checkSprintEndAlerts(req.workspace.id, req.auth.userId, sprints).catch(() => {});
+    // Fire-and-forget: check for sprints ending soon (≤ 2 days) and notify all admins
+    checkSprintEndAlerts(req.workspace.id, sprints).catch(() => {});
   } catch (err) { next(err); }
 });
 
 async function checkSprintEndAlerts(
   workspaceId: string,
-  userId: string,
   sprints: Awaited<ReturnType<typeof getSprints>>,
 ): Promise<void> {
   const now = Date.now();
   const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+
+  // Query all workspace admins to notify (not just the requesting user)
+  const adminResult = await pool.query<{ clerk_user_id: string }>(
+    `SELECT clerk_user_id FROM workspace_members
+     WHERE workspace_id = $1 AND role IN ('org:admin', 'org:owner')`,
+    [workspaceId],
+  );
+  if (adminResult.rows.length === 0) return;
+  const adminIds = adminResult.rows.map((r) => r.clerk_user_id);
 
   for (const sprint of sprints) {
     if (sprint.status !== 'active' || !sprint.end_date) continue;
@@ -61,14 +69,17 @@ async function checkSprintEndAlerts(
     if (recent.rows.length > 0) continue;
 
     const daysLeft = Math.ceil(msLeft / 86_400_000);
-    createNotification({
-      workspaceId,
-      recipientClerkId: userId,
-      type: 'sprint_ending',
-      title: `Sprint "${sprint.name}" ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}`,
-      body: sprint.id, // store sprint id for dedup
-      link: '/sprints',
-    }).catch(() => {});
+    // Notify ALL admins (not just the user who happened to load the page)
+    for (const adminId of adminIds) {
+      createNotification({
+        workspaceId,
+        recipientClerkId: adminId,
+        type: 'sprint_ending',
+        title: `Sprint "${sprint.name}" ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}`,
+        body: sprint.id, // store sprint id for dedup
+        link: '/sprints',
+      }).catch(() => {});
+    }
   }
 }
 
@@ -81,8 +92,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /api/sprints/:id
-router.patch('/:id', async (req, res, next) => {
+// PATCH /api/sprints/:id  [admin only]
+router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -104,8 +115,8 @@ router.patch('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/sprints/:id/move-to-backlog — unassign all non-done tasks from sprint
-router.post('/:id/move-to-backlog', async (req, res, next) => {
+// POST /api/sprints/:id/move-to-backlog — unassign all non-done tasks from sprint  [admin only]
+router.post('/:id/move-to-backlog', requireAdmin, async (req, res, next) => {
   try {
     const sprintCheck = await pool.query<{ id: string }>(
       'SELECT id FROM sprints WHERE id = $1 AND workspace_id = $2',
@@ -142,8 +153,8 @@ router.get('/:id/tasks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /api/sprints/:id/tasks  — bulk assign tasks to sprint
-router.patch('/:id/tasks', async (req, res, next) => {
+// PATCH /api/sprints/:id/tasks  — bulk assign tasks to sprint  [admin only]
+router.patch('/:id/tasks', requireAdmin, async (req, res, next) => {
   try {
     const schema = z.object({ task_ids: z.array(z.string().uuid()).min(1).max(100) });
     const parsed = schema.safeParse(req.body);

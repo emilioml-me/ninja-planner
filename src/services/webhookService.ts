@@ -1,6 +1,19 @@
 import { createHmac, randomBytes } from 'crypto';
+import { lookup } from 'dns/promises';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
+
+// Mirrors the SSRF check in webhook-endpoints.ts — applied at delivery time to catch DNS rebinding.
+const PRIVATE_IP_RE = /^(127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|::1$|fd[0-9a-f]{2}:|0\.0\.0\.0)$/i;
+
+async function resolvedIpIsSafe(hostname: string): Promise<boolean> {
+  try {
+    const { address } = await lookup(hostname);
+    return !PRIVATE_IP_RE.test(address);
+  } catch {
+    return false; // DNS failure or invalid hostname — treat as unsafe
+  }
+}
 
 export interface WebhookEndpoint {
   id: string;
@@ -156,6 +169,18 @@ async function _deliverToEndpoint(
   deliveryId: string,
   payload: Record<string, unknown>,
 ): Promise<void> {
+  // DNS-rebinding guard: verify the resolved IP is still public at delivery time
+  const { hostname } = new URL(endpoint.url);
+  if (!(await resolvedIpIsSafe(hostname))) {
+    logger.warn({ endpointId: endpoint.id, url: endpoint.url }, 'SSRF: resolved IP is private, aborting delivery');
+    pool.query(
+      `INSERT INTO webhook_deliveries (endpoint_id, event_type, payload, status, http_status, error, delivered_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [endpoint.id, eventType, payload, 'failed', null, 'SSRF: resolved to private IP', null],
+    ).catch(() => {});
+    return;
+  }
+
   const signature = signPayload(endpoint.secret, body);
   let httpStatus: number | null = null;
   let error: string | null = null;
@@ -200,9 +225,10 @@ async function _deliverToEndpoint(
   }
 
   // Log delivery (best-effort, don't block or throw)
+  // delivered_at is only set on success so the health widget shows accurate timestamps.
   pool.query(
     `INSERT INTO webhook_deliveries (endpoint_id, event_type, payload, status, http_status, error, delivered_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [endpoint.id, eventType, payload, status, httpStatus, error, new Date()],
+    [endpoint.id, eventType, payload, status, httpStatus, error, status === 'success' ? new Date() : null],
   ).catch(() => {});
 }

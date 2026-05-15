@@ -8,7 +8,7 @@ import {
   updateRoadmapItem,
   deleteRoadmapItem,
 } from '../services/roadmapService.js';
-import { upsertShareToken, getShareToken, revokeShareToken } from '../services/shareService.js';
+import { regenerateShareToken, getShareToken, revokeShareToken } from '../services/shareService.js';
 import { pool } from '../config/db.js';
 
 const router = Router();
@@ -185,18 +185,18 @@ router.delete('/:id/tasks/:taskId', async (req, res, next) => {
 
 // ─── Share token management ───────────────────────────────────────────────────
 
-// GET /api/roadmap/share  — get current token (null if none)
-router.get('/share', async (req, res, next) => {
+// GET /api/roadmap/share  — get current token (admin only; null if none)
+router.get('/share', requireAdmin, async (req, res, next) => {
   try {
     const st = await getShareToken(req.workspace.id, 'roadmap');
     res.json({ token: st?.token ?? null });
   } catch (err) { next(err); }
 });
 
-// POST /api/roadmap/share  — create or return existing token  [admin only]
+// POST /api/roadmap/share  — always generate a fresh token (invalidates previous)  [admin only]
 router.post('/share', requireAdmin, async (req, res, next) => {
   try {
-    const st = await upsertShareToken(req.workspace.id, 'roadmap', req.auth.userId);
+    const st = await regenerateShareToken(req.workspace.id, 'roadmap', req.auth.userId);
     res.json({ token: st.token });
   } catch (err) { next(err); }
 });

@@ -1,10 +1,21 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 
 const router = Router();
+
+// Tight rate limit specifically for the public invite-lookup endpoint — prevents brute-force
+// token scanning (10 requests per minute per IP).
+const inviteLookupLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' },
+});
 
 // ─── Admin-protected: create invite ──────────────────────────────────────────
 
@@ -66,7 +77,8 @@ router.delete('/me/invites', requireAuth, requireWorkspace, requireAdmin, async 
 // ─── Public: look up invite ───────────────────────────────────────────────────
 
 // GET /api/invites/:token  — validate token, return workspace name (no auth needed)
-router.get('/:token', async (req, res, next) => {
+// Rate-limited to 10/min per IP to prevent brute-force token enumeration.
+router.get('/:token', inviteLookupLimiter, async (req, res, next) => {
   try {
     const result = await pool.query<{ workspace_name: string; expires_at: string }>(
       `SELECT w.name AS workspace_name, wi.expires_at
@@ -86,9 +98,15 @@ router.get('/:token', async (req, res, next) => {
 });
 
 // POST /api/invites/:token/accept  — authenticated user accepts invite
+// The ENTIRE flow (lock → member check → insert → mark used) runs in one transaction
+// so FOR UPDATE actually prevents concurrent double-accepts.
 router.post('/:token/accept', requireAuth, async (req, res, next) => {
+  const client = await pool.connect();
   try {
-    const inviteResult = await pool.query<{
+    await client.query('BEGIN');
+
+    // Lock the invite row — blocks concurrent accepts for the same token
+    const inviteResult = await client.query<{
       id: string;
       workspace_id: string;
       clerk_org_id: string;
@@ -101,52 +119,48 @@ router.post('/:token/accept', requireAuth, async (req, res, next) => {
       [req.params.token],
     );
     if (inviteResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       res.status(404).json({ error: 'Invite not found or expired' });
       return;
     }
 
     const { id: inviteId, workspace_id, clerk_org_id } = inviteResult.rows[0];
 
-    // Check if already a member
-    const existing = await pool.query(
+    // Check if already a member (within the transaction)
+    const existing = await client.query(
       `SELECT id FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2`,
       [workspace_id, req.auth.userId],
     );
     if (existing.rows.length > 0) {
-      // Already a member — just mark invite as used and return success
-      await pool.query(
-        `UPDATE workspace_invites SET used_at = now(), used_by = $1 WHERE id = $2`,
-        [req.auth.userId, inviteId],
-      );
-      res.json({ ok: true, workspace_id, clerk_org_id, already_member: true });
-      return;
-    }
-
-    // Add to workspace_members + mark invite used (transactional)
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query(
-        `INSERT INTO workspace_members (workspace_id, clerk_user_id, role)
-         VALUES ($1, $2, 'org:member')
-         ON CONFLICT (workspace_id, clerk_user_id) DO NOTHING`,
-        [workspace_id, req.auth.userId],
-      );
+      // Already a member — mark invite used and return success
       await client.query(
         `UPDATE workspace_invites SET used_at = now(), used_by = $1 WHERE id = $2`,
         [req.auth.userId, inviteId],
       );
       await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
+      res.json({ ok: true, workspace_id, clerk_org_id, already_member: true });
+      return;
     }
+
+    // Add to workspace_members + mark invite used atomically
+    await client.query(
+      `INSERT INTO workspace_members (workspace_id, clerk_user_id, role)
+       VALUES ($1, $2, 'org:member')
+       ON CONFLICT (workspace_id, clerk_user_id) DO NOTHING`,
+      [workspace_id, req.auth.userId],
+    );
+    await client.query(
+      `UPDATE workspace_invites SET used_at = now(), used_by = $1 WHERE id = $2`,
+      [req.auth.userId, inviteId],
+    );
+    await client.query('COMMIT');
 
     res.json({ ok: true, workspace_id, clerk_org_id, already_member: false });
   } catch (err) {
+    await client.query('ROLLBACK');
     next(err);
+  } finally {
+    client.release();
   }
 });
 

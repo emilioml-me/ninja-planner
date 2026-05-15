@@ -12,10 +12,10 @@ export interface RevenueTarget {
   updated_at: Date;
 }
 
-export async function getRevenue(workspaceId: string): Promise<RevenueTarget[]> {
+export async function getRevenue(workspaceId: string, limit = 200): Promise<RevenueTarget[]> {
   const result = await pool.query<RevenueTarget>(
-    'SELECT * FROM revenue_targets WHERE workspace_id = $1 ORDER BY period_start DESC',
-    [workspaceId],
+    'SELECT * FROM revenue_targets WHERE workspace_id = $1 ORDER BY period_start DESC LIMIT $2',
+    [workspaceId, limit],
   );
   return result.rows;
 }

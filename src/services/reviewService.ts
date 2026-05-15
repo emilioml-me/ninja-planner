@@ -13,10 +13,10 @@ export interface WeeklyReview {
   updated_at: Date;
 }
 
-export async function getReviews(workspaceId: string): Promise<WeeklyReview[]> {
+export async function getReviews(workspaceId: string, limit = 200): Promise<WeeklyReview[]> {
   const result = await pool.query<WeeklyReview>(
-    'SELECT * FROM weekly_reviews WHERE workspace_id = $1 ORDER BY week_start DESC',
-    [workspaceId],
+    'SELECT * FROM weekly_reviews WHERE workspace_id = $1 ORDER BY week_start DESC LIMIT $2',
+    [workspaceId, limit],
   );
   return result.rows;
 }

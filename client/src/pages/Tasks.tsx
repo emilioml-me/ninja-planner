@@ -113,7 +113,7 @@ function TaskListView({
 }: {
   tasks: Task[];
   onEdit: (task: Task) => void;
-  onDelete: (id: string) => void;
+  onDelete?: (id: string) => void;
   displayName: (id: string | null | undefined) => string;
   initials: (id: string | null | undefined) => string;
   selectedIds: Set<string>;
@@ -240,9 +240,11 @@ function TaskListView({
                       <DropdownMenuItem onClick={() => onEdit(task)}>
                         <Pencil className="h-4 w-4 mr-2" /> Edit
                       </DropdownMenuItem>
-                      <DropdownMenuItem className="text-destructive" onClick={() => onDelete(task.id)}>
-                        <Trash2 className="h-4 w-4 mr-2" /> Delete
-                      </DropdownMenuItem>
+                      {onDelete && (
+                        <DropdownMenuItem className="text-destructive" onClick={() => onDelete(task.id)}>
+                          <Trash2 className="h-4 w-4 mr-2" /> Delete
+                        </DropdownMenuItem>
+                      )}
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </TableCell>
@@ -590,7 +592,7 @@ export default function Tasks() {
           <TaskListView
             tasks={filteredTasks}
             onEdit={(task) => { setEditingTask(task); setDialogOpen(true); }}
-            onDelete={(id) => deleteMutation.mutate(id)}
+            onDelete={isAdmin ? (id) => deleteMutation.mutate(id) : undefined}
             displayName={displayName}
             initials={initials}
             selectedIds={selectedIds}
@@ -666,16 +668,18 @@ export default function Tasks() {
               </DropdownMenu>
             )}
 
-            {/* Bulk delete */}
-            <Button
-              variant="destructive"
-              size="sm"
-              className="h-8 gap-1.5"
-              onClick={() => setBulkDeleteConfirm(true)}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete
-            </Button>
+            {/* Bulk delete — admin only */}
+            {isAdmin && (
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-8 gap-1.5"
+                onClick={() => setBulkDeleteConfirm(true)}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
+              </Button>
+            )}
           </div>
           <Button variant="ghost" size="sm" className="ml-auto h-8" onClick={clearSelection}>
             <X className="h-3.5 w-3.5 mr-1" /> Clear

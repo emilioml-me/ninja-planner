@@ -29,6 +29,11 @@ export default function AcceptInvite({ token }: { token: string }) {
 
   // Load invite info (public endpoint — no auth needed)
   useEffect(() => {
+    // Validate token is a UUID before fetching to guard against path-traversal attempts
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) {
+      setInfoError('Invalid invite link');
+      return;
+    }
     fetch(`/api/invites/${token}`)
       .then(async (r) => {
         if (!r.ok) {

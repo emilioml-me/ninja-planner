@@ -19,7 +19,7 @@ export interface SprintWithStats extends Sprint {
   done_tasks: number;
 }
 
-export async function getSprints(workspaceId: string): Promise<SprintWithStats[]> {
+export async function getSprints(workspaceId: string, limit = 200): Promise<SprintWithStats[]> {
   const result = await pool.query<SprintWithStats>(
     `SELECT
        s.*,
@@ -31,8 +31,9 @@ export async function getSprints(workspaceId: string): Promise<SprintWithStats[]
      GROUP BY s.id
      ORDER BY
        CASE s.status WHEN 'active' THEN 0 WHEN 'planning' THEN 1 ELSE 2 END,
-       s.start_date DESC NULLS LAST`,
-    [workspaceId],
+       s.start_date DESC NULLS LAST
+     LIMIT $2`,
+    [workspaceId, limit],
   );
   return result.rows;
 }

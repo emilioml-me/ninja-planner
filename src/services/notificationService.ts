@@ -49,11 +49,11 @@ export async function getNotifications(
   return result.rows;
 }
 
-export async function markRead(notificationId: string, recipientId: string): Promise<boolean> {
+export async function markRead(notificationId: string, recipientId: string, workspaceId: string): Promise<boolean> {
   const result = await pool.query(
     `UPDATE notifications SET read_at = now()
-     WHERE id = $1 AND recipient_clerk_id = $2 AND read_at IS NULL`,
-    [notificationId, recipientId],
+     WHERE id = $1 AND recipient_clerk_id = $2 AND workspace_id = $3 AND read_at IS NULL`,
+    [notificationId, recipientId, workspaceId],
   );
   return (result.rowCount ?? 0) > 0;
 }

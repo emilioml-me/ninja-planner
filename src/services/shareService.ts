@@ -14,6 +14,7 @@ export interface ShareToken {
 
 /**
  * Returns existing token for workspace/resource, or creates a new one.
+ * NOTE: the existing token is preserved (use regenerateShareToken to force a new one).
  */
 export async function upsertShareToken(
   workspaceId: string,
@@ -26,6 +27,27 @@ export async function upsertShareToken(
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (workspace_id, resource) DO UPDATE
        SET token = share_tokens.token  -- keep existing token, just return it
+     RETURNING *`,
+    [workspaceId, token, resource, createdBy],
+  );
+  return result.rows[0];
+}
+
+/**
+ * Always generates a fresh token, invalidating any previous one.
+ * Use this for the "regenerate link" admin action so the old share URL stops working.
+ */
+export async function regenerateShareToken(
+  workspaceId: string,
+  resource: string,
+  createdBy: string,
+): Promise<ShareToken> {
+  const token = randomBytes(32).toString('hex');
+  const result = await pool.query<ShareToken>(
+    `INSERT INTO share_tokens (workspace_id, token, resource, created_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (workspace_id, resource) DO UPDATE
+       SET token = EXCLUDED.token, created_by = EXCLUDED.created_by
      RETURNING *`,
     [workspaceId, token, resource, createdBy],
   );

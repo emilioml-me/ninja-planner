@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
+import { pool } from '../config/db.js';
 import {
   getGoals, createGoal, updateGoal, deleteGoal,
   getGoalLinks, addGoalLink, removeGoalLink,
@@ -77,7 +78,25 @@ router.post('/:id/links', async (req, res, next) => {
   try {
     const parsed = linkSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-    const link = await addGoalLink(req.params.id, req.workspace.id, parsed.data.entity_type, parsed.data.entity_id);
+
+    const { entity_type, entity_id } = parsed.data;
+
+    // Verify entity belongs to THIS workspace (prevents cross-workspace linking)
+    if (entity_type === 'task') {
+      const check = await pool.query(
+        'SELECT id FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
+        [entity_id, req.workspace.id],
+      );
+      if (check.rows.length === 0) { res.status(404).json({ error: 'Task not found in workspace' }); return; }
+    } else if (entity_type === 'roadmap_item') {
+      const check = await pool.query(
+        'SELECT id FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
+        [entity_id, req.workspace.id],
+      );
+      if (check.rows.length === 0) { res.status(404).json({ error: 'Roadmap item not found in workspace' }); return; }
+    }
+
+    const link = await addGoalLink(req.params.id, req.workspace.id, entity_type, entity_id);
     if (!link) { res.status(409).json({ error: 'Link already exists' }); return; }
     res.status(201).json(link);
   } catch (err) { next(err); }

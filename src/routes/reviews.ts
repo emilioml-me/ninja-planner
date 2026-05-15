@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getReviews,
   createReview,
@@ -102,8 +103,8 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// DELETE /api/reviews/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/reviews/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await deleteReview(req.params.id, req.workspace.id);
     if (!deleted) {
