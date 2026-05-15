@@ -50,7 +50,7 @@ export async function revokeShareToken(workspaceId: string, resource: string): P
 
 export interface PublicRoadmap {
   workspace: { name: string };
-  items: RoadmapItem[];
+  items: (RoadmapItem & { vote_count: number })[];
 }
 
 export async function getPublicRoadmap(token: string): Promise<PublicRoadmap | null> {
@@ -66,10 +66,16 @@ export async function getPublicRoadmap(token: string): Promise<PublicRoadmap | n
 
   const [wsResult, itemsResult] = await Promise.all([
     pool.query<{ name: string }>('SELECT name FROM workspaces WHERE id = $1', [workspace_id]),
-    pool.query<RoadmapItem>(
-      `SELECT * FROM roadmap_items
-       WHERE workspace_id = $1 AND status != 'archived'
-       ORDER BY priority, created_at`,
+    pool.query<RoadmapItem & { vote_count: string }>(
+      `SELECT ri.*, COALESCE(v.cnt, 0) AS vote_count
+       FROM roadmap_items ri
+       LEFT JOIN (
+         SELECT roadmap_item_id, COUNT(*) AS cnt
+         FROM roadmap_votes
+         GROUP BY roadmap_item_id
+       ) v ON ri.id = v.roadmap_item_id
+       WHERE ri.workspace_id = $1 AND ri.status != 'archived'
+       ORDER BY ri.priority, ri.created_at`,
       [workspace_id],
     ),
   ]);
@@ -78,6 +84,67 @@ export async function getPublicRoadmap(token: string): Promise<PublicRoadmap | n
 
   return {
     workspace: { name: wsResult.rows[0].name },
-    items: itemsResult.rows,
+    items: itemsResult.rows.map((r) => ({ ...r, vote_count: parseInt(r.vote_count as unknown as string, 10) })),
   };
+}
+
+/** Validate a share token and return workspace_id, or null if invalid. */
+export async function validateShareToken(token: string, resource: string): Promise<string | null> {
+  const result = await pool.query<{ workspace_id: string; expires_at: Date | null }>(
+    `SELECT workspace_id, expires_at FROM share_tokens WHERE token = $1 AND resource = $2`,
+    [token, resource],
+  );
+  if (result.rows.length === 0) return null;
+  const { workspace_id, expires_at } = result.rows[0];
+  if (expires_at && new Date() > expires_at) return null;
+  return workspace_id;
+}
+
+/** Add a vote; returns new vote_count. Idempotent (ON CONFLICT DO NOTHING). */
+export async function addRoadmapVote(
+  roadmapItemId: string,
+  workspaceId: string,
+  visitorId: string,
+): Promise<number | null> {
+  // Verify item belongs to workspace
+  const itemCheck = await pool.query(
+    'SELECT id FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
+    [roadmapItemId, workspaceId],
+  );
+  if (itemCheck.rows.length === 0) return null;
+
+  await pool.query(
+    `INSERT INTO roadmap_votes (roadmap_item_id, visitor_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [roadmapItemId, visitorId],
+  );
+
+  const countResult = await pool.query<{ cnt: string }>(
+    'SELECT COUNT(*) AS cnt FROM roadmap_votes WHERE roadmap_item_id = $1',
+    [roadmapItemId],
+  );
+  return parseInt(countResult.rows[0].cnt, 10);
+}
+
+/** Remove a vote; returns new vote_count. */
+export async function removeRoadmapVote(
+  roadmapItemId: string,
+  workspaceId: string,
+  visitorId: string,
+): Promise<number | null> {
+  const itemCheck = await pool.query(
+    'SELECT id FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
+    [roadmapItemId, workspaceId],
+  );
+  if (itemCheck.rows.length === 0) return null;
+
+  await pool.query(
+    'DELETE FROM roadmap_votes WHERE roadmap_item_id = $1 AND visitor_id = $2',
+    [roadmapItemId, visitorId],
+  );
+
+  const countResult = await pool.query<{ cnt: string }>(
+    'SELECT COUNT(*) AS cnt FROM roadmap_votes WHERE roadmap_item_id = $1',
+    [roadmapItemId],
+  );
+  return parseInt(countResult.rows[0].cnt, 10);
 }

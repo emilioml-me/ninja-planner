@@ -1,4 +1,7 @@
-import { useQuery } from '@tanstack/react-query';
+import { useState, useEffect, useCallback } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { ThumbsUp, ArrowUpDown } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface RoadmapItem {
   id: string;
@@ -7,6 +10,7 @@ interface RoadmapItem {
   phase: string | null;
   status: string;
   priority: number;
+  vote_count: number;
 }
 
 interface PublicRoadmapData {
@@ -22,11 +26,48 @@ const STATUS_META: Record<string, { label: string; dot: string }> = {
 
 const STATUS_ORDER = ['building', 'idea', 'live'];
 
+const VISITOR_KEY = 'plan-ninja:visitor_id';
+const VOTES_KEY   = (token: string) => `plan-ninja:votes:${token}`;
+
+function getOrCreateVisitorId(): string {
+  let id = localStorage.getItem(VISITOR_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(VISITOR_KEY, id);
+  }
+  return id;
+}
+
+function loadVotedIds(token: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(VOTES_KEY(token));
+    if (!raw) return new Set();
+    return new Set(JSON.parse(raw) as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveVotedIds(token: string, ids: Set<string>): void {
+  localStorage.setItem(VOTES_KEY(token), JSON.stringify([...ids]));
+}
+
 interface PublicRoadmapProps {
   token: string;
 }
 
 export default function PublicRoadmap({ token }: PublicRoadmapProps) {
+  const queryClient = useQueryClient();
+  const [sortByVotes, setSortByVotes] = useState(false);
+  const [votedIds, setVotedIds] = useState<Set<string>>(new Set());
+  const [visitorId, setVisitorId] = useState('');
+
+  // Initialise visitor + voted-ids from localStorage after first render
+  useEffect(() => {
+    setVisitorId(getOrCreateVisitorId());
+    setVotedIds(loadVotedIds(token));
+  }, [token]);
+
   const { data, isLoading, isError } = useQuery<PublicRoadmapData>({
     queryKey: ['/public/roadmap', token],
     queryFn: async () => {
@@ -36,6 +77,43 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
     },
     retry: false,
   });
+
+  // Generic vote toggler — hits POST or DELETE depending on current state
+  const voteMutation = useMutation({
+    mutationFn: async ({ itemId, removing }: { itemId: string; removing: boolean }) => {
+      const res = await fetch(`/public/roadmap/${token}/votes/${itemId}`, {
+        method: removing ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitor_id: visitorId }),
+      });
+      if (!res.ok) throw new Error('Vote failed');
+      return res.json() as Promise<{ vote_count: number }>;
+    },
+    onSuccess: ({ vote_count }, { itemId, removing }) => {
+      // Update cache in-place
+      queryClient.setQueryData<PublicRoadmapData>(['/public/roadmap', token], (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          items: old.items.map((i) => i.id === itemId ? { ...i, vote_count } : i),
+        };
+      });
+
+      // Persist voted state to localStorage
+      setVotedIds((prev) => {
+        const next = new Set(prev);
+        if (removing) next.delete(itemId); else next.add(itemId);
+        saveVotedIds(token, next);
+        return next;
+      });
+    },
+  });
+
+  const handleVote = useCallback((itemId: string) => {
+    if (!visitorId || voteMutation.isPending) return;
+    const removing = votedIds.has(itemId);
+    voteMutation.mutate({ itemId, removing });
+  }, [visitorId, votedIds, voteMutation]);
 
   if (isLoading) {
     return (
@@ -55,7 +133,10 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
   }
 
   const grouped = STATUS_ORDER.reduce<Record<string, RoadmapItem[]>>((acc, s) => {
-    acc[s] = data.items.filter((i) => i.status === s);
+    const items = data.items.filter((i) => i.status === s);
+    acc[s] = sortByVotes
+      ? [...items].sort((a, b) => b.vote_count - a.vote_count)
+      : items;
     return acc;
   }, {});
 
@@ -70,8 +151,24 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
         </div>
       </div>
 
+      {/* Sort bar */}
+      <div className="max-w-5xl mx-auto px-6 pt-6 flex justify-end">
+        <button
+          onClick={() => setSortByVotes((v) => !v)}
+          className={cn(
+            'flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
+            sortByVotes
+              ? 'bg-primary text-primary-foreground border-primary'
+              : 'bg-card hover:bg-muted',
+          )}
+        >
+          <ArrowUpDown className="h-3.5 w-3.5" />
+          Sort by votes
+        </button>
+      </div>
+
       {/* Content */}
-      <div className="max-w-5xl mx-auto px-6 py-8">
+      <div className="max-w-5xl mx-auto px-6 py-6">
         {data.items.length === 0 ? (
           <p className="text-sm text-muted-foreground text-center py-12">Nothing on the roadmap yet — check back soon!</p>
         ) : (
@@ -88,19 +185,39 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
                     <span className="text-xs text-muted-foreground ml-auto">{items.length}</span>
                   </div>
                   <div className="space-y-2">
-                    {items.map((item) => (
-                      <div key={item.id} className="rounded-lg border bg-card p-3 space-y-1">
-                        <p className="font-medium text-sm">{item.title}</p>
-                        {item.description && (
-                          <p className="text-xs text-muted-foreground line-clamp-3">{item.description}</p>
-                        )}
-                        {item.phase && (
-                          <span className="inline-block text-[10px] bg-muted text-muted-foreground rounded px-1.5 py-0.5">
-                            {item.phase}
-                          </span>
-                        )}
-                      </div>
-                    ))}
+                    {items.map((item) => {
+                      const voted = votedIds.has(item.id);
+                      return (
+                        <div key={item.id} className="rounded-lg border bg-card p-3 space-y-2">
+                          <p className="font-medium text-sm">{item.title}</p>
+                          {item.description && (
+                            <p className="text-xs text-muted-foreground line-clamp-3">{item.description}</p>
+                          )}
+                          {item.phase && (
+                            <span className="inline-block text-[10px] bg-muted text-muted-foreground rounded px-1.5 py-0.5">
+                              {item.phase}
+                            </span>
+                          )}
+                          {/* Vote button */}
+                          <div className="flex items-center pt-0.5">
+                            <button
+                              onClick={() => handleVote(item.id)}
+                              disabled={!visitorId || voteMutation.isPending}
+                              className={cn(
+                                'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition-colors',
+                                voted
+                                  ? 'bg-primary text-primary-foreground border-primary'
+                                  : 'bg-background hover:bg-muted text-muted-foreground border-border',
+                              )}
+                              title={voted ? 'Remove vote' : 'Upvote'}
+                            >
+                              <ThumbsUp className="h-3 w-3" />
+                              <span>{item.vote_count}</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -113,7 +230,7 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
       <div className="border-t mt-12">
         <div className="max-w-5xl mx-auto px-6 py-4 flex justify-between items-center">
           <p className="text-xs text-muted-foreground">Powered by plan-ninja</p>
-          <p className="text-xs text-muted-foreground">Read-only · Updates automatically</p>
+          <p className="text-xs text-muted-foreground">Updates automatically</p>
         </div>
       </div>
     </div>
