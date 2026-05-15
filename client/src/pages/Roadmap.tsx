@@ -1,5 +1,22 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -78,6 +95,11 @@ export default function Roadmap() {
   const [shareToken, setShareToken] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [phaseFilter, setPhaseFilter] = useState('');
+  const [activeId, setActiveId] = useState<string | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
 
   const { data: items = [], isLoading } = useQuery<RoadmapItem[]>({
     queryKey: ['/api/roadmap'],
@@ -126,6 +148,34 @@ export default function Roadmap() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/roadmap'] }); toast({ title: 'Item deleted' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
+
+  const reorderMut = useMutation({
+    mutationFn: (data: { id: string; priority: number }[]) =>
+      apiRequest('PATCH', '/api/roadmap/reorder', { items: data }),
+    onError: () => {
+      qc.invalidateQueries({ queryKey: ['/api/roadmap'] });
+      toast({ title: 'Reorder failed', variant: 'destructive' });
+    },
+  });
+
+  const handleDragStart = (event: DragStartEvent) => setActiveId(String(event.active.id));
+
+  const makeHandleDragEnd = (status: string, col: RoadmapItem[]) => (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveId(null);
+    if (!over || active.id === over.id) return;
+    const oldIndex = col.findIndex((i) => i.id === active.id);
+    const newIndex = col.findIndex((i) => i.id === over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const reordered = arrayMove(col, oldIndex, newIndex);
+    // Optimistic update
+    qc.setQueryData<RoadmapItem[]>(['/api/roadmap'], (old = []) => {
+      const others = old.filter((i) => i.status !== status);
+      const updated = reordered.map((item, idx) => ({ ...item, priority: idx }));
+      return [...others, ...updated];
+    });
+    reorderMut.mutate(reordered.map((item, idx) => ({ id: item.id, priority: idx })));
+  };
 
   const handleSubmit = (d: FormData) => {
     editing ? updateMut.mutate(d) : createMut.mutate(d);
@@ -265,65 +315,40 @@ export default function Roadmap() {
                     </Button>
                   </div>
 
-                  <div className="flex-1 space-y-3 overflow-y-auto">
-                    {col.map((item) => (
-                      <Card key={item.id} className={cn('group', cfg.color)}>
-                        <CardHeader className="p-3 pb-1">
-                          <div className="flex items-start justify-between gap-2">
-                            <CardTitle className="text-sm font-medium leading-snug">{item.title}</CardTitle>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0">
-                                  <MoreVertical className="h-3 w-3" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem onClick={() => openEdit(item)}>
-                                  <Pencil className="h-4 w-4 mr-2" /> Edit
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  className="text-destructive"
-                                  onClick={() => deleteMut.mutate(item.id)}
-                                >
-                                  <Trash2 className="h-4 w-4 mr-2" /> Delete
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </div>
-                        </CardHeader>
-                        <CardContent className="p-3 pt-1 space-y-2">
-                          {item.description && (
-                            <p className="text-xs text-muted-foreground line-clamp-2">{item.description}</p>
-                          )}
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {item.phase && (
-                              <Badge variant="outline" className="text-xs">{item.phase}</Badge>
-                            )}
-                            {item.external_ref && (
-                              <a
-                                href={item.external_ref}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <ExternalLink className="h-3 w-3" />
-                                {externalRefLabel(item.external_ref)}
-                              </a>
-                            )}
-                          </div>
-                        </CardContent>
-                      </Card>
-                    ))}
-                    {col.length === 0 && (
-                      <button
-                        className="w-full rounded-lg border border-dashed border-muted-foreground/30 p-4 text-sm text-muted-foreground hover:border-muted-foreground/60 transition-colors"
-                        onClick={() => openCreate(status)}
-                      >
-                        + Add item
-                      </button>
-                    )}
-                  </div>
+                  <DndContext
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragStart={handleDragStart}
+                    onDragEnd={makeHandleDragEnd(status, col)}
+                  >
+                    <SortableContext items={col.map((i) => i.id)} strategy={verticalListSortingStrategy}>
+                      <div className="flex-1 space-y-3 overflow-y-auto">
+                        {col.map((item) => (
+                          <SortableRoadmapCard
+                            key={item.id}
+                            item={item}
+                            cfg={cfg}
+                            onEdit={openEdit}
+                            onDelete={(id) => deleteMut.mutate(id)}
+                          />
+                        ))}
+                        {col.length === 0 && (
+                          <button
+                            className="w-full rounded-lg border border-dashed border-muted-foreground/30 p-4 text-sm text-muted-foreground hover:border-muted-foreground/60 transition-colors"
+                            onClick={() => openCreate(status)}
+                          >
+                            + Add item
+                          </button>
+                        )}
+                      </div>
+                    </SortableContext>
+                    <DragOverlay dropAnimation={null}>
+                      {activeId ? (() => {
+                        const item = col.find((i) => i.id === activeId);
+                        return item ? <RoadmapCardContent item={item} cfg={cfg} overlay /> : null;
+                      })() : null}
+                    </DragOverlay>
+                  </DndContext>
                 </div>
               );
             })}
@@ -444,5 +469,117 @@ export default function Roadmap() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// ─── Sortable card ────────────────────────────────────────────────────────────
+
+interface CardCfg {
+  label: string;
+  color: string;
+  badge: 'default' | 'secondary' | 'outline' | 'destructive';
+}
+
+function SortableRoadmapCard({
+  item,
+  cfg,
+  onEdit,
+  onDelete,
+}: {
+  item: RoadmapItem;
+  cfg: CardCfg;
+  onEdit: (item: RoadmapItem) => void;
+  onDelete: (id: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      <RoadmapCardContent
+        item={item}
+        cfg={cfg}
+        dragHandleProps={{ ...attributes, ...listeners }}
+        onEdit={onEdit}
+        onDelete={onDelete}
+      />
+    </div>
+  );
+}
+
+function RoadmapCardContent({
+  item,
+  cfg,
+  dragHandleProps,
+  onEdit,
+  onDelete,
+  overlay,
+}: {
+  item: RoadmapItem;
+  cfg: CardCfg;
+  dragHandleProps?: Record<string, unknown>;
+  onEdit?: (item: RoadmapItem) => void;
+  onDelete?: (id: string) => void;
+  overlay?: boolean;
+}) {
+  return (
+    <Card className={cn('group', cfg.color, overlay && 'shadow-lg rotate-1')}>
+      <CardHeader className="p-3 pb-1">
+        <div className="flex items-start justify-between gap-2">
+          <div
+            className="cursor-grab active:cursor-grabbing touch-none flex-1"
+            {...dragHandleProps}
+          >
+            <CardTitle className="text-sm font-medium leading-snug">{item.title}</CardTitle>
+          </div>
+          {!overlay && onEdit && onDelete && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0">
+                  <MoreVertical className="h-3 w-3" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => onEdit(item)}>
+                  <Pencil className="h-4 w-4 mr-2" /> Edit
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="text-destructive"
+                  onClick={() => onDelete(item.id)}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" /> Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="p-3 pt-1 space-y-2">
+        {item.description && (
+          <p className="text-xs text-muted-foreground line-clamp-2">{item.description}</p>
+        )}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {item.phase && (
+            <Badge variant="outline" className="text-xs">{item.phase}</Badge>
+          )}
+          {item.external_ref && (
+            <a
+              href={item.external_ref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ExternalLink className="h-3 w-3" />
+              {externalRefLabel(item.external_ref)}
+            </a>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

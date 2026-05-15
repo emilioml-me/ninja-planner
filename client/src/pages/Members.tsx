@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMembers } from '@/hooks/use-members';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -8,6 +8,9 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Progress } from '@/components/ui/progress';
+import { Separator } from '@/components/ui/separator';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Dialog,
   DialogContent,
@@ -16,7 +19,20 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Loader2, Trash2, Users, Crown, Shield, User } from 'lucide-react';
+import { Loader2, Trash2, Users, Crown, Shield, User, CheckCircle2, Clock, Zap, MessageSquare, TrendingUp, AlertTriangle } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+interface MemberStats {
+  total: number;
+  todo: number;
+  in_progress: number;
+  done: number;
+  blocked: number;
+  overdue: number;
+  sprint_count: number;
+  comment_count: number;
+  completion_rate: number;
+}
 
 const ROLE_META: Record<string, { label: string; icon: React.ElementType; variant: 'default' | 'secondary' | 'outline' }> = {
   owner:  { label: 'Owner',  icon: Crown,  variant: 'default'   },
@@ -31,6 +47,7 @@ export default function Members() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [statsTarget, setStatsTarget] = useState<{ clerkUserId: string; name: string; imageUrl: string | null } | null>(null);
 
   const isAdmin = orgRole === 'org:admin' || orgRole === 'org:owner';
 
@@ -89,7 +106,8 @@ export default function Members() {
                 return (
                   <li
                     key={member.id}
-                    className="flex items-center gap-4 px-6 py-4 hover:bg-muted/40 transition-colors"
+                    className="flex items-center gap-4 px-6 py-4 hover:bg-muted/40 transition-colors cursor-pointer"
+                    onClick={() => setStatsTarget({ clerkUserId: member.clerk_user_id, name: member.display_name, imageUrl: member.image_url })}
                   >
                     <Avatar className="h-9 w-9">
                       {member.image_url && <AvatarImage src={member.image_url} alt={member.display_name} />}
@@ -117,7 +135,7 @@ export default function Members() {
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
-                        onClick={() => setConfirmRemoveId(member.id)}
+                        onClick={(e) => { e.stopPropagation(); setConfirmRemoveId(member.id); }}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -129,6 +147,17 @@ export default function Members() {
           )}
         </CardContent>
       </Card>
+
+      {/* Member stats dialog */}
+      {statsTarget && (
+        <MemberStatsDialog
+          clerkUserId={statsTarget.clerkUserId}
+          name={statsTarget.name}
+          imageUrl={statsTarget.imageUrl}
+          initials={initials(statsTarget.clerkUserId)}
+          onClose={() => setStatsTarget(null)}
+        />
+      )}
 
       {/* Confirm remove dialog */}
       <Dialog open={!!confirmRemoveId} onOpenChange={(open) => !open && setConfirmRemoveId(null)}>
@@ -156,6 +185,128 @@ export default function Members() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// ─── Member Stats Dialog ───────────────────────────────────────────────────────
+
+function MemberStatsDialog({
+  clerkUserId,
+  name,
+  imageUrl,
+  initials,
+  onClose,
+}: {
+  clerkUserId: string;
+  name: string;
+  imageUrl: string | null;
+  initials: string;
+  onClose: () => void;
+}) {
+  const { apiRequest } = useApiClient();
+  const { data: stats, isLoading } = useQuery<MemberStats>({
+    queryKey: ['/api/workspaces/me/members', clerkUserId, 'stats'],
+    queryFn: () => apiRequest<MemberStats>('GET', `/api/workspaces/me/members/${clerkUserId}/stats`),
+    staleTime: 60_000,
+  });
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <div className="flex items-center gap-3">
+            <Avatar className="h-10 w-10">
+              {imageUrl && <AvatarImage src={imageUrl} alt={name} />}
+              <AvatarFallback className="text-sm bg-primary/10 text-primary font-medium">{initials}</AvatarFallback>
+            </Avatar>
+            <div>
+              <DialogTitle className="text-base">{name}</DialogTitle>
+              <DialogDescription>Activity overview</DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+
+        {isLoading ? (
+          <div className="space-y-3 py-2">
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-8 w-full" />)}
+          </div>
+        ) : stats ? (
+          <div className="space-y-4 py-1">
+            {/* Completion rate */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground flex items-center gap-1.5">
+                  <TrendingUp className="h-3.5 w-3.5" /> Completion rate
+                </span>
+                <span className="font-semibold">{stats.completion_rate}%</span>
+              </div>
+              <Progress value={stats.completion_rate} className="h-2" />
+            </div>
+
+            <Separator />
+
+            {/* Task breakdown */}
+            <div className="grid grid-cols-2 gap-3">
+              <StatPill icon={<CheckCircle2 className="h-3.5 w-3.5 text-green-500" />} label="Done" value={stats.done} />
+              <StatPill icon={<Clock className="h-3.5 w-3.5 text-blue-500" />} label="In Progress" value={stats.in_progress} />
+              <StatPill icon={<AlertTriangle className="h-3.5 w-3.5 text-orange-500" />} label="Overdue" value={stats.overdue} highlight={stats.overdue > 0} />
+              <StatPill icon={<span className="h-3.5 w-3.5 rounded-full bg-muted-foreground/40 inline-block" />} label="Todo" value={stats.todo} />
+            </div>
+
+            <Separator />
+
+            {/* Sprints & comments */}
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground flex items-center gap-1.5">
+                <Zap className="h-3.5 w-3.5 text-yellow-500" /> Sprints participated
+              </span>
+              <span className="font-medium">{stats.sprint_count}</span>
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground flex items-center gap-1.5">
+                <MessageSquare className="h-3.5 w-3.5 text-purple-500" /> Comments written
+              </span>
+              <span className="font-medium">{stats.comment_count}</span>
+            </div>
+            <div className="flex items-center justify-between text-sm font-medium border-t pt-3">
+              <span>Total tasks assigned</span>
+              <span>{stats.total}</span>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground py-4 text-center">No stats available.</p>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function StatPill({
+  icon,
+  label,
+  value,
+  highlight,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: number;
+  highlight?: boolean;
+}) {
+  return (
+    <div className={cn(
+      'flex items-center gap-2 rounded-lg px-3 py-2 text-sm',
+      highlight ? 'bg-destructive/10' : 'bg-muted/50',
+    )}>
+      {icon}
+      <div className="min-w-0">
+        <p className="text-xs text-muted-foreground leading-none mb-0.5">{label}</p>
+        <p className={cn('font-semibold', highlight && value > 0 ? 'text-destructive' : '')}>{value}</p>
+      </div>
     </div>
   );
 }

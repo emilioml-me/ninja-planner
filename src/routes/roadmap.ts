@@ -8,6 +8,7 @@ import {
   deleteRoadmapItem,
 } from '../services/roadmapService.js';
 import { upsertShareToken, getShareToken, revokeShareToken } from '../services/shareService.js';
+import { pool } from '../config/db.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -72,6 +73,34 @@ router.patch('/:id', async (req, res, next) => {
       return;
     }
     res.json(item);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/roadmap/reorder  — bulk priority update for drag-to-reorder
+// Body: { items: [{ id: string, priority: number }] }
+router.patch('/reorder', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      items: z.array(z.object({ id: z.string().uuid(), priority: z.number().int().min(0) })).min(1).max(200),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    // Use a single unnest-based UPDATE for efficiency
+    const ids       = parsed.data.items.map((i) => i.id);
+    const priorities = parsed.data.items.map((i) => i.priority);
+    await pool.query(
+      `UPDATE roadmap_items ri
+       SET priority = v.priority::int
+       FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::int[]) AS priority) v
+       WHERE ri.id = v.id AND ri.workspace_id = $3`,
+      [ids, priorities, req.workspace.id],
+    );
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
