@@ -1,6 +1,6 @@
 services:
   ninja-planner:
-    image: ninja-planner:1.0.0
+    image: ghcr.io/emilioml-me/ninja-planner:latest
     container_name: ninja-planner
     restart: unless-stopped
     env_file: /srv/secrets/plan-ninja.env

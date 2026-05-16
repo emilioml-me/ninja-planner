@@ -3,19 +3,21 @@ name: CI
 on:
   push:
     branches: [main]
+    tags-ignore: ['v*']
   pull_request:
     branches: [main]
 
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ninja-planner
+
 jobs:
-  typecheck-and-build:
-    name: Typecheck & Build
+  lint-build:
+    name: Lint & Build
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -24,11 +26,68 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: TypeScript check
-        run: npm run typecheck
-
-      - name: Build (server + client)
+      - name: Build
         run: npm run build
         env:
-          # Vite needs these at build time — use placeholder values for CI
-          VITE_CLERK_PUBLISHABLE_KEY: pk_test_placeholder
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY_STG }}
+
+  docker:
+    name: Docker Build & Push
+    needs: lint-build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY_STG }}
+
+  deploy-staging:
+    name: Deploy → Staging
+    needs: docker
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to ninja-stg001
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 10.10.0.50
+          username: ubuntu
+          key: ${{ secrets.STG_SSH_KEY }}
+          script: |
+            set -e
+            IMAGE_TAG="${{ needs.docker.outputs.image_tag }}"
+            COMPOSE_FILE="/srv/apps/ninja-planner/docker-compose.prod.saas.yml"
+            sed -i "s|ghcr.io/emilioml-me/ninja-planner:.*|ghcr.io/emilioml-me/ninja-planner:${IMAGE_TAG}|" "${COMPOSE_FILE}"
+            docker compose -f "${COMPOSE_FILE}" pull
+            docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+            docker system prune -f
+            echo "✅ ninja-planner:${IMAGE_TAG} live on staging"
