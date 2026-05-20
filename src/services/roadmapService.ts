@@ -20,12 +20,12 @@ export async function getRoadmap(
   workspaceId: string,
   filters: { status?: string; phase?: string },
 ): Promise<RoadmapItem[]> {
-  const conditions = ['workspace_id = $1'];
+  const conditions = ['ri.workspace_id = $1'];
   const values: unknown[] = [workspaceId];
   let i = 2;
 
-  if (filters.status) { conditions.push(`status = $${i++}`); values.push(filters.status); }
-  if (filters.phase)  { conditions.push(`phase = $${i++}`);  values.push(filters.phase); }
+  if (filters.status) { conditions.push(`ri.status = $${i++}`); values.push(filters.status); }
+  if (filters.phase)  { conditions.push(`ri.phase = $${i++}`);  values.push(filters.phase); }
 
   const result = await pool.query<RoadmapItem>(
     `SELECT ri.*,
@@ -34,7 +34,7 @@ export async function getRoadmap(
      FROM roadmap_items ri
      LEFT JOIN roadmap_task_links rtl ON rtl.roadmap_item_id = ri.id
      LEFT JOIN tasks t ON t.id = rtl.task_id AND t.workspace_id = $1
-     WHERE ${conditions.map((c) => `ri.${c}`).join(' AND ')}
+     WHERE ${conditions.join(' AND ')}
      GROUP BY ri.id
      ORDER BY ri.priority, ri.created_at`,
     values,

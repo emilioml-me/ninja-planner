@@ -9,6 +9,8 @@ import {
   updateReview,
   deleteReview,
 } from '../services/reviewService.js';
+
+const REVIEW_ADMIN_ROLES = new Set(['org:admin', 'org:owner']);
 import { sendSlackMessage } from '../lib/slack.js';
 import { fireWebhooks } from '../services/webhookService.js';
 
@@ -80,7 +82,7 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// PATCH /api/reviews/:id
+// PATCH /api/reviews/:id  — creator or admin only
 router.patch('/:id', async (req, res, next) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
@@ -90,6 +92,17 @@ router.patch('/:id', async (req, res, next) => {
     }
     if (Object.keys(parsed.data).length === 0) {
       res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+    // Ownership check: only the creator or an admin can update a review
+    const existing = await getReviewById(req.params.id, req.workspace.id);
+    if (!existing) {
+      res.status(404).json({ error: 'Review not found' });
+      return;
+    }
+    const isAdmin = req.auth.memberRole ? REVIEW_ADMIN_ROLES.has(req.auth.memberRole) : false;
+    if (existing.created_by !== req.auth.userId && !isAdmin) {
+      res.status(403).json({ error: 'Only the creator or an admin can edit this review' });
       return;
     }
     const review = await updateReview(req.params.id, req.workspace.id, parsed.data);

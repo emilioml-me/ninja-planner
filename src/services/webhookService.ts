@@ -148,10 +148,9 @@ async function _deliver(
   if (result.rows.length === 0) return;
 
   const body = JSON.stringify({ event: eventType, timestamp: new Date().toISOString(), data: payload });
-  const deliveryId = randomBytes(16).toString('hex');
 
   await Promise.allSettled(
-    result.rows.map((endpoint) => _deliverToEndpoint(endpoint, eventType, body, deliveryId, payload)),
+    result.rows.map((endpoint) => _deliverToEndpoint(endpoint, eventType, body, payload)),
   );
 }
 
@@ -166,9 +165,10 @@ async function _deliverToEndpoint(
   endpoint: WebhookEndpoint,
   eventType: string,
   body: string,
-  deliveryId: string,
   payload: Record<string, unknown>,
 ): Promise<void> {
+  // Per-endpoint delivery ID so each receiver can correlate retries vs. separate events
+  const deliveryId = randomBytes(16).toString('hex');
   // DNS-rebinding guard: verify the resolved IP is still public at delivery time
   const { hostname } = new URL(endpoint.url);
   if (!(await resolvedIpIsSafe(hostname))) {

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { createHash } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import {
   getPublicRoadmap,
@@ -7,6 +8,12 @@ import {
   addRoadmapVote,
   removeRoadmapVote,
 } from '../services/shareService.js';
+
+/** SHA-256 hash of the client IP — never log raw IPs */
+function hashIp(ip: string | undefined): string | null {
+  if (!ip) return null;
+  return createHash('sha256').update(ip).digest('hex');
+}
 
 /**
  * Public routes — no auth required.
@@ -55,7 +62,8 @@ router.post('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, next)
       res.status(404).json({ error: 'Roadmap not found or link expired' });
       return;
     }
-    const voteCount = await addRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id);
+    const ipHash = hashIp(req.ip);
+    const voteCount = await addRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash);
     if (voteCount === null) {
       res.status(404).json({ error: 'Item not found' });
       return;
@@ -79,7 +87,8 @@ router.delete('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, nex
       res.status(404).json({ error: 'Roadmap not found or link expired' });
       return;
     }
-    const voteCount = await removeRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id);
+    const ipHash = hashIp(req.ip);
+    const voteCount = await removeRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash);
     if (voteCount === null) {
       res.status(404).json({ error: 'Item not found' });
       return;

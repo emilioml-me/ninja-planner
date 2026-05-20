@@ -105,7 +105,7 @@ export async function addGoalLink(
   workspaceId: string,
   entityType: string,
   entityId: string,
-): Promise<GoalLink> {
+): Promise<GoalLink | null> {
   // Verify goal belongs to workspace
   const goalCheck = await pool.query(
     'SELECT id FROM goals WHERE id = $1 AND workspace_id = $2',
@@ -118,7 +118,7 @@ export async function addGoalLink(
      ON CONFLICT (goal_id, entity_type, entity_id) DO NOTHING RETURNING *`,
     [goalId, entityType, entityId],
   );
-  return result.rows[0];
+  return result.rows[0] ?? null;
 }
 
 /**

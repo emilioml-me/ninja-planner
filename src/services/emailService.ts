@@ -83,7 +83,7 @@ export async function sendTaskAssignedEmail(opts: {
     <h2>You've been assigned a task</h2>
     <p>Hi ${escHtml(opts.recipientName)},</p>
     <p><strong>${escHtml(opts.assigner)}</strong> assigned you the task <strong>"${escHtml(opts.taskTitle)}"</strong>.</p>
-    <a href="${opts.workspaceUrl}/tasks" class="cta">View Task</a>
+    <a href="${escHtml(opts.workspaceUrl)}/tasks" class="cta">View Task</a>
     <p style="color:#71717a;font-size:13px">If you weren't expecting this, you can ignore this email.</p>
   `;
   await sendEmail({
@@ -105,7 +105,7 @@ export async function sendDueDateReminderEmail(opts: {
     <h2>Task due soon</h2>
     <p>Hi ${escHtml(opts.recipientName)},</p>
     <p>This is a reminder that <strong>"${escHtml(opts.taskTitle)}"</strong> is due on <strong>${escHtml(opts.dueDate)}</strong>.</p>
-    <a href="${opts.workspaceUrl}/tasks" class="cta">Open Task</a>
+    <a href="${escHtml(opts.workspaceUrl)}/tasks" class="cta">Open Task</a>
   `;
   await sendEmail({
     to: opts.to,
@@ -133,7 +133,7 @@ export async function sendCommentMentionEmail(opts: {
     <blockquote style="margin:0 0 16px;padding:12px 16px;background:#f4f4f5;border-left:3px solid #18181b;border-radius:4px;font-size:14px;color:#3f3f46;">
       ${escHtml(preview)}
     </blockquote>
-    <a href="${opts.workspaceUrl}/tasks" class="cta">View Comment</a>
+    <a href="${escHtml(opts.workspaceUrl)}/tasks" class="cta">View Comment</a>
   `;
   await sendEmail({
     to: opts.to,
@@ -157,7 +157,7 @@ export async function sendGoalMilestoneEmail(opts: {
     <p>Hi ${escHtml(opts.recipientName)},</p>
     <p>Your goal <strong>"${escHtml(opts.goalTitle)}"</strong> just reached <strong>${opts.milestone}</strong> completion${is100 ? ' — congratulations!' : '.'}
     </p>
-    <a href="${opts.workspaceUrl}/goals" class="cta">View Goal</a>
+    <a href="${escHtml(opts.workspaceUrl)}/goals" class="cta">View Goal</a>
   `;
   await sendEmail({
     to: opts.to,

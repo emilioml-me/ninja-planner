@@ -211,7 +211,7 @@ router.post('/', async (req, res, next) => {
 
     fireWebhooks(req.workspace.id, 'task.created', { task });
 
-    // Due-date reminder — notify assignee when a due date is set at creation
+    // Due-date reminder — in-app only at creation (task-assigned email already covers it)
     if (task.assignee_clerk_id && task.due_date && task.assignee_clerk_id !== req.auth.userId) {
       createNotification({
         workspaceId: req.workspace.id,
@@ -220,18 +220,7 @@ router.post('/', async (req, res, next) => {
         title: `"${task.title}" is due on ${task.due_date}`,
         link: '/tasks',
       }).catch(() => {});
-
-      // Email: due date reminder
-      resolveClerkEmail(task.assignee_clerk_id).then((user) => {
-        if (!user) return;
-        return sendDueDateReminderEmail({
-          to: user.email,
-          recipientName: user.name,
-          taskTitle: task.title,
-          dueDate: task.due_date!,
-          workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-        });
-      }).catch(() => {});
+      // No duplicate due-date email here — task-assigned email already includes the due date
     }
 
     res.status(201).json(task);
@@ -391,13 +380,18 @@ router.patch('/:id', async (req, res, next) => {
           const crossed100 = goal.done_tasks === goal.total_tasks && goal.done_tasks > 0;
 
           if (crossed100) {
-            createNotification({
-              workspaceId: req.workspace.id,
-              recipientClerkId: goal.created_by,
-              type: 'goal_milestone',
-              title: `🎉 Goal complete: "${goal.title}"`,
-              link: '/goals',
-            }).catch(() => {});
+            // Dedup: don't re-notify if a 100% milestone notification was sent for this goal in the last 24h
+            pool.query(
+              `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
+               SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM notifications
+                 WHERE workspace_id = $1 AND recipient_clerk_id = $2
+                   AND type = 'goal_milestone' AND body = $4
+                   AND created_at > NOW() - INTERVAL '24 hours'
+               )`,
+              [req.workspace.id, goal.created_by, `🎉 Goal complete: "${goal.title}"`, `${goal.id}:100`],
+            ).catch(() => {});
             resolveClerkEmail(goal.created_by).then((user) => {
               if (!user) return;
               return sendGoalMilestoneEmail({
@@ -409,13 +403,18 @@ router.patch('/:id', async (req, res, next) => {
               });
             }).catch(() => {});
           } else if (crossed50) {
-            createNotification({
-              workspaceId: req.workspace.id,
-              recipientClerkId: goal.created_by,
-              type: 'goal_milestone',
-              title: `Halfway there on "${goal.title}" (50%)`,
-              link: '/goals',
-            }).catch(() => {});
+            // Dedup: don't re-notify if a 50% milestone notification was sent for this goal in the last 24h
+            pool.query(
+              `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
+               SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM notifications
+                 WHERE workspace_id = $1 AND recipient_clerk_id = $2
+                   AND type = 'goal_milestone' AND body = $4
+                   AND created_at > NOW() - INTERVAL '24 hours'
+               )`,
+              [req.workspace.id, goal.created_by, `Halfway there on "${goal.title}" (50%)`, `${goal.id}:50`],
+            ).catch(() => {});
             resolveClerkEmail(goal.created_by).then((user) => {
               if (!user) return;
               return sendGoalMilestoneEmail({

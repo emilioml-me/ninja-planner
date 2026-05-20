@@ -34,7 +34,7 @@ export default function AcceptInvite({ token }: { token: string }) {
       setInfoError('Invalid invite link');
       return;
     }
-    fetch(`/api/invites/${token}`)
+    fetch(`/api/invites/token/${token}`)
       .then(async (r) => {
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
@@ -50,7 +50,7 @@ export default function AcceptInvite({ token }: { token: string }) {
     setAccepting(true);
     setAcceptError(null);
     try {
-      const result = await apiRequest<AcceptResult>('POST', `/api/invites/${token}/accept`);
+      const result = await apiRequest<AcceptResult>('POST', `/api/invites/token/${token}/accept`);
       setAccepted(result);
     } catch (e: unknown) {
       setAcceptError(e instanceof Error ? e.message : 'Failed to accept invite');

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { getMembersForWorkspace, removeMember } from '../services/workspaceService.js';
 import { clerkClient } from '../config/clerk.js';
 import { logger } from '../config/logger.js';
@@ -74,47 +75,47 @@ router.get('/me/members/:clerkUserId/stats', requireWorkspace, async (req, res, 
       return;
     }
 
+    // Single CTE query: task stats + sprint count (via sprint_id column) + comment count
     const statsResult = await pool.query<{
       total: number; todo: number; in_progress: number; done: number;
-      blocked: number; overdue: number;
+      blocked: number; overdue: number; sprint_count: number; comment_count: number;
     }>(
-      `SELECT
-         COUNT(*)::int                                                            AS total,
-         COUNT(*) FILTER (WHERE status = 'todo')::int                            AS todo,
-         COUNT(*) FILTER (WHERE status = 'in_progress')::int                     AS in_progress,
-         COUNT(*) FILTER (WHERE status = 'done')::int                            AS done,
-         COUNT(*) FILTER (WHERE status = 'blocked')::int                         AS blocked,
-         COUNT(*) FILTER (
-           WHERE status <> 'done' AND due_date < CURRENT_DATE
-         )::int                                                                   AS overdue
-       FROM tasks
-       WHERE workspace_id = $1 AND assignee_clerk_id = $2 AND deleted_at IS NULL`,
+      `WITH task_stats AS (
+         SELECT
+           COUNT(*)::int                                                              AS total,
+           COUNT(*) FILTER (WHERE status = 'todo')::int                              AS todo,
+           COUNT(*) FILTER (WHERE status = 'in_progress')::int                       AS in_progress,
+           COUNT(*) FILTER (WHERE status = 'done')::int                              AS done,
+           COUNT(*) FILTER (WHERE status = 'blocked')::int                           AS blocked,
+           COUNT(*) FILTER (WHERE status <> 'done' AND due_date < CURRENT_DATE)::int AS overdue,
+           COUNT(DISTINCT sprint_id) FILTER (WHERE sprint_id IS NOT NULL)::int       AS sprint_count
+         FROM tasks
+         WHERE workspace_id = $1 AND assignee_clerk_id = $2 AND deleted_at IS NULL
+       ),
+       comment_stats AS (
+         SELECT COUNT(*)::int AS comment_count
+         FROM task_comments tc
+         JOIN tasks t ON t.id = tc.task_id
+         WHERE t.workspace_id = $1 AND tc.author_clerk_id = $2
+       )
+       SELECT ts.*, cs.comment_count FROM task_stats ts, comment_stats cs`,
       [req.workspace.id, clerkUserId],
     );
 
-    const sprintResult = await pool.query<{ sprint_count: number }>(
-      `SELECT COUNT(DISTINCT st.sprint_id)::int AS sprint_count
-       FROM sprint_tasks st
-       JOIN tasks t ON t.id = st.task_id
-       WHERE t.workspace_id = $1 AND t.assignee_clerk_id = $2 AND t.deleted_at IS NULL`,
-      [req.workspace.id, clerkUserId],
-    );
-
-    const commentResult = await pool.query<{ comment_count: number }>(
-      `SELECT COUNT(*)::int AS comment_count
-       FROM task_comments tc
-       JOIN tasks t ON t.id = tc.task_id
-       WHERE t.workspace_id = $1 AND tc.author_clerk_id = $2`,
-      [req.workspace.id, clerkUserId],
-    );
-
-    const stats = statsResult.rows[0] ?? { total: 0, todo: 0, in_progress: 0, done: 0, blocked: 0, overdue: 0 };
+    const stats = statsResult.rows[0] ?? {
+      total: 0, todo: 0, in_progress: 0, done: 0, blocked: 0, overdue: 0, sprint_count: 0, comment_count: 0,
+    };
     const completionRate = stats.total > 0 ? Math.round((stats.done / stats.total) * 100) : 0;
 
     res.json({
-      ...stats,
-      sprint_count: sprintResult.rows[0]?.sprint_count ?? 0,
-      comment_count: commentResult.rows[0]?.comment_count ?? 0,
+      total: stats.total,
+      todo: stats.todo,
+      in_progress: stats.in_progress,
+      done: stats.done,
+      blocked: stats.blocked,
+      overdue: stats.overdue,
+      sprint_count: stats.sprint_count,
+      comment_count: stats.comment_count,
       completion_rate: completionRate,
     });
   } catch (err) {
@@ -123,12 +124,8 @@ router.get('/me/members/:clerkUserId/stats', requireWorkspace, async (req, res, 
 });
 
 // DELETE /api/workspaces/me/members/:memberId
-router.delete('/me/members/:memberId', requireWorkspace, async (req, res, next) => {
+router.delete('/me/members/:memberId', requireWorkspace, requireAdmin, async (req, res, next) => {
   try {
-    if (req.auth.memberRole !== 'org:admin') {
-      res.status(403).json({ error: 'Admin access required' });
-      return;
-    }
     const removed = await removeMember(req.workspace.id, req.params.memberId);
     if (!removed) {
       res.status(404).json({ error: 'Member not found' });
@@ -141,14 +138,10 @@ router.delete('/me/members/:memberId', requireWorkspace, async (req, res, next) 
 });
 
 // DELETE /api/workspaces/:id/members/:memberId
-router.delete('/:id/members/:memberId', requireWorkspace, async (req, res, next) => {
+router.delete('/:id/members/:memberId', requireWorkspace, requireAdmin, async (req, res, next) => {
   try {
     if (req.params.id !== req.workspace.id) {
       res.status(403).json({ error: 'Access denied' });
-      return;
-    }
-    if (req.auth.memberRole !== 'org:admin') {
-      res.status(403).json({ error: 'Admin access required' });
       return;
     }
     const removed = await removeMember(req.workspace.id, req.params.memberId);

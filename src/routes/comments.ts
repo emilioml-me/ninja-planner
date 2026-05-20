@@ -59,7 +59,7 @@ router.post('/', async (req, res, next) => {
           recipientClerkId,
           type: 'comment_added',
           title: `New comment on "${task.title}"`,
-          body: parsed.data.body.slice(0, 120),
+          body: comment.body.slice(0, 120),
           link: `/tasks`,
         }).catch(() => {});
 
@@ -83,7 +83,7 @@ router.post('/', async (req, res, next) => {
           recipientClerkId,
           type: 'comment_added',
           title: `New comment on "${task.title}"`,
-          body: parsed.data.body.slice(0, 120),
+          body: comment.body.slice(0, 120),
           link: `/tasks`,
         }).catch(() => {});
       }
@@ -108,7 +108,7 @@ router.post('/', async (req, res, next) => {
           recipientClerkId: mentionedId,
           type: 'mention',
           title: `You were mentioned in "${task.title}"`,
-          body: parsed.data.body.slice(0, 120),
+          body: comment.body.slice(0, 120),
           link: `/tasks`,
         }).catch(() => {});
 

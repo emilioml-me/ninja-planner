@@ -23,7 +23,8 @@ export async function getWorkspacesForUser(userId: string): Promise<Workspace[]>
      FROM workspaces w
      JOIN workspace_members wm ON wm.workspace_id = w.id
      WHERE wm.clerk_user_id = $1
-     ORDER BY w.name`,
+     ORDER BY w.name
+     LIMIT 100`,
     [userId],
   );
   return result.rows;
@@ -31,7 +32,7 @@ export async function getWorkspacesForUser(userId: string): Promise<Workspace[]>
 
 export async function updateWorkspace(
   workspaceId: string,
-  data: { name?: string; plan?: string },
+  data: { name?: string },
 ): Promise<Workspace | null> {
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -40,10 +41,6 @@ export async function updateWorkspace(
   if (data.name !== undefined) {
     fields.push(`name = $${i++}`);
     values.push(data.name);
-  }
-  if (data.plan !== undefined) {
-    fields.push(`plan = $${i++}`);
-    values.push(data.plan);
   }
   if (fields.length === 0) return null;
 

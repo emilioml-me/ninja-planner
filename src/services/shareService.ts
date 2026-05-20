@@ -122,11 +122,14 @@ export async function validateShareToken(token: string, resource: string): Promi
   return workspace_id;
 }
 
-/** Add a vote; returns new vote_count. Idempotent (ON CONFLICT DO NOTHING). */
+/** Add a vote; returns new vote_count. Idempotent (ON CONFLICT DO NOTHING).
+ *  ipHash (SHA-256 of requester's IP) is stored for secondary dedup via the partial unique index.
+ */
 export async function addRoadmapVote(
   roadmapItemId: string,
   workspaceId: string,
   visitorId: string,
+  ipHash?: string | null,
 ): Promise<number | null> {
   // Verify item belongs to workspace
   const itemCheck = await pool.query(
@@ -135,9 +138,13 @@ export async function addRoadmapVote(
   );
   if (itemCheck.rows.length === 0) return null;
 
+  // INSERT respects both unique constraints: (roadmap_item_id, visitor_id) and
+  // the partial index (roadmap_item_id, ip_hash) WHERE ip_hash IS NOT NULL.
   await pool.query(
-    `INSERT INTO roadmap_votes (roadmap_item_id, visitor_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [roadmapItemId, visitorId],
+    `INSERT INTO roadmap_votes (roadmap_item_id, visitor_id, ip_hash)
+     VALUES ($1, $2, $3)
+     ON CONFLICT DO NOTHING`,
+    [roadmapItemId, visitorId, ipHash ?? null],
   );
 
   const countResult = await pool.query<{ cnt: string }>(
@@ -152,6 +159,7 @@ export async function removeRoadmapVote(
   roadmapItemId: string,
   workspaceId: string,
   visitorId: string,
+  ipHash?: string | null,
 ): Promise<number | null> {
   const itemCheck = await pool.query(
     'SELECT id FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
@@ -159,9 +167,12 @@ export async function removeRoadmapVote(
   );
   if (itemCheck.rows.length === 0) return null;
 
+  // Remove by visitor_id (canonical) OR by ip_hash so IP-based dupes are also cleaned up
   await pool.query(
-    'DELETE FROM roadmap_votes WHERE roadmap_item_id = $1 AND visitor_id = $2',
-    [roadmapItemId, visitorId],
+    `DELETE FROM roadmap_votes
+     WHERE roadmap_item_id = $1
+       AND (visitor_id = $2 OR (ip_hash IS NOT NULL AND ip_hash = $3))`,
+    [roadmapItemId, visitorId, ipHash ?? null],
   );
 
   const countResult = await pool.query<{ cnt: string }>(

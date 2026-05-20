@@ -207,12 +207,13 @@ export async function reorderTaskInTransaction(
     await client.query('BEGIN');
 
     if (resequence && resequence.length > 0) {
-      for (const { id, position } of resequence) {
-        await client.query(
-          'UPDATE tasks SET position = $1 WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL',
-          [position, id, workspaceId],
-        );
-      }
+      // Bulk update using unnest — one round-trip regardless of list size
+      await client.query(
+        `UPDATE tasks SET position = u.pos
+         FROM unnest($1::uuid[], $2::int[]) AS u(id, pos)
+         WHERE tasks.id = u.id AND tasks.workspace_id = $3 AND tasks.deleted_at IS NULL`,
+        [resequence.map((r) => r.id), resequence.map((r) => r.position), workspaceId],
+      );
     } else {
       await client.query(
         'UPDATE tasks SET position = $1 WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL',

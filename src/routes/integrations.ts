@@ -7,9 +7,10 @@ import type { IntegrationsSummary } from '../integrations/types.js';
 
 const router = Router();
 
-// ─── Server-side cache (5 min TTL per workspace) ─────────────────────────────
-// Key: workspaceId. Value: { data, expiresAt }
-// This prevents hammering external services on every dashboard load.
+// ─── Server-side cache (5 min TTL, global key) ───────────────────────────────
+// Integration credentials are global env vars (one set for the whole deployment),
+// so all workspaces share the same external data. Using a single cache key means
+// one fetch serves every workspace within the TTL window.
 
 interface CacheEntry {
   data: IntegrationsSummary;
@@ -18,18 +19,19 @@ interface CacheEntry {
 
 const summaryCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const GLOBAL_CACHE_KEY = '__global__';
 
-function getCached(workspaceId: string): IntegrationsSummary | null {
-  const entry = summaryCache.get(workspaceId);
+function getCached(): IntegrationsSummary | null {
+  const entry = summaryCache.get(GLOBAL_CACHE_KEY);
   if (!entry || entry.expiresAt < Date.now()) {
-    summaryCache.delete(workspaceId);
+    summaryCache.delete(GLOBAL_CACHE_KEY);
     return null;
   }
   return entry.data;
 }
 
-function setCache(workspaceId: string, data: IntegrationsSummary): void {
-  summaryCache.set(workspaceId, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+function setCache(data: IntegrationsSummary): void {
+  summaryCache.set(GLOBAL_CACHE_KEY, { data, expiresAt: Date.now() + CACHE_TTL_MS });
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -55,7 +57,7 @@ router.get('/summary', requireWorkspace, async (req, res, next) => {
     const forceRefresh = req.query.refresh === '1';
 
     if (!forceRefresh) {
-      const cached = getCached(workspaceId);
+      const cached = getCached();
       if (cached) {
         res.setHeader('X-Cache', 'HIT');
         res.json(cached);
@@ -64,7 +66,7 @@ router.get('/summary', requireWorkspace, async (req, res, next) => {
     }
 
     const summary = await fetchAllSummaries();
-    setCache(workspaceId, summary);
+    setCache(summary);
 
     res.setHeader('X-Cache', 'MISS');
     res.json(summary);

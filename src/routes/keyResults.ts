@@ -100,10 +100,11 @@ router.patch('/:id', async (req, res, next) => {
         values.push(value);
       }
     }
+    const idIdx = i;
     values.push(id, goalId, req.workspace.id);
     const result = await pool.query<KeyResult>(
       `UPDATE key_results SET ${fields.join(', ')}
-       WHERE id = $${i++} AND goal_id = $${i++} AND workspace_id = $${i} RETURNING *`,
+       WHERE id = $${idIdx} AND goal_id = $${idIdx + 1} AND workspace_id = $${idIdx + 2} RETURNING *`,
       values,
     );
     if (result.rows.length === 0) { res.status(404).json({ error: 'Key result not found' }); return; }

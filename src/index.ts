@@ -66,7 +66,13 @@ app.use(helmet({
       frameSrc:       ["'self'", ...(clerkOrigin ? [clerkOrigin] : [])],
       imgSrc:         ["'self'", 'data:', 'https:'],
       objectSrc:      ["'none'"],
-      scriptSrc:      ["'self'", "'unsafe-inline'", ...(clerkOrigin ? [clerkOrigin] : []), 'https://static.cloudflareinsights.com'],
+      scriptSrc:      [
+        "'self'",
+        // unsafe-inline only in dev (Vite HMR injects inline scripts); stripped in production
+        ...(process.env.NODE_ENV !== 'production' ? ["'unsafe-inline'"] : []),
+        ...(clerkOrigin ? [clerkOrigin] : []),
+        'https://static.cloudflareinsights.com',
+      ],
       scriptSrcAttr:  ["'none'"],
       // Clerk creates a blob: worker for JWT polling — worker-src must allow it
       // (without this directive, browsers fall back to script-src which lacks blob:)

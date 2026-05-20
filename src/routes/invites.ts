@@ -76,9 +76,10 @@ router.delete('/me/invites', requireAuth, requireWorkspace, requireAdmin, async 
 
 // ─── Public: look up invite ───────────────────────────────────────────────────
 
-// GET /api/invites/:token  — validate token, return workspace name (no auth needed)
+// GET /api/invites/token/:token  — validate token, return workspace name (no auth needed)
 // Rate-limited to 10/min per IP to prevent brute-force token enumeration.
-router.get('/:token', inviteLookupLimiter, async (req, res, next) => {
+// Using /token/ prefix to avoid shadowing workspace routes when mounted at /api/workspaces.
+router.get('/token/:token', inviteLookupLimiter, async (req, res, next) => {
   try {
     const result = await pool.query<{ workspace_name: string; expires_at: string }>(
       `SELECT w.name AS workspace_name, wi.expires_at
@@ -97,10 +98,10 @@ router.get('/:token', inviteLookupLimiter, async (req, res, next) => {
   }
 });
 
-// POST /api/invites/:token/accept  — authenticated user accepts invite
+// POST /api/invites/token/:token/accept  — authenticated user accepts invite
 // The ENTIRE flow (lock → member check → insert → mark used) runs in one transaction
 // so FOR UPDATE actually prevents concurrent double-accepts.
-router.post('/:token/accept', requireAuth, async (req, res, next) => {
+router.post('/token/:token/accept', requireAuth, async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

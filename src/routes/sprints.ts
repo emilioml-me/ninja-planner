@@ -56,29 +56,26 @@ async function checkSprintEndAlerts(
     const msLeft = endsAt - now;
     if (msLeft <= 0 || msLeft > twoDaysMs) continue;
 
-    // Dedup: only send if no sprint-ending notification for this sprint in last 20 hours
-    const recent = await pool.query<{ id: string }>(
-      `SELECT id FROM notifications
-       WHERE workspace_id = $1
-         AND type = 'sprint_ending'
-         AND body = $2
-         AND created_at > NOW() - INTERVAL '20 hours'
-       LIMIT 1`,
-      [workspaceId, sprint.id],
-    );
-    if (recent.rows.length > 0) continue;
-
     const daysLeft = Math.ceil(msLeft / 86_400_000);
-    // Notify ALL admins (not just the user who happened to load the page)
+    const title = `Sprint "${sprint.name}" ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}`;
+
+    // Atomic dedup: insert for each admin only if no sprint_ending notification for this
+    // sprint+admin already exists in the last 20 hours. Single INSERT per admin avoids
+    // the SELECT-then-INSERT race condition.
     for (const adminId of adminIds) {
-      createNotification({
-        workspaceId,
-        recipientClerkId: adminId,
-        type: 'sprint_ending',
-        title: `Sprint "${sprint.name}" ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}`,
-        body: sprint.id, // store sprint id for dedup
-        link: '/sprints',
-      }).catch(() => {});
+      pool.query(
+        `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
+         SELECT $1, $2, 'sprint_ending', $3, $4, '/sprints'
+         WHERE NOT EXISTS (
+           SELECT 1 FROM notifications
+           WHERE workspace_id = $1
+             AND recipient_clerk_id = $2
+             AND type = 'sprint_ending'
+             AND body = $4
+             AND created_at > NOW() - INTERVAL '20 hours'
+         )`,
+        [workspaceId, adminId, title, sprint.id],
+      ).catch(() => {});
     }
   }
 }
@@ -179,11 +176,15 @@ router.patch('/:id/tasks', requireAdmin, async (req, res, next) => {
 // DELETE /api/sprints/:id/tasks/:taskId  — remove task from sprint
 router.delete('/:id/tasks/:taskId', async (req, res, next) => {
   try {
-    await pool.query(
+    const result = await pool.query(
       `UPDATE tasks SET sprint_id = NULL
        WHERE id = $1 AND sprint_id = $2 AND workspace_id = $3 AND deleted_at IS NULL`,
       [req.params.taskId, req.params.id, req.workspace.id],
     );
+    if ((result.rowCount ?? 0) === 0) {
+      res.status(404).json({ error: 'Task not found in this sprint' });
+      return;
+    }
     res.status(204).send();
   } catch (err) { next(err); }
 });
