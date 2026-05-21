@@ -23,7 +23,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight, TrendingDown, ClipboardCheck } from 'lucide-react';
+import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight, TrendingDown, ClipboardCheck, Sparkles } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
@@ -251,6 +251,7 @@ export default function Sprints() {
                   <CardContent className="pt-0 px-4 pb-4 space-y-4">
                     {sprint.status !== 'planning' && <BurndownChart sprintId={sprint.id} />}
                     <SprintTaskList sprintId={sprint.id} memberMap={memberMap} />
+                    {sprint.status !== 'planning' && <AiSummary sprintId={sprint.id} />}
                     {sprint.status === 'completed' && (
                       <RetroSection sprint={sprint} isAdmin={isAdmin} />
                     )}
@@ -344,6 +345,50 @@ export default function Sprints() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// ─── AI Sprint Summary ────────────────────────────────────────────────────────
+
+function AiSummary({ sprintId }: { sprintId: string }) {
+  const { apiRequest } = useApiClient();
+  const [summary, setSummary] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const generate = async () => {
+    setLoading(true); setError(null); setSummary(null);
+    try {
+      const res = await apiRequest<{ summary: string }>('POST', `/api/sprints/${sprintId}/ai-summary`);
+      setSummary(res.summary);
+    } catch (e) {
+      setError((e as Error).message ?? 'AI service unavailable');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="border-t pt-3">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5 uppercase tracking-wide">
+          <Sparkles className="h-3.5 w-3.5 text-primary" /> AI Summary
+        </p>
+        <Button type="button" variant="ghost" size="sm" className="h-6 text-xs gap-1"
+          onClick={generate} disabled={loading}>
+          {loading ? 'Generating…' : summary ? 'Regenerate' : 'Generate'}
+        </Button>
+      </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      {summary && (
+        <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">{summary}</p>
+      )}
+      {!summary && !loading && (
+        <p className="text-xs text-muted-foreground italic">
+          Click Generate to get an AI analysis of this sprint's health.
+        </p>
+      )}
     </div>
   );
 }

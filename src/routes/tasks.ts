@@ -150,6 +150,66 @@ router.get('/workload', async (req, res, next) => {
   }
 });
 
+// GET /api/tasks/capacity  — story points assigned per member in active sprint + configured capacity
+router.get('/capacity', async (req, res, next) => {
+  try {
+    // Points assigned per member across active sprint tasks
+    const pointsResult = await pool.query<{ user_clerk_id: string; assigned_points: number; task_count: number }>(
+      `SELECT
+         t.assignee_clerk_id AS user_clerk_id,
+         COALESCE(SUM(t.story_points), 0)::int AS assigned_points,
+         COUNT(t.id)::int                      AS task_count
+       FROM tasks t
+       JOIN sprints s ON s.id = t.sprint_id AND s.workspace_id = t.workspace_id AND s.status = 'active'
+       WHERE t.workspace_id = $1
+         AND t.assignee_clerk_id IS NOT NULL
+         AND t.deleted_at IS NULL
+         AND t.status <> 'done'
+       GROUP BY t.assignee_clerk_id`,
+      [req.workspace.id],
+    );
+
+    // Configured capacity per member
+    const capacityResult = await pool.query<{ user_clerk_id: string; capacity_points: number }>(
+      `SELECT user_clerk_id, capacity_points
+       FROM member_capacity
+       WHERE workspace_id = $1`,
+      [req.workspace.id],
+    );
+
+    const capacityMap: Record<string, number> = {};
+    for (const row of capacityResult.rows) {
+      capacityMap[row.user_clerk_id] = row.capacity_points;
+    }
+
+    const rows = pointsResult.rows.map((r) => ({
+      ...r,
+      capacity_points: capacityMap[r.user_clerk_id] ?? 20,
+    }));
+
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// PUT /api/tasks/capacity/:memberId  — set capacity for a member (admin only)
+router.put('/capacity/:memberId', requireAdmin, async (req, res, next) => {
+  try {
+    const schema = z.object({ capacity_points: z.number().int().min(0).max(500) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+
+    await pool.query(
+      `INSERT INTO member_capacity (workspace_id, user_clerk_id, capacity_points)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (workspace_id, user_clerk_id) DO UPDATE SET
+         capacity_points = EXCLUDED.capacity_points,
+         updated_at = now()`,
+      [req.workspace.id, req.params.memberId, parsed.data.capacity_points],
+    );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 // GET /api/tasks
 router.get('/', async (req, res, next) => {
   try {
