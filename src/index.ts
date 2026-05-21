@@ -49,9 +49,11 @@ import epicsRouter            from './routes/epics.js';
 import taskDepsRouter         from './routes/taskDependencies.js';
 import timeLogsRouter         from './routes/timeLogs.js';
 import taskWatchersRouter     from './routes/taskWatchers.js';
+import attachmentsRouter      from './routes/attachments.js';
 import budgetsRouter          from './routes/budgets.js';
 import changelogRouter        from './routes/changelog.js';
 import aiSummaryRouter        from './routes/aiSummary.js';
+import timelineRouter         from './routes/timeline.js';
 
 const app = express();
 
@@ -143,8 +145,10 @@ app.use('/api/epics',         epicsRouter);
 app.use('/api/tasks/:taskId/dependencies', taskDepsRouter);    // mergeParams passes :taskId
 app.use('/api/tasks/:taskId/time-logs',    timeLogsRouter);    // mergeParams passes :taskId
 app.use('/api/tasks/:taskId/watchers',     taskWatchersRouter); // mergeParams passes :taskId
+app.use('/api/tasks/:taskId/attachments',  attachmentsRouter); // mergeParams passes :taskId
 app.use('/api/budgets',   budgetsRouter);
 app.use('/api/changelog', changelogRouter);
+app.use('/api/timeline',  timelineRouter);
 app.use('/api/sprints/:sprintId/ai-summary', aiSummaryRouter); // mergeParams passes :sprintId
 
 // ─── Static frontend (production) ────────────────────────────────────────────

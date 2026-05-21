@@ -47,6 +47,7 @@ const createSchema = z.object({
   priority:           z.enum(TASK_PRIORITIES).optional(),
   assignee_clerk_id:  z.string().optional(),
   due_date:           z.string().date().optional(),
+  start_date:         z.string().date().nullable().optional(),
   tags:               z.array(z.string()).optional(),
   position:           z.number().int().optional(),
   sprint_id:          z.string().uuid().nullable().optional(),

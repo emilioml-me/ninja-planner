@@ -9,6 +9,7 @@ export interface Task {
   priority: string;
   assignee_clerk_id: string | null;
   due_date: string | null;
+  start_date: string | null;
   tags: string[];
   position: number;
   created_by: string;
@@ -148,7 +149,7 @@ export async function getTaskById(
   return { task: taskResult.rows[0], activity: activityResult.rows };
 }
 
-const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'tags', 'sprint_id', 'epic_id', 'recurrence_rule', 'story_points', 'checklist']);
+const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'start_date', 'tags', 'sprint_id', 'epic_id', 'recurrence_rule', 'story_points', 'checklist']);
 
 export async function updateTask(
   taskId: string,

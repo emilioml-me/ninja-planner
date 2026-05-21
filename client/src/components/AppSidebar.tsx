@@ -18,6 +18,7 @@ import {
   Layers,
   Wallet,
   History,
+  CalendarDays,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -34,8 +35,9 @@ const NAV = [
   { href: '/sprints',      label: 'Sprints',       icon: Zap       },
   { href: '/epics',        label: 'Epics',         icon: Layers    },
   { href: '/budgets',      label: 'Budgets',       icon: Wallet    },
-  { href: '/changelog',    label: 'Changelog',     icon: History   },
-  { href: '/workload',     label: 'Workload',      icon: BarChart2 },
+  { href: '/changelog',    label: 'Changelog',     icon: History      },
+  { href: '/timeline',     label: 'Timeline',      icon: CalendarDays },
+  { href: '/workload',     label: 'Workload',      icon: BarChart2    },
   { href: '/members',      label: 'Team',          icon: UsersRound },
   { href: '/integrations', label: 'Integrations',  icon: Plug },
   { href: '/webhooks',     label: 'Webhooks',       icon: Webhook },

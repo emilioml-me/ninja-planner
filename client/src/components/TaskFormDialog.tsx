@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
@@ -30,7 +30,7 @@ import {
 import { useApiClient } from '@/lib/api';
 import { type WorkspaceMember } from '@/hooks/use-members';
 import { useTaskComments, useAddComment, useDeleteComment } from '@/hooks/use-notifications';
-import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft, Clock, Eye, EyeOff, Timer } from 'lucide-react';
+import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft, Clock, Eye, EyeOff, Timer, Paperclip, FileText, Download, Image as ImageIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface TaskActivity {
@@ -70,6 +70,7 @@ export interface Task {
   status: 'todo' | 'in_progress' | 'done' | 'blocked';
   priority: 'low' | 'medium' | 'high' | 'urgent';
   due_date: string | null;
+  start_date?: string | null;
   tags: string[];
   position: number;
   assignee_clerk_id: string | null;
@@ -95,6 +96,7 @@ const taskFormSchema = z.object({
   recurrence_rule: z.enum(['daily', 'weekly', 'biweekly', 'monthly', '']).optional(),
   epic_id: z.string().optional(),
   story_points: z.string().optional(), // stored as string in form, converted to int on submit
+  start_date: z.string().optional(),
 });
 
 type TaskFormData = z.infer<typeof taskFormSchema>;
@@ -487,6 +489,161 @@ function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
   );
 }
 
+// ─── Attachments tab ─────────────────────────────────────────────────────────
+
+interface Attachment {
+  id: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  uploaded_by: string;
+  uploader_name: string | null;
+  created_at: string;
+}
+
+const ALLOWED_TYPES = [
+  'image/jpeg','image/png','image/gif','image/webp','image/svg+xml',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/plain','text/csv','text/markdown',
+  'application/zip',
+  'video/mp4','video/webm',
+  'audio/mpeg','audio/wav',
+];
+
+function fmtBytes(b: number): string {
+  if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  if (b >= 1024) return `${(b / 1024).toFixed(0)} KB`;
+  return `${b} B`;
+}
+
+function AttachmentsTab({ task }: { task: Task }) {
+  const { userId } = useAuth();
+  const { apiRequest } = useApiClient();
+  const qc = useQueryClient();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
+
+  const { data: attachments = [] } = useQuery<Attachment[]>({
+    queryKey: ['/api/tasks', task.id, 'attachments'],
+    queryFn: () => apiRequest('GET', `/api/tasks/${task.id}/attachments`),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${task.id}/attachments/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'attachments'] }),
+  });
+
+  const handleDownload = async (att: Attachment) => {
+    const { url } = await apiRequest<{ url: string }>('GET', `/api/tasks/${task.id}/attachments/${att.id}/download`);
+    const a = document.createElement('a');
+    a.href = url; a.download = att.file_name; a.click();
+  };
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) { setUploadErr('File too large (max 50 MB)'); return; }
+    if (!ALLOWED_TYPES.includes(file.type)) { setUploadErr('File type not allowed'); return; }
+
+    setUploading(true); setUploadErr(null);
+    try {
+      // Step 1: get presigned upload URL
+      const { upload_url, r2_key } = await apiRequest<{ upload_url: string; r2_key: string }>(
+        'POST', `/api/tasks/${task.id}/attachments/presign`,
+        { file_name: file.name, file_size: file.size, mime_type: file.type },
+      );
+
+      // Step 2: upload directly to R2
+      const putRes = await fetch(upload_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!putRes.ok) throw new Error('Upload to storage failed');
+
+      // Step 3: confirm metadata
+      await apiRequest('POST', `/api/tasks/${task.id}/attachments`, {
+        file_name: file.name, file_size: file.size, mime_type: file.type, r2_key,
+      });
+      qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'attachments'] });
+    } catch (err) {
+      setUploadErr((err as Error).message ?? 'Upload failed');
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  const isImage = (mime: string) => mime.startsWith('image/');
+
+  return (
+    <div className="space-y-4">
+      {/* Upload area */}
+      <div
+        className="border-2 border-dashed rounded-lg p-4 text-center cursor-pointer hover:border-primary/50 transition-colors"
+        onClick={() => fileRef.current?.click()}
+      >
+        <Paperclip className="h-6 w-6 mx-auto text-muted-foreground/50 mb-1" />
+        <p className="text-xs text-muted-foreground">
+          {uploading ? 'Uploading…' : 'Click to attach a file (max 50 MB)'}
+        </p>
+        {uploadErr && <p className="text-xs text-destructive mt-1">{uploadErr}</p>}
+        <input
+          ref={fileRef}
+          type="file"
+          className="hidden"
+          accept={ALLOWED_TYPES.join(',')}
+          onChange={handleFile}
+          disabled={uploading}
+        />
+      </div>
+
+      {/* List */}
+      <div className="space-y-1.5 max-h-52 overflow-y-auto">
+        {attachments.length === 0 ? (
+          <p className="text-xs text-muted-foreground text-center py-4">No attachments yet.</p>
+        ) : (
+          attachments.map((att) => (
+            <div key={att.id} className="flex items-center gap-2 group rounded-md px-2 py-1.5 hover:bg-muted/40">
+              {isImage(att.mime_type)
+                ? <ImageIcon className="h-4 w-4 text-blue-500 shrink-0" />
+                : <FileText className="h-4 w-4 text-muted-foreground shrink-0" />}
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium truncate">{att.file_name}</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {fmtBytes(att.file_size)} · {att.uploader_name ?? 'you'}
+                </p>
+              </div>
+              <Button
+                type="button" variant="ghost" size="icon"
+                className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0"
+                onClick={() => handleDownload(att)}
+                title="Download"
+              >
+                <Download className="h-3 w-3" />
+              </Button>
+              {att.uploaded_by === userId && (
+                <Button
+                  type="button" variant="ghost" size="icon"
+                  className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0"
+                  onClick={() => deleteMut.mutate(att.id)}
+                >
+                  <Trash2 className="h-3 w-3 text-muted-foreground" />
+                </Button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Time tracking tab ───────────────────────────────────────────────────────
 
 interface TimeLog {
@@ -715,6 +872,7 @@ export function TaskFormDialog({
       recurrence_rule: '',
       epic_id: '',
       story_points: '',
+      start_date: '',
     },
   });
 
@@ -731,6 +889,7 @@ export function TaskFormDialog({
         recurrence_rule: (task?.recurrence_rule ?? '') as '' | 'daily' | 'weekly' | 'biweekly' | 'monthly',
         epic_id: task?.epic_id ?? '',
         story_points: task?.story_points != null ? String(task.story_points) : '',
+        start_date: task?.start_date ? task.start_date.substring(0, 10) : '',
       });
       setChecklist(task?.checklist ?? []);
     }
@@ -752,6 +911,7 @@ export function TaskFormDialog({
       recurrence_rule: data.recurrence_rule || null,
       epic_id: data.epic_id || null,
       story_points: sp != null && !isNaN(sp) ? sp : null,
+      start_date: data.start_date ? data.start_date : null,
       checklist,
     });
   };
@@ -778,6 +938,9 @@ export function TaskFormDialog({
                     {checklist.filter((i) => i.done).length}/{checklist.length}
                   </span>
                 )}
+              </TabsTrigger>
+              <TabsTrigger value="files" className="flex-1">
+                <Paperclip className="h-3.5 w-3.5 mr-1" />Files
               </TabsTrigger>
               <TabsTrigger value="time" className="flex-1">
                 <Clock className="h-3.5 w-3.5 mr-1" />Time
@@ -846,6 +1009,14 @@ export function TaskFormDialog({
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
+                    <FormField control={form.control} name="start_date" render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Start Date</FormLabel>
+                        <FormControl><Input type="date" {...field} /></FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )} />
+
                     <FormField control={form.control} name="due_date" render={({ field }) => (
                       <FormItem>
                         <FormLabel>Due Date</FormLabel>
@@ -853,7 +1024,9 @@ export function TaskFormDialog({
                         <FormMessage />
                       </FormItem>
                     )} />
+                  </div>
 
+                  <div className="grid grid-cols-2 gap-4">
                     <FormField control={form.control} name="tags" render={({ field }) => (
                       <FormItem>
                         <FormLabel>Tags</FormLabel>
@@ -948,6 +1121,11 @@ export function TaskFormDialog({
             {/* ── Checklist tab ────────────────────────────────────────────── */}
             <TabsContent value="checklist" className="mt-4">
               <ChecklistTab items={checklist} onChange={setChecklist} />
+            </TabsContent>
+
+            {/* ── Files tab ───────────────────────────────────────────────── */}
+            <TabsContent value="files" className="mt-4">
+              <AttachmentsTab task={task} />
             </TabsContent>
 
             {/* ── Time tab ────────────────────────────────────────────────── */}
