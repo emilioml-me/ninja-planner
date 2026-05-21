@@ -15,6 +15,7 @@ import {
   Target,
   Zap,
   Webhook,
+  Layers,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -29,6 +30,7 @@ const NAV = [
   { href: '/reviews',      label: 'Weekly Review', icon: ClipboardList },
   { href: '/goals',        label: 'Goals',         icon: Target    },
   { href: '/sprints',      label: 'Sprints',       icon: Zap       },
+  { href: '/epics',        label: 'Epics',         icon: Layers    },
   { href: '/workload',     label: 'Workload',      icon: BarChart2 },
   { href: '/members',      label: 'Team',          icon: UsersRound },
   { href: '/integrations', label: 'Integrations',  icon: Plug },

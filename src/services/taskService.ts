@@ -13,7 +13,9 @@ export interface Task {
   position: number;
   created_by: string;
   sprint_id: string | null;
+  epic_id: string | null;
   recurrence_rule: string | null;
+  story_points: number | null;
   deleted_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -92,15 +94,17 @@ export async function createTask(
     tags?: string[];
     position?: number;
     sprint_id?: string | null;
+    epic_id?: string | null;
     recurrence_rule?: string | null;
+    story_points?: number | null;
     checklist?: { id: string; text: string; done: boolean }[];
   },
   createdBy: string,
 ): Promise<Task> {
   const result = await pool.query<Task>(
     `INSERT INTO tasks
-       (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, sprint_id, recurrence_rule, checklist)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, sprint_id, epic_id, recurrence_rule, story_points, checklist)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      RETURNING *`,
     [
       workspaceId,
@@ -114,7 +118,9 @@ export async function createTask(
       data.position ?? 0,
       createdBy,
       data.sprint_id ?? null,
+      data.epic_id ?? null,
       data.recurrence_rule ?? null,
+      data.story_points ?? null,
       JSON.stringify(data.checklist ?? []),
     ],
   );
@@ -142,7 +148,7 @@ export async function getTaskById(
   return { task: taskResult.rows[0], activity: activityResult.rows };
 }
 
-const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'tags', 'sprint_id', 'recurrence_rule', 'checklist']);
+const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'tags', 'sprint_id', 'epic_id', 'recurrence_rule', 'story_points', 'checklist']);
 
 export async function updateTask(
   taskId: string,

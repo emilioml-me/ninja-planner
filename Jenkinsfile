@@ -11,7 +11,7 @@ pipeline {
     environment {
         APP_NAME    = 'ninja-planner'
         DEPLOY_HOST = '10.10.0.10'
-        DEPLOY_CRED = 'prod001-ssh'
+        DEPLOY_CRED = 'ninja-prod001'
         IMAGE       = 'ghcr.io/emilioml-me/ninja-planner'
         VERSION     = "${TAG_NAME}"
     }

@@ -50,7 +50,9 @@ const createSchema = z.object({
   tags:               z.array(z.string()).optional(),
   position:           z.number().int().optional(),
   sprint_id:          z.string().uuid().nullable().optional(),
+  epic_id:            z.string().uuid().nullable().optional(),
   recurrence_rule:    z.enum(RECURRENCE_RULES).nullable().optional(),
+  story_points:       z.number().int().min(0).max(144).nullable().optional(),
   checklist:          z.array(checklistItemSchema).max(50).optional(),
 });
 

@@ -23,11 +23,14 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight } from 'lucide-react';
+import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight, TrendingDown } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
 import { useIsAdmin } from '@/hooks/use-is-admin';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+} from 'recharts';
 
 interface Sprint {
   id: string;
@@ -245,7 +248,8 @@ export default function Sprints() {
                 </CardHeader>
 
                 {isExpanded && (
-                  <CardContent className="pt-0 px-4 pb-4">
+                  <CardContent className="pt-0 px-4 pb-4 space-y-4">
+                    {sprint.status !== 'planning' && <BurndownChart sprintId={sprint.id} />}
                     <SprintTaskList sprintId={sprint.id} memberMap={memberMap} />
                   </CardContent>
                 )}
@@ -337,6 +341,63 @@ export default function Sprints() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// ─── Burndown Chart ──────────────────────────────────────────────────────────
+
+interface BurndownPoint {
+  date: string;
+  remaining_tasks: number;
+  remaining_points: number;
+  ideal_tasks: number;
+  ideal_points: number;
+}
+
+interface BurndownData {
+  start_date: string;
+  end_date: string;
+  total_tasks: number;
+  total_points: number;
+  points: BurndownPoint[];
+}
+
+function BurndownChart({ sprintId }: { sprintId: string }) {
+  const { apiRequest } = useApiClient();
+  const { data, isLoading } = useQuery<BurndownData>({
+    queryKey: ['/api/sprints', sprintId, 'burndown'],
+    queryFn: () => apiRequest('GET', `/api/sprints/${sprintId}/burndown`),
+  });
+
+  if (isLoading) return <Skeleton className="h-40 w-full" />;
+  if (!data || data.points.length < 2) return null;
+
+  const chartData = data.points.map((p) => ({
+    date: p.date.slice(5), // MM-DD
+    'Remaining': p.remaining_tasks,
+    'Ideal':     p.ideal_tasks,
+  }));
+
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+        <TrendingDown className="h-3.5 w-3.5" /> Burndown
+      </p>
+      <ResponsiveContainer width="100%" height={140}>
+        <LineChart data={chartData} margin={{ top: 4, right: 8, left: -28, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.2} />
+          <XAxis dataKey="date" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} />
+          <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} />
+          <Tooltip
+            contentStyle={{ fontSize: 11, padding: '4px 8px' }}
+            itemStyle={{ padding: '1px 0' }}
+          />
+          <Legend wrapperStyle={{ fontSize: 10, paddingTop: 4 }} />
+          <Line type="monotone" dataKey="Remaining" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="Ideal" stroke="hsl(var(--muted-foreground))" strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }

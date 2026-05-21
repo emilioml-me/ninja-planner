@@ -150,6 +150,114 @@ router.get('/:id/tasks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/sprints/:id/burndown  — daily remaining tasks + ideal line
+router.get('/:id/burndown', async (req, res, next) => {
+  try {
+    // Load sprint + total task/points counts
+    const sprintResult = await pool.query<{
+      start_date: string | null; end_date: string | null;
+      total_tasks: number; total_points: number;
+    }>(
+      `SELECT
+         s.start_date, s.end_date,
+         COUNT(t.id)::int                                     AS total_tasks,
+         COALESCE(SUM(t.story_points), 0)::int                AS total_points
+       FROM sprints s
+       LEFT JOIN tasks t ON t.sprint_id = s.id AND t.deleted_at IS NULL
+       WHERE s.id = $1 AND s.workspace_id = $2
+       GROUP BY s.id`,
+      [req.params.id, req.workspace.id],
+    );
+
+    if (sprintResult.rows.length === 0) {
+      res.status(404).json({ error: 'Sprint not found' });
+      return;
+    }
+
+    const { start_date, end_date, total_tasks, total_points } = sprintResult.rows[0];
+
+    if (!start_date || !end_date) {
+      res.json({ total_tasks, total_points, points: [] });
+      return;
+    }
+
+    // For each task currently done, find the latest activity row where status='done'
+    const doneByDay = await pool.query<{ done_date: string; task_count: number; point_sum: number }>(
+      `WITH final_done AS (
+         SELECT DISTINCT ON (ta.task_id)
+           ta.task_id,
+           DATE(ta.created_at AT TIME ZONE 'UTC')::text AS done_date
+         FROM task_activity ta
+         JOIN tasks t ON t.id = ta.task_id
+         WHERE t.sprint_id = $1
+           AND t.workspace_id = $2
+           AND t.status = 'done'
+           AND ta.action = 'updated'
+           AND (ta.payload->>'status') = 'done'
+           AND t.deleted_at IS NULL
+         ORDER BY ta.task_id, ta.created_at DESC
+       )
+       SELECT
+         fd.done_date,
+         COUNT(*)::int                                     AS task_count,
+         COALESCE(SUM(t.story_points), 0)::int             AS point_sum
+       FROM final_done fd
+       JOIN tasks t ON t.id = fd.task_id
+       GROUP BY fd.done_date
+       ORDER BY fd.done_date`,
+      [req.params.id, req.workspace.id],
+    );
+
+    // Build date series start_date..min(today, end_date)
+    const start = new Date(start_date);
+    const end   = new Date(end_date);
+    const today = new Date();
+    const last  = end < today ? end : today;
+
+    const doneMap = new Map<string, { tasks: number; points: number }>();
+    for (const row of doneByDay.rows) {
+      doneMap.set(row.done_date, { tasks: row.task_count, points: row.point_sum });
+    }
+
+    const days = Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1;
+
+    const dataPoints: {
+      date: string;
+      remaining_tasks: number;
+      remaining_points: number;
+      ideal_tasks: number;
+      ideal_points: number;
+    }[] = [];
+
+    let doneTasks = 0;
+    let donePoints = 0;
+
+    for (let i = 0; ; i++) {
+      const d = new Date(start);
+      d.setDate(d.getDate() + i);
+      if (d > last) break;
+
+      const dateStr = d.toISOString().split('T')[0];
+      const entry = doneMap.get(dateStr);
+      if (entry) {
+        doneTasks  += entry.tasks;
+        donePoints += entry.points;
+      }
+
+      const progress = days > 1 ? i / (days - 1) : 1;
+      dataPoints.push({
+        date: dateStr,
+        remaining_tasks:  total_tasks - doneTasks,
+        remaining_points: total_points - donePoints,
+        ideal_tasks:      Math.round(total_tasks  * (1 - progress)),
+        ideal_points:     Math.round(total_points * (1 - progress)),
+      });
+    }
+
+    res.json({ start_date, end_date, total_tasks, total_points, points: dataPoints });
+  } catch (err) { next(err); }
+});
+
 // PATCH /api/sprints/:id/tasks  — bulk assign tasks to sprint  [admin only]
 router.patch('/:id/tasks', requireAdmin, async (req, res, next) => {
   try {

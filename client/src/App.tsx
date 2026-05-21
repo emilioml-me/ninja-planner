@@ -19,6 +19,7 @@ import Goals from './pages/Goals';
 import Sprints from './pages/Sprints';
 import Integrations from './pages/Integrations';
 import Webhooks from './pages/Webhooks';
+import Epics from './pages/Epics';
 import PublicRoadmap from './pages/PublicRoadmap';
 import AcceptInvite from './pages/AcceptInvite';
 
@@ -49,6 +50,7 @@ function AuthenticatedApp() {
             <Route path="/workload"      component={Workload} />
             <Route path="/goals"         component={Goals} />
             <Route path="/sprints"       component={Sprints} />
+            <Route path="/epics"         component={Epics} />
             <Route path="/members"       component={Members} />
             <Route path="/integrations"  component={Integrations} />
             <Route path="/webhooks"      component={Webhooks} />

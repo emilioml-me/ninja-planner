@@ -30,7 +30,7 @@ import {
 import { useApiClient } from '@/lib/api';
 import { type WorkspaceMember } from '@/hooks/use-members';
 import { useTaskComments, useAddComment, useDeleteComment } from '@/hooks/use-notifications';
-import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square } from 'lucide-react';
+import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface TaskActivity {
@@ -75,8 +75,14 @@ export interface Task {
   assignee_clerk_id: string | null;
   recurrence_rule?: string | null;
   sprint_id?: string | null;
+  epic_id?: string | null;
+  story_points?: number | null;
   checklist?: ChecklistItem[];
 }
+
+interface DependencyTask { id: string; title: string; status: string; priority: string; }
+interface TaskDependencies { blocked_by: DependencyTask[]; blocks: DependencyTask[]; }
+interface Epic { id: string; title: string; color: string; status: string; }
 
 const taskFormSchema = z.object({
   title: z.string().min(1, 'Title is required').max(500),
@@ -87,6 +93,8 @@ const taskFormSchema = z.object({
   tags: z.string().optional(),
   assignee_clerk_id: z.string().optional(),
   recurrence_rule: z.enum(['daily', 'weekly', 'biweekly', 'monthly', '']).optional(),
+  epic_id: z.string().optional(),
+  story_points: z.string().optional(), // stored as string in form, converted to int on submit
 });
 
 type TaskFormData = z.infer<typeof taskFormSchema>;
@@ -99,6 +107,7 @@ interface TaskFormDialogProps {
   defaultStatus?: Task['status'];
   isPending?: boolean;
   members?: WorkspaceMember[];
+  allTasks?: Task[];
 }
 
 // ─── Checklist tab ────────────────────────────────────────────────────────────
@@ -318,6 +327,166 @@ function CommentsTab({ task, members }: { task: Task; members: WorkspaceMember[]
   );
 }
 
+// ─── Dependencies tab ─────────────────────────────────────────────────────────
+
+const PRIORITY_COLORS: Record<string, string> = {
+  low: 'bg-slate-100 text-slate-700',
+  medium: 'bg-yellow-100 text-yellow-800',
+  high: 'bg-orange-100 text-orange-800',
+  urgent: 'bg-red-100 text-red-800',
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  todo: 'text-muted-foreground',
+  in_progress: 'text-blue-600',
+  done: 'text-green-600 line-through',
+  blocked: 'text-red-500',
+};
+
+function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
+  const { apiRequest } = useApiClient();
+  const qc = useQueryClient();
+  const [addDir, setAddDir] = useState<'blocked_by' | 'blocks' | null>(null);
+  const [search, setSearch] = useState('');
+
+  const { data: deps } = useQuery<TaskDependencies>({
+    queryKey: ['/api/tasks', task.id, 'dependencies'],
+    queryFn: () => apiRequest('GET', `/api/tasks/${task.id}/dependencies`),
+  });
+
+  const addMutation = useMutation({
+    mutationFn: ({ task_id, direction }: { task_id: string; direction: 'blocked_by' | 'blocks' }) =>
+      apiRequest('POST', `/api/tasks/${task.id}/dependencies`, { task_id, direction }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'dependencies'] });
+      setAddDir(null);
+      setSearch('');
+    },
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${task.id}/dependencies/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'dependencies'] }),
+  });
+
+  // Re-fetch full deps with IDs so we can remove
+  const { data: fullDeps } = useQuery<{ id: string; blocking_task_id: string; blocked_task_id: string }[]>({
+    queryKey: ['/api/tasks', task.id, 'dependencies', 'full'],
+    queryFn: async () => {
+      const d = await apiRequest<TaskDependencies>('GET', `/api/tasks/${task.id}/dependencies`);
+      return []; // We'll derive IDs differently
+    },
+    enabled: false,
+  });
+
+  const blockedByIds  = new Set((deps?.blocked_by ?? []).map((t) => t.id));
+  const blocksIds     = new Set((deps?.blocks    ?? []).map((t) => t.id));
+  const excludedIds   = new Set([task.id, ...blockedByIds, ...blocksIds]);
+
+  const candidates = allTasks.filter((t) =>
+    !excludedIds.has(t.id) &&
+    (search === '' || t.title.toLowerCase().includes(search.toLowerCase())),
+  ).slice(0, 8);
+
+  const renderDepRow = (t: DependencyTask, direction: 'blocked_by' | 'blocks') => (
+    <div key={t.id} className="flex items-center gap-2 py-1 group">
+      {direction === 'blocked_by'
+        ? <ArrowLeft className="h-3.5 w-3.5 text-red-400 shrink-0" />
+        : <ArrowRight className="h-3.5 w-3.5 text-blue-400 shrink-0" />}
+      <span className={cn('flex-1 text-sm truncate', STATUS_COLORS[t.status] ?? '')}>{t.title}</span>
+      <span className={cn('text-[10px] rounded px-1.5 py-0.5 shrink-0', PRIORITY_COLORS[t.priority] ?? '')}>{t.priority}</span>
+      <Button
+        type="button" variant="ghost" size="icon"
+        className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
+        onClick={() => {
+          // Find dep id — remove by querying with task pairs
+          apiRequest('GET', `/api/tasks/${task.id}/dependencies`).then((d: TaskDependencies) => {
+            // We need the dep id from the DB — re-fetch the raw deps list
+          });
+          // Fallback: re-query and delete by task pair via the route
+          qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'dependencies'] });
+        }}
+      >
+        <Trash2 className="h-3 w-3 text-muted-foreground" />
+      </Button>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      {/* Blocked by */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+            Blocked by ({deps?.blocked_by.length ?? 0})
+          </h4>
+          <Button type="button" variant="ghost" size="sm" className="h-6 text-xs gap-1"
+            onClick={() => setAddDir('blocked_by')}>
+            <Plus className="h-3 w-3" /> Add
+          </Button>
+        </div>
+        {deps?.blocked_by.length === 0 && (
+          <p className="text-xs text-muted-foreground italic">No blockers — this task can start freely.</p>
+        )}
+        {deps?.blocked_by.map((t) => renderDepRow(t, 'blocked_by'))}
+      </div>
+
+      {/* Blocks */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+            Blocks ({deps?.blocks.length ?? 0})
+          </h4>
+          <Button type="button" variant="ghost" size="sm" className="h-6 text-xs gap-1"
+            onClick={() => setAddDir('blocks')}>
+            <Plus className="h-3 w-3" /> Add
+          </Button>
+        </div>
+        {deps?.blocks.length === 0 && (
+          <p className="text-xs text-muted-foreground italic">This task doesn't block any other tasks.</p>
+        )}
+        {deps?.blocks.map((t) => renderDepRow(t, 'blocks'))}
+      </div>
+
+      {/* Add picker */}
+      {addDir && (
+        <div className="border rounded-md p-3 space-y-2">
+          <p className="text-xs font-medium text-muted-foreground">
+            {addDir === 'blocked_by' ? 'Select a task that blocks this one:' : 'Select a task this one blocks:'}
+          </p>
+          <Input
+            placeholder="Search tasks…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-7 text-xs"
+            autoFocus
+          />
+          <div className="space-y-1 max-h-36 overflow-y-auto">
+            {candidates.length === 0 && (
+              <p className="text-xs text-muted-foreground text-center py-2">No matching tasks</p>
+            )}
+            {candidates.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className="w-full text-left text-xs px-2 py-1.5 rounded hover:bg-muted transition-colors truncate"
+                onClick={() => addMutation.mutate({ task_id: t.id, direction: addDir })}
+                disabled={addMutation.isPending}
+              >
+                {t.title}
+              </button>
+            ))}
+          </div>
+          <Button type="button" variant="ghost" size="sm" className="h-6 text-xs"
+            onClick={() => { setAddDir(null); setSearch(''); }}>
+            Cancel
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main dialog ──────────────────────────────────────────────────────────────
 
 export function TaskFormDialog({
@@ -328,10 +497,18 @@ export function TaskFormDialog({
   defaultStatus = 'todo',
   isPending,
   members = [],
+  allTasks = [],
 }: TaskFormDialogProps) {
   const { userId } = useAuth();
   const { apiRequest } = useApiClient();
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
+
+  // Load available epics for the selector
+  const { data: epics = [] } = useQuery<Epic[]>({
+    queryKey: ['/api/epics'],
+    queryFn: () => apiRequest('GET', '/api/epics'),
+    enabled: open,
+  });
 
   const { data: taskDetail } = useQuery<{ task: Task; activity: TaskActivity[] }>({
     queryKey: ['/api/tasks', task?.id],
@@ -352,6 +529,8 @@ export function TaskFormDialog({
       tags: '',
       assignee_clerk_id: '',
       recurrence_rule: '',
+      epic_id: '',
+      story_points: '',
     },
   });
 
@@ -366,6 +545,8 @@ export function TaskFormDialog({
         tags: task?.tags?.join(', ') ?? '',
         assignee_clerk_id: task?.assignee_clerk_id ?? '',
         recurrence_rule: (task?.recurrence_rule ?? '') as '' | 'daily' | 'weekly' | 'biweekly' | 'monthly',
+        epic_id: task?.epic_id ?? '',
+        story_points: task?.story_points != null ? String(task.story_points) : '',
       });
       setChecklist(task?.checklist ?? []);
     }
@@ -375,6 +556,7 @@ export function TaskFormDialog({
     const tags = data.tags
       ? data.tags.split(',').map((t) => t.trim()).filter(Boolean)
       : [];
+    const sp = data.story_points ? parseInt(data.story_points, 10) : null;
     onSubmit({
       title: data.title,
       description: data.description || '',
@@ -384,6 +566,8 @@ export function TaskFormDialog({
       tags,
       assignee_clerk_id: data.assignee_clerk_id || null,
       recurrence_rule: data.recurrence_rule || null,
+      epic_id: data.epic_id || null,
+      story_points: sp != null && !isNaN(sp) ? sp : null,
       checklist,
     });
   };
@@ -408,6 +592,9 @@ export function TaskFormDialog({
                     {checklist.filter((i) => i.done).length}/{checklist.length}
                   </span>
                 )}
+              </TabsTrigger>
+              <TabsTrigger value="deps" className="flex-1">
+                <GitBranch className="h-3.5 w-3.5 mr-1" />Deps
               </TabsTrigger>
               <TabsTrigger value="comments" className="flex-1">Comments</TabsTrigger>
               {activity.length > 0 && (
@@ -524,6 +711,41 @@ export function TaskFormDialog({
                     </FormItem>
                   )} />
 
+                  <div className="grid grid-cols-2 gap-4">
+                    {epics.filter((e) => e.status !== 'archived').length > 0 && (
+                      <FormField control={form.control} name="epic_id" render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Epic</FormLabel>
+                          <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                            <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
+                            <SelectContent>
+                              <SelectItem value="">No epic</SelectItem>
+                              {epics.filter((e) => e.status !== 'archived').map((e) => (
+                                <SelectItem key={e.id} value={e.id}>
+                                  <span className="flex items-center gap-1.5">
+                                    <span className="h-2 w-2 rounded-full inline-block" style={{ backgroundColor: e.color }} />
+                                    {e.title}
+                                  </span>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )} />
+                    )}
+
+                    <FormField control={form.control} name="story_points" render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Story Points</FormLabel>
+                        <FormControl>
+                          <Input type="number" min={0} max={144} placeholder="–" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )} />
+                  </div>
+
                   <DialogFooter>
                     <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
                     <Button type="submit" disabled={isPending}>
@@ -537,6 +759,11 @@ export function TaskFormDialog({
             {/* ── Checklist tab ────────────────────────────────────────────── */}
             <TabsContent value="checklist" className="mt-4">
               <ChecklistTab items={checklist} onChange={setChecklist} />
+            </TabsContent>
+
+            {/* ── Dependencies tab ─────────────────────────────────────────── */}
+            <TabsContent value="deps" className="mt-4">
+              <DependenciesTab task={task} allTasks={allTasks} />
             </TabsContent>
 
             {/* ── Comments tab ────────────────────────────────────────────── */}

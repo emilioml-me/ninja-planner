@@ -45,6 +45,8 @@ import webhookEndpointsRouter from './routes/webhook-endpoints.js';
 import invitesRouter          from './routes/invites.js';
 import keyResultsRouter       from './routes/keyResults.js';
 import taskTemplatesRouter    from './routes/taskTemplates.js';
+import epicsRouter            from './routes/epics.js';
+import taskDepsRouter         from './routes/taskDependencies.js';
 
 const app = express();
 
@@ -131,7 +133,9 @@ app.use('/api/task-templates',            taskTemplatesRouter);
 app.use('/api/sprints',       sprintsRouter);
 app.use('/api/webhooks',      webhookEndpointsRouter);
 app.use('/api/workspaces',    invitesRouter);   // /api/workspaces/me/invites
-app.use('/api/invites',       invitesRouter);   // /api/invites/:token + /accept
+app.use('/api/invites',       invitesRouter);   // /api/invites/token/:token + /accept
+app.use('/api/epics',         epicsRouter);
+app.use('/api/tasks/:taskId/dependencies', taskDepsRouter); // mergeParams passes :taskId
 
 // ─── Static frontend (production) ────────────────────────────────────────────
 if (process.env.NODE_ENV === 'production') {
