@@ -432,6 +432,24 @@ router.patch('/:id', async (req, res, next) => {
       }).catch(() => {});
     }
 
+    // Notify watchers (fire-and-forget, skip the user who made the update)
+    pool.query<{ user_clerk_id: string }>(
+      `SELECT user_clerk_id FROM task_watchers
+       WHERE task_id = $1 AND workspace_id = $2 AND user_clerk_id <> $3`,
+      [task.id, req.workspace.id, req.auth.userId],
+    ).then((watcherResult) => {
+      for (const { user_clerk_id } of watcherResult.rows) {
+        createNotification({
+          workspaceId: req.workspace.id,
+          recipientClerkId: user_clerk_id,
+          type: 'task_updated',
+          title: `Task updated: "${task.title}"`,
+          body: `A task you're watching was updated.`,
+          link: '/tasks',
+        }).catch(() => {});
+      }
+    }).catch(() => {});
+
     // Fire webhooks
     if (parsed.data.status === 'done') {
       fireWebhooks(req.workspace.id, 'task.completed', { task });

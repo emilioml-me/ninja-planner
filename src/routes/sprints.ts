@@ -258,6 +258,59 @@ router.get('/:id/burndown', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── Retrospective ────────────────────────────────────────────────────────────
+
+const retroSchema = z.object({
+  went_well:    z.string().max(5000).optional(),
+  to_improve:   z.string().max(5000).optional(),
+  action_items: z.string().max(5000).optional(),
+});
+
+// GET /api/sprints/:id/retro
+router.get('/:id/retro', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT sr.* FROM sprint_retros sr
+       JOIN sprints s ON s.id = sr.sprint_id
+       WHERE sr.sprint_id = $1 AND s.workspace_id = $2`,
+      [req.params.id, req.workspace.id],
+    );
+    if (result.rows.length === 0) {
+      res.json(null);
+    } else {
+      res.json(result.rows[0]);
+    }
+  } catch (err) { next(err); }
+});
+
+// PUT /api/sprints/:id/retro  — upsert (admin only)
+router.put('/:id/retro', requireAdmin, async (req, res, next) => {
+  try {
+    const parsed = retroSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+
+    const sprintCheck = await pool.query(
+      'SELECT id FROM sprints WHERE id = $1 AND workspace_id = $2',
+      [req.params.id, req.workspace.id],
+    );
+    if (sprintCheck.rows.length === 0) { res.status(404).json({ error: 'Sprint not found' }); return; }
+
+    const { went_well, to_improve, action_items } = parsed.data;
+    const result = await pool.query(
+      `INSERT INTO sprint_retros (sprint_id, workspace_id, went_well, to_improve, action_items, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (sprint_id) DO UPDATE SET
+         went_well    = EXCLUDED.went_well,
+         to_improve   = EXCLUDED.to_improve,
+         action_items = EXCLUDED.action_items,
+         updated_at   = now()
+       RETURNING *`,
+      [req.params.id, req.workspace.id, went_well ?? null, to_improve ?? null, action_items ?? null, req.auth.userId],
+    );
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
 // PATCH /api/sprints/:id/tasks  — bulk assign tasks to sprint  [admin only]
 router.patch('/:id/tasks', requireAdmin, async (req, res, next) => {
   try {

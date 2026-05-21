@@ -23,7 +23,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight, TrendingDown } from 'lucide-react';
+import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight, TrendingDown, ClipboardCheck } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
@@ -251,6 +251,9 @@ export default function Sprints() {
                   <CardContent className="pt-0 px-4 pb-4 space-y-4">
                     {sprint.status !== 'planning' && <BurndownChart sprintId={sprint.id} />}
                     <SprintTaskList sprintId={sprint.id} memberMap={memberMap} />
+                    {sprint.status === 'completed' && (
+                      <RetroSection sprint={sprint} isAdmin={isAdmin} />
+                    )}
                   </CardContent>
                 )}
               </Card>
@@ -341,6 +344,132 @@ export default function Sprints() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// ─── Sprint Retro ────────────────────────────────────────────────────────────
+
+interface Retro {
+  id: string;
+  sprint_id: string;
+  went_well: string | null;
+  to_improve: string | null;
+  action_items: string | null;
+}
+
+const retroSchema = z.object({
+  went_well:    z.string().optional(),
+  to_improve:   z.string().optional(),
+  action_items: z.string().optional(),
+});
+type RetroForm = z.infer<typeof retroSchema>;
+
+function RetroSection({ sprint, isAdmin }: { sprint: Sprint; isAdmin: boolean }) {
+  const { apiRequest } = useApiClient();
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+
+  const { data: retro } = useQuery<Retro | null>({
+    queryKey: ['/api/sprints', sprint.id, 'retro'],
+    queryFn: () => apiRequest('GET', `/api/sprints/${sprint.id}/retro`),
+  });
+
+  const form = useForm<RetroForm>({
+    resolver: zodResolver(retroSchema),
+    defaultValues: { went_well: '', to_improve: '', action_items: '' },
+  });
+
+  const saveMut = useMutation({
+    mutationFn: (data: RetroForm) => apiRequest('PUT', `/api/sprints/${sprint.id}/retro`, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/sprints', sprint.id, 'retro'] });
+      setEditing(false);
+      toast({ title: 'Retrospective saved' });
+    },
+    onError: () => toast({ title: 'Failed to save retro', variant: 'destructive' }),
+  });
+
+  const openEdit = () => {
+    form.reset({
+      went_well:    retro?.went_well    ?? '',
+      to_improve:   retro?.to_improve   ?? '',
+      action_items: retro?.action_items ?? '',
+    });
+    setEditing(true);
+  };
+
+  const hasContent = retro && (retro.went_well || retro.to_improve || retro.action_items);
+
+  if (!hasContent && !isAdmin) return null;
+
+  return (
+    <div className="border-t pt-3 mt-1">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5 uppercase tracking-wide">
+          <ClipboardCheck className="h-3.5 w-3.5" /> Retrospective
+        </p>
+        {isAdmin && !editing && (
+          <Button type="button" variant="ghost" size="sm" className="h-6 text-xs" onClick={openEdit}>
+            {hasContent ? 'Edit' : '+ Write retro'}
+          </Button>
+        )}
+      </div>
+
+      {editing ? (
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit((d) => saveMut.mutate(d))} className="space-y-3">
+            <FormField control={form.control} name="went_well" render={({ field }) => (
+              <FormItem>
+                <FormLabel className="text-xs">✅ What went well</FormLabel>
+                <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+              </FormItem>
+            )} />
+            <FormField control={form.control} name="to_improve" render={({ field }) => (
+              <FormItem>
+                <FormLabel className="text-xs">🔧 What to improve</FormLabel>
+                <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+              </FormItem>
+            )} />
+            <FormField control={form.control} name="action_items" render={({ field }) => (
+              <FormItem>
+                <FormLabel className="text-xs">🎯 Action items</FormLabel>
+                <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+              </FormItem>
+            )} />
+            <div className="flex gap-2">
+              <Button type="submit" size="sm" disabled={saveMut.isPending}>
+                {saveMut.isPending ? 'Saving…' : 'Save'}
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
+            </div>
+          </form>
+        </Form>
+      ) : hasContent ? (
+        <div className="space-y-2 text-sm">
+          {retro.went_well && (
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-0.5">✅ What went well</p>
+              <p className="text-muted-foreground whitespace-pre-wrap text-xs">{retro.went_well}</p>
+            </div>
+          )}
+          {retro.to_improve && (
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-0.5">🔧 What to improve</p>
+              <p className="text-muted-foreground whitespace-pre-wrap text-xs">{retro.to_improve}</p>
+            </div>
+          )}
+          {retro.action_items && (
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-0.5">🎯 Action items</p>
+              <p className="text-muted-foreground whitespace-pre-wrap text-xs">{retro.action_items}</p>
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground italic">No retrospective yet.</p>
+      )}
     </div>
   );
 }

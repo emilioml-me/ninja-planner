@@ -18,8 +18,9 @@ import {
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { Plus, ClipboardList, Trophy, AlertTriangle, Target, Heart } from 'lucide-react';
+import { Plus, ClipboardList, Trophy, AlertTriangle, Target, Heart, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { downloadCsv } from '@/lib/export-csv';
 
 interface WeeklyReview {
   id: string;
@@ -147,9 +148,25 @@ export default function Reviews() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-6 py-4 border-b">
         <h1 className="text-xl font-semibold">Weekly Reviews</h1>
-        <Button size="sm" className="gap-2" onClick={openCreate}>
-          <Plus className="h-4 w-4" /> New Review
-        </Button>
+        <div className="flex gap-2">
+          {reviews.length > 0 && (
+            <Button size="sm" variant="outline" className="gap-2" onClick={() => {
+              const rows = reviews.map((r) => ({
+                week_start:   r.week_start.substring(0, 10),
+                health_score: r.health_score ?? '',
+                wins:         r.wins ?? '',
+                blockers:     r.blockers ?? '',
+                focus_next:   r.focus_next ?? '',
+              }));
+              downloadCsv('weekly-reviews.csv', rows);
+            }}>
+              <Download className="h-4 w-4" /> Export
+            </Button>
+          )}
+          <Button size="sm" className="gap-2" onClick={openCreate}>
+            <Plus className="h-4 w-4" /> New Review
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (

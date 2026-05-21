@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -30,7 +30,7 @@ import {
 import { useApiClient } from '@/lib/api';
 import { type WorkspaceMember } from '@/hooks/use-members';
 import { useTaskComments, useAddComment, useDeleteComment } from '@/hooks/use-notifications';
-import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft } from 'lucide-react';
+import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft, Clock, Eye, EyeOff, Timer } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface TaskActivity {
@@ -487,6 +487,190 @@ function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
   );
 }
 
+// ─── Time tracking tab ───────────────────────────────────────────────────────
+
+interface TimeLog {
+  id: string;
+  user_clerk_id: string;
+  display_name: string | null;
+  minutes: number;
+  note: string | null;
+  logged_at: string;
+}
+
+function TimeTab({ task }: { task: Task }) {
+  const { userId } = useAuth();
+  const { apiRequest } = useApiClient();
+  const qc = useQueryClient();
+  const [hours, setHours]     = useState('');
+  const [mins,  setMins]      = useState('');
+  const [note,  setNote]      = useState('');
+
+  const { data: logs = [] } = useQuery<TimeLog[]>({
+    queryKey: ['/api/tasks', task.id, 'time-logs'],
+    queryFn: () => apiRequest('GET', `/api/tasks/${task.id}/time-logs`),
+  });
+
+  const addMut = useMutation({
+    mutationFn: (body: { minutes: number; note?: string }) =>
+      apiRequest('POST', `/api/tasks/${task.id}/time-logs`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] });
+      setHours(''); setMins(''); setNote('');
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${task.id}/time-logs/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] }),
+  });
+
+  const totalMins = logs.reduce((s, l) => s + l.minutes, 0);
+  const fmtTime = (m: number) => {
+    const h = Math.floor(m / 60);
+    const rem = m % 60;
+    return h > 0 ? `${h}h ${rem > 0 ? `${rem}m` : ''}`.trim() : `${rem}m`;
+  };
+
+  const handleLog = () => {
+    const h = parseInt(hours || '0', 10);
+    const m = parseInt(mins  || '0', 10);
+    const total = h * 60 + m;
+    if (total < 1) return;
+    addMut.mutate({ minutes: total, note: note.trim() || undefined });
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Total */}
+      <div className="flex items-center gap-2 p-3 rounded-md bg-muted/40">
+        <Timer className="h-4 w-4 text-primary shrink-0" />
+        <span className="text-sm font-medium">Total logged: {totalMins > 0 ? fmtTime(totalMins) : '—'}</span>
+      </div>
+
+      {/* Log entry form */}
+      <div className="space-y-2">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Log time</p>
+        <div className="flex gap-2 items-end">
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Hours</label>
+            <Input
+              type="number" min={0} max={240} placeholder="0"
+              value={hours} onChange={(e) => setHours(e.target.value)}
+              className="w-20 h-8 text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Minutes</label>
+            <Input
+              type="number" min={0} max={59} placeholder="0"
+              value={mins} onChange={(e) => setMins(e.target.value)}
+              className="w-20 h-8 text-sm"
+            />
+          </div>
+          <Input
+            placeholder="Note (optional)"
+            value={note} onChange={(e) => setNote(e.target.value)}
+            className="flex-1 h-8 text-sm"
+            maxLength={500}
+          />
+          <Button
+            type="button" size="sm" onClick={handleLog}
+            disabled={addMut.isPending || (parseInt(hours || '0') * 60 + parseInt(mins || '0')) < 1}
+          >
+            <Plus className="h-3.5 w-3.5 mr-1" /> Log
+          </Button>
+        </div>
+      </div>
+
+      <Separator />
+
+      {/* History */}
+      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+        {logs.length === 0 ? (
+          <p className="text-xs text-muted-foreground text-center py-4">No time logged yet.</p>
+        ) : (
+          logs.map((log) => {
+            const isOwn = log.user_clerk_id === userId;
+            const name  = log.display_name ?? log.user_clerk_id.slice(-6);
+            return (
+              <div key={log.id} className="flex items-center gap-2 text-sm group rounded-md px-1 py-1 hover:bg-muted/40">
+                <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                <span className="font-medium text-xs w-12 shrink-0">{fmtTime(log.minutes)}</span>
+                <span className="flex-1 text-xs text-muted-foreground truncate">
+                  {log.note || <span className="italic">no note</span>}
+                  {' '}· {isOwn ? 'you' : name}
+                </span>
+                {isOwn && (
+                  <Button
+                    type="button" variant="ghost" size="icon"
+                    className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                    onClick={() => deleteMut.mutate(log.id)}
+                  >
+                    <Trash2 className="h-3 w-3 text-muted-foreground" />
+                  </Button>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Watchers bar ─────────────────────────────────────────────────────────────
+
+interface Watcher { user_clerk_id: string; display_name: string | null; }
+
+function WatchersBar({ task }: { task: Task }) {
+  const { userId } = useAuth();
+  const { apiRequest } = useApiClient();
+  const qc = useQueryClient();
+
+  const { data: watchers = [] } = useQuery<Watcher[]>({
+    queryKey: ['/api/tasks', task.id, 'watchers'],
+    queryFn: () => apiRequest('GET', `/api/tasks/${task.id}/watchers`),
+  });
+
+  const isWatching = watchers.some((w) => w.user_clerk_id === userId);
+
+  const watchMut = useMutation({
+    mutationFn: () => isWatching
+      ? apiRequest('DELETE', `/api/tasks/${task.id}/watchers`)
+      : apiRequest('POST',   `/api/tasks/${task.id}/watchers`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'watchers'] }),
+  });
+
+  const names = watchers
+    .filter((w) => w.user_clerk_id !== userId)
+    .map((w) => w.display_name?.split(' ')[0] ?? '…')
+    .join(', ');
+
+  return (
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <Button
+        type="button" variant="ghost" size="sm"
+        className="h-6 gap-1.5 px-2 text-xs"
+        onClick={() => watchMut.mutate()}
+        disabled={watchMut.isPending}
+      >
+        {isWatching
+          ? <><EyeOff className="h-3 w-3" /> Unwatch</>
+          : <><Eye className="h-3 w-3" /> Watch</>}
+      </Button>
+      {watchers.length > 0 && (
+        <span className="truncate max-w-[200px]">
+          {isWatching ? 'You' : ''}
+          {isWatching && names ? ', ' : ''}
+          {names}
+          {' '}watching
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ─── Main dialog ──────────────────────────────────────────────────────────────
 
 export function TaskFormDialog({
@@ -582,6 +766,8 @@ export function TaskFormDialog({
             <DialogDescription>Update the task details or leave a comment.</DialogDescription>
           </DialogHeader>
 
+          <WatchersBar task={task} />
+
           <Tabs defaultValue="details" className="mt-1">
             <TabsList className="w-full">
               <TabsTrigger value="details" className="flex-1">Details</TabsTrigger>
@@ -592,6 +778,9 @@ export function TaskFormDialog({
                     {checklist.filter((i) => i.done).length}/{checklist.length}
                   </span>
                 )}
+              </TabsTrigger>
+              <TabsTrigger value="time" className="flex-1">
+                <Clock className="h-3.5 w-3.5 mr-1" />Time
               </TabsTrigger>
               <TabsTrigger value="deps" className="flex-1">
                 <GitBranch className="h-3.5 w-3.5 mr-1" />Deps
@@ -759,6 +948,11 @@ export function TaskFormDialog({
             {/* ── Checklist tab ────────────────────────────────────────────── */}
             <TabsContent value="checklist" className="mt-4">
               <ChecklistTab items={checklist} onChange={setChecklist} />
+            </TabsContent>
+
+            {/* ── Time tab ────────────────────────────────────────────────── */}
+            <TabsContent value="time" className="mt-4">
+              <TimeTab task={task} />
             </TabsContent>
 
             {/* ── Dependencies tab ─────────────────────────────────────────── */}
