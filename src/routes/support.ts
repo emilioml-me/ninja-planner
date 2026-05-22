@@ -61,7 +61,9 @@ router.post('/ticket', async (req, res, next) => {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({})) as { error?: string };
-      return res.status(response.status).json({ error: err.error ?? 'Failed to create support ticket.' });
+      // H5: Normalize desk-ninja 5xx to 502 — don't leak internal topology to clients
+      const forwardStatus = response.status >= 500 ? 502 : response.status;
+      return res.status(forwardStatus).json({ error: forwardStatus === 502 ? 'Support service error. Please try again.' : (err.error ?? 'Failed to create support ticket.') });
     }
 
     const ticket = await response.json() as { ticketNumber: string; portalUrl: string };

@@ -21,7 +21,7 @@ const budgetSchema = z.object({
 
 const entrySchema = z.object({
   description: z.string().min(1).max(500),
-  amount:      z.number(),
+  amount:      z.number().max(1_000_000_000),  // L2: cap to prevent display overflows
   category:    z.string().max(100).optional(),
   entry_date:  z.string().date().optional(),
 });
@@ -69,12 +69,17 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
 
+    // H2: explicit allowlist prevents future mass-assignment if schema expands
+    const ALLOWED_COLUMNS = new Set<string>(['name','description','target_amount','currency','period_start','period_end','status']);
     const fields = parsed.data;
     const setClauses: string[] = [];
     const values: unknown[] = [];
     let i = 1;
     for (const [key, val] of Object.entries(fields)) {
-      if (val !== undefined) { setClauses.push(`${key} = $${i++}`); values.push(val); }
+      if (val !== undefined && ALLOWED_COLUMNS.has(key)) {
+        setClauses.push(`${key} = $${i++}`);
+        values.push(val);
+      }
     }
     setClauses.push(`updated_at = now()`);
     values.push(req.params.id, req.workspace.id);
@@ -119,9 +124,9 @@ router.get('/:id/entries', async (req, res, next) => {
        LEFT JOIN workspace_members wm
               ON wm.clerk_user_id = be.created_by
              AND wm.workspace_id  = be.workspace_id
-       WHERE  be.budget_id = $1
+       WHERE  be.budget_id = $1 AND be.workspace_id = $2   -- M3: defence-in-depth workspace scope
        ORDER  BY be.entry_date DESC, be.created_at DESC`,
-      [req.params.id],
+      [req.params.id, req.workspace.id],
     );
     res.json(result.rows);
   } catch (err) { next(err); }

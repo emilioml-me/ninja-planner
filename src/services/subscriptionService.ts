@@ -6,6 +6,9 @@ const APP_SECRET       = process.env.NINJA_CORE_APP_SECRET ?? '';
 const APP_NAME         = 'plan-ninja';
 const REVALIDATE_AFTER = 24 * 60 * 60 * 1000; // 24 h
 
+// C4: Coalesce concurrent revalidation calls for the same workspace into one fetch
+const revalidationInFlight = new Map<string, Promise<NinjaCoreResult | null>>();
+
 export interface SubscriptionStatus {
   active: boolean;
   plan: string | null;
@@ -67,7 +70,15 @@ export async function getSubscriptionStatus(workspaceId: string): Promise<Subscr
 
   const stale = Date.now() - new Date(row.last_verified_at).getTime() > REVALIDATE_AFTER;
   if (stale) {
-    const result = await callNinjaCore(row.code);
+    // C4: coalesce concurrent revalidation fetches for the same workspace
+    let inflightPromise = revalidationInFlight.get(workspaceId);
+    if (!inflightPromise) {
+      inflightPromise = callNinjaCore(row.code).finally(() => {
+        revalidationInFlight.delete(workspaceId);
+      });
+      revalidationInFlight.set(workspaceId, inflightPromise);
+    }
+    const result = await inflightPromise;
     if (result === null) {
       // ninja-core unreachable — serve cached state optimistically
       return { active: true, plan: row.plan, code: row.code, expiresAt: row.expires_at?.toISOString() ?? null, adminOverride: false };

@@ -35,6 +35,7 @@ interface TimelineSprint {
 interface TimelineData {
   tasks: TimelineTask[];
   sprints: TimelineSprint[];
+  truncated?: boolean;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -116,8 +117,9 @@ export default function Timeline() {
     );
   }
 
-  const tasks   = data?.tasks   ?? [];
-  const sprints = data?.sprints ?? [];
+  const tasks     = data?.tasks     ?? [];
+  const sprints   = data?.sprints   ?? [];
+  const truncated = data?.truncated ?? false;
 
   if (tasks.length === 0) {
     return (

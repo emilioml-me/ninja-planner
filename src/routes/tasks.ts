@@ -155,6 +155,7 @@ router.get('/workload', async (req, res, next) => {
 router.get('/capacity', async (req, res, next) => {
   try {
     // Points assigned per member across active sprint tasks
+    // M2: JOIN workspace_members to exclude tasks assigned to departed members
     const pointsResult = await pool.query<{ user_clerk_id: string; assigned_points: number; task_count: number }>(
       `SELECT
          t.assignee_clerk_id AS user_clerk_id,
@@ -162,6 +163,7 @@ router.get('/capacity', async (req, res, next) => {
          COUNT(t.id)::int                      AS task_count
        FROM tasks t
        JOIN sprints s ON s.id = t.sprint_id AND s.workspace_id = t.workspace_id AND s.status = 'active'
+       JOIN workspace_members wm ON wm.clerk_user_id = t.assignee_clerk_id AND wm.workspace_id = t.workspace_id
        WHERE t.workspace_id = $1
          AND t.assignee_clerk_id IS NOT NULL
          AND t.deleted_at IS NULL
@@ -247,7 +249,8 @@ router.post('/', async (req, res, next) => {
       }
     }
     const task = await createTask(req.workspace.id, parsed.data, req.auth.userId);
-    await logTaskActivity(task.id, req.auth.userId, 'created');
+    // M5: include status so tasks created as 'done' appear in the changelog
+    await logTaskActivity(task.id, req.auth.userId, 'created', { status: task.status });
 
     // Notify assignee if set and not self-assigning
     if (task.assignee_clerk_id && task.assignee_clerk_id !== req.auth.userId) {
@@ -367,6 +370,9 @@ router.patch('/:id', async (req, res, next) => {
         return;
       }
     }
+    // H3: capture pre-update assignee to detect actual changes (prevent spurious assignment emails)
+    const prevTask = await getTaskById(req.params.id, req.workspace.id);
+    const prevAssigneeClerkId = prevTask?.task.assignee_clerk_id ?? null;
     const task = await updateTask(req.params.id, req.workspace.id, parsed.data);
     if (!task) {
       res.status(404).json({ error: 'Task not found' });
@@ -374,8 +380,12 @@ router.patch('/:id', async (req, res, next) => {
     }
     await logTaskActivity(task.id, req.auth.userId, 'updated', parsed.data as Record<string, unknown>);
 
-    // Notify new assignee (if changed and not self-assigning)
+    // H3: Only notify when assignee actually changed, not just echoed in a full-object PATCH
+    const assigneeActuallyChanged =
+      parsed.data.assignee_clerk_id !== undefined &&
+      parsed.data.assignee_clerk_id !== prevAssigneeClerkId;
     if (
+      assigneeActuallyChanged &&
       parsed.data.assignee_clerk_id &&
       parsed.data.assignee_clerk_id !== req.auth.userId
     ) {

@@ -28,10 +28,12 @@ vi.mock('../middleware/requireWorkspace.js', () => ({
 vi.mock('../middleware/requireAdmin.js', () => ({
   requireAdmin: (_req: any, _res: any, next: any) => next(),
 }));
-// Stub email + notification side-effects
+// Stub email + notification side-effects (M6: use real exported function names)
 vi.mock('../services/emailService.js', () => ({
-  sendAssignmentEmail: vi.fn().mockResolvedValue(undefined),
-  sendDueDateEmail:    vi.fn().mockResolvedValue(undefined),
+  sendTaskAssignedEmail:    vi.fn().mockResolvedValue(undefined),
+  sendDueDateReminderEmail: vi.fn().mockResolvedValue(undefined),
+  sendGoalMilestoneEmail:   vi.fn().mockResolvedValue(undefined),
+  resolveClerkEmail:        vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../services/notificationService.js', () => ({
   createNotification: vi.fn().mockResolvedValue(undefined),

@@ -4,7 +4,7 @@ import { pool } from '../config/db.js';
 export async function requireWorkspace(req: Request, res: Response, next: NextFunction): Promise<void> {
   const { userId, orgId } = req.auth;
 
-  if (!orgId) {
+  if (!orgId || (orgId as string).trim() === '') {
     res.status(403).json({ error: 'No active organization in token' });
     return;
   }

@@ -58,11 +58,13 @@ router.post('/', async (req, res, next) => {
 // DELETE /api/tasks/:taskId/watchers  — current user unwatches
 router.delete('/', async (req, res, next) => {
   try {
-    await pool.query(
+    const result = await pool.query(
       `DELETE FROM task_watchers
        WHERE task_id = $1 AND workspace_id = $2 AND user_clerk_id = $3`,
       [(req.params as Record<string, string>).taskId, req.workspace.id, req.auth.userId],
     );
+    // L1: return 404 if the user wasn't watching (or task doesn't exist in workspace)
+    if ((result.rowCount ?? 0) === 0) { res.status(404).json({ error: 'Not watching this task' }); return; }
     res.status(204).send();
   } catch (err) { next(err); }
 });

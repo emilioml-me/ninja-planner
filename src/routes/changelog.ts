@@ -42,9 +42,10 @@ router.get('/', async (req, res, next) => {
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
     const { from, to, limit = 200 } = parsed.data;
-    // Default: last 30 days
-    const toDate   = to   ? `${to} 23:59:59`   : new Date().toISOString().replace('T', ' ').slice(0, 19);
-    const fromDate = from ? `${from} 00:00:00`  : new Date(Date.now() - 30 * 86400_000).toISOString().replace('T', ' ').slice(0, 19);
+    // H6: Use explicit UTC timestamps to avoid session-timezone ambiguity
+    // Pass date strings and let PostgreSQL cast with timezone: date+time+offset
+    const toDate   = to   ? `${to}T23:59:59Z`   : new Date().toISOString();
+    const fromDate = from ? `${from}T00:00:00Z`  : new Date(Date.now() - 30 * 86400_000).toISOString();
 
     // Find done-date for each completed task using task_activity
     const result = await pool.query<ChangelogTask & { sprint_id: string | null }>(
@@ -56,7 +57,7 @@ router.get('/', async (req, res, next) => {
          JOIN tasks t ON t.id = ta.task_id
          WHERE t.workspace_id = $1
            AND t.status = 'done'
-           AND ta.action = 'updated'
+           AND ta.action IN ('updated', 'created')   -- M5: include tasks created directly as done
            AND (ta.payload->>'status') = 'done'
            AND t.deleted_at IS NULL
          ORDER BY ta.task_id, ta.created_at DESC

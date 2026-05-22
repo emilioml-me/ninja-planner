@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
-import { getUploadUrl, getDownloadUrl, deleteObject } from '../lib/r2.js';
+import { getUploadUrl, getDownloadUrl, deleteObject, verifyObjectMimeType } from '../lib/r2.js';
 
 // mergeParams: true — :taskId comes from the parent tasks router
 const router = Router({ mergeParams: true });
@@ -12,7 +12,7 @@ router.use(requireWorkspace);
 const ADMIN_ROLES   = new Set(['org:admin', 'org:owner']);
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 const ALLOWED_MIME  = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
   'application/pdf',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -22,7 +22,16 @@ const ALLOWED_MIME  = new Set([
   'application/zip',
   'video/mp4', 'video/webm',
   'audio/mpeg', 'audio/wav',
+  // NOTE: image/svg+xml intentionally excluded — stored XSS risk
 ]);
+
+/** Sanitize a user-supplied filename: strip path separators, null bytes, and dangerous sequences (H4) */
+function sanitizeFileName(name: string): string {
+  return name
+    .replace(/\0/g, '')          // null bytes
+    .replace(/[/\\]/g, '_')      // path separators
+    .replace(/^\.+$/, '_');      // bare dot/dotdot
+}
 
 const presignSchema = z.object({
   file_name: z.string().min(1).max(255),
@@ -75,15 +84,16 @@ router.post('/presign', async (req, res, next) => {
     const parsed = presignSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
-    const { file_name, file_size, mime_type } = parsed.data;
+    const { file_name: rawName, file_size, mime_type } = parsed.data;
     if (!ALLOWED_MIME.has(mime_type)) {
       res.status(400).json({ error: 'File type not allowed' }); return;
     }
 
+    const file_name = sanitizeFileName(rawName);                   // H4: sanitize before use
     const ext  = file_name.split('.').pop() ?? 'bin';
     const key  = `attachments/${req.workspace.id}/${taskId}/${randomUUID()}.${ext}`;
     const url  = await getUploadUrl(key, mime_type, file_size);
-    res.json({ upload_url: url, r2_key: key });
+    res.json({ upload_url: url, r2_key: key, file_name });         // return sanitized name to client
   } catch (err) { next(err); }
 });
 
@@ -97,19 +107,38 @@ router.post('/', async (req, res, next) => {
     const parsed = confirmSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
-    // Validate the r2_key belongs to this workspace+task (prevent cross-tenant injection)
+    // Validate the r2_key belongs to this workspace+task (cross-tenant injection prevention)
     const expected = `attachments/${req.workspace.id}/${taskId}/`;
     if (!parsed.data.r2_key.startsWith(expected)) {
       res.status(400).json({ error: 'Invalid key' }); return;
     }
 
-    const { file_name, file_size, mime_type, r2_key } = parsed.data;
-    const result = await pool.query(
-      `INSERT INTO task_attachments (task_id, workspace_id, file_name, file_size, mime_type, r2_key, uploaded_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [taskId, req.workspace.id, file_name, file_size, mime_type, r2_key, req.auth.userId],
-    );
+    const { file_name: rawName, file_size, mime_type, r2_key } = parsed.data;
+    const file_name = sanitizeFileName(rawName);
+
+    // C2: Verify the object's actual Content-Type matches the declared MIME
+    const mimeOk = await verifyObjectMimeType(r2_key, mime_type);
+    if (!mimeOk) {
+      // Object content-type mismatch — delete the orphaned object and reject
+      await deleteObject(r2_key).catch(() => {});
+      res.status(400).json({ error: 'Uploaded file MIME type does not match the declared type.' }); return;
+    }
+
+    // C3: If the DB insert fails, clean up the R2 object to prevent orphans
+    let result;
+    try {
+      result = await pool.query(
+        `INSERT INTO task_attachments (task_id, workspace_id, file_name, file_size, mime_type, r2_key, uploaded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [taskId, req.workspace.id, file_name, file_size, mime_type, r2_key, req.auth.userId],
+      );
+    } catch (dbErr) {
+      // Best-effort R2 cleanup — do not let a failed delete mask the original error
+      await deleteObject(r2_key).catch(() => {});
+      throw dbErr;
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (err) { next(err); }
 });

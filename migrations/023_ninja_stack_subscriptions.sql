@@ -1,6 +1,6 @@
 -- ninja-stack subscription tracking (one row per workspace)
 CREATE TABLE IF NOT EXISTS ninja_stack_subscriptions (
-  workspace_id      TEXT        PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id      UUID        PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
   code              TEXT        NOT NULL,
   plan              TEXT        NOT NULL DEFAULT 'starter',
   allowed_apps      TEXT[]      NOT NULL DEFAULT '{}',

@@ -26,7 +26,7 @@ import goalsRouter        from './routes/goals.js';
 import sprintsRouter      from './routes/sprints.js';
 import shareRouter        from './routes/share.js';
 import webhookEndpointsRouter from './routes/webhook-endpoints.js';
-import invitesRouter          from './routes/invites.js';
+import { workspaceInvitesRouter, publicInvitesRouter } from './routes/invites.js';
 import keyResultsRouter       from './routes/keyResults.js';
 import taskTemplatesRouter    from './routes/taskTemplates.js';
 import epicsRouter            from './routes/epics.js';
@@ -107,8 +107,8 @@ export function createApp() {
   app.use('/api/task-templates',                  taskTemplatesRouter);
   app.use('/api/sprints',        sprintsRouter);
   app.use('/api/webhooks',       webhookEndpointsRouter);
-  app.use('/api/workspaces',     invitesRouter);
-  app.use('/api/invites',        invitesRouter);
+  app.use('/api/workspaces',     workspaceInvitesRouter);  // H1: admin invite management
+  app.use('/api/invites',        publicInvitesRouter);     // H1: public token lookup + accept
   app.use('/api/epics',          epicsRouter);
   app.use('/api/tasks/:taskId/dependencies',      taskDepsRouter);
   app.use('/api/tasks/:taskId/time-logs',         timeLogsRouter);
@@ -127,6 +127,8 @@ export function createApp() {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const publicDir = join(__dirname, 'public');
     app.use(express.static(publicDir));
+    // M8: Return JSON 404 for unmatched /api/* routes instead of serving index.html
+    app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
     app.get('*', (_req, res) => { res.sendFile(join(publicDir, 'index.html')); });
   }
 

@@ -64,8 +64,9 @@ router.get('/', async (req, res, next) => {
     );
 
     res.json({
-      tasks:   tasksResult.rows,
-      sprints: sprintsResult.rows,
+      tasks:     tasksResult.rows,
+      sprints:   sprintsResult.rows,
+      truncated: tasksResult.rows.length === 500,  // M4: signal to UI if results were capped
     });
   } catch (err) { next(err); }
 });
