@@ -1,0 +1,626 @@
+openapi: 3.1.0
+info:
+  title: plan-ninja API
+  version: 1.0.0
+  description: |
+    Multi-tenant business planning SaaS — REST API.
+
+    **Authentication**: All `/api/*` routes require a Clerk-issued JWT in the
+    `Authorization: Bearer <token>` header. The token is validated server-side.
+
+    **Workspace context**: A resolved workspace is injected by `requireWorkspace`
+    middleware. The workspace is derived from the Clerk organisation the user
+    belongs to. Supply `x-workspace-id` or ensure the JWT carries the correct
+    org claims.
+
+servers:
+  - url: https://plan-ninja.com
+    description: Production
+  - url: http://localhost:3206
+    description: Local dev
+
+tags:
+  - name: Health
+  - name: Tasks
+  - name: Sprints
+  - name: Epics
+  - name: Goals
+  - name: Roadmap
+  - name: Revenue
+  - name: Timeline
+  - name: Budgets
+  - name: Members
+  - name: Notifications
+  - name: Support
+  - name: Subscription
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    Task:
+      type: object
+      properties:
+        id:          { type: string }
+        title:       { type: string }
+        description: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [todo, in_progress, done, blocked]
+        priority:
+          type: string
+          enum: [urgent, high, medium, low]
+        assignee_clerk_id: { type: string, nullable: true }
+        assignee_name:     { type: string, nullable: true }
+        due_date:          { type: string, format: date, nullable: true }
+        start_date:        { type: string, format: date, nullable: true }
+        tags:              { type: array, items: { type: string } }
+        story_points:      { type: integer, nullable: true }
+        sprint_id:         { type: string, nullable: true }
+        epic_id:           { type: string, nullable: true }
+        checklist:
+          type: array
+          items:
+            type: object
+            properties:
+              id:   { type: string }
+              text: { type: string }
+              done: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Sprint:
+      type: object
+      properties:
+        id:         { type: string }
+        name:       { type: string }
+        status:
+          type: string
+          enum: [planning, active, completed]
+        start_date: { type: string, format: date, nullable: true }
+        end_date:   { type: string, format: date, nullable: true }
+        goal:       { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    Epic:
+      type: object
+      properties:
+        id:          { type: string }
+        title:       { type: string }
+        description: { type: string, nullable: true }
+        color:       { type: string }
+        status:
+          type: string
+          enum: [planning, in_progress, done, cancelled]
+        start_date:  { type: string, format: date, nullable: true }
+        end_date:    { type: string, format: date, nullable: true }
+        created_at:  { type: string, format: date-time }
+
+    Goal:
+      type: object
+      properties:
+        id:          { type: string }
+        title:       { type: string }
+        description: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [on_track, at_risk, off_track, completed]
+        progress:    { type: integer, minimum: 0, maximum: 100 }
+        due_date:    { type: string, format: date, nullable: true }
+        created_at:  { type: string, format: date-time }
+
+    SubscriptionStatus:
+      type: object
+      properties:
+        active:        { type: boolean }
+        plan:          { type: string, nullable: true }
+        code:          { type: string, nullable: true }
+        expiresAt:     { type: string, format: date-time, nullable: true }
+        adminOverride: { type: boolean }
+        reason:
+          type: string
+          nullable: true
+          enum: [no_code, expired, app_not_allowed, revoked, ninja_core_unreachable]
+
+security:
+  - BearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  app:    { type: string, example: ninja-planner }
+
+  # ── Tasks ──────────────────────────────────────────────────────────────────
+  /api/tasks:
+    get:
+      tags: [Tasks]
+      summary: List tasks
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [todo, in_progress, done, blocked] }
+        - name: priority
+          in: query
+          schema: { type: string, enum: [urgent, high, medium, low] }
+        - name: assignee
+          in: query
+          schema: { type: string }
+          description: Clerk user ID
+        - name: sprint_id
+          in: query
+          schema: { type: string }
+        - name: epic_id
+          in: query
+          schema: { type: string }
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Full-text search across title, description, tags
+        - name: limit
+          in: query
+          schema: { type: integer, default: 500 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Array of tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Task' }
+        '401': { description: Unauthorized }
+
+    post:
+      tags: [Tasks]
+      summary: Create a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:       { type: string }
+                description: { type: string }
+                status:
+                  type: string
+                  enum: [todo, in_progress, done, blocked]
+                  default: todo
+                priority:
+                  type: string
+                  enum: [urgent, high, medium, low]
+                  default: medium
+                due_date:          { type: string, format: date }
+                start_date:        { type: string, format: date }
+                assignee_clerk_id: { type: string }
+                tags:              { type: array, items: { type: string } }
+                story_points:      { type: integer, minimum: 0 }
+                sprint_id:         { type: string }
+                epic_id:           { type: string }
+                checklist:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      text: { type: string }
+                      done: { type: boolean }
+      responses:
+        '201':
+          description: Created task
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+
+  /api/tasks/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Tasks]
+      summary: Update a task (partial)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:             { type: string }
+                description:       { type: string }
+                status:            { type: string, enum: [todo, in_progress, done, blocked] }
+                priority:          { type: string, enum: [urgent, high, medium, low] }
+                due_date:          { type: string, format: date, nullable: true }
+                start_date:        { type: string, format: date, nullable: true }
+                assignee_clerk_id: { type: string, nullable: true }
+                tags:              { type: array, items: { type: string } }
+                story_points:      { type: integer, nullable: true }
+                sprint_id:         { type: string, nullable: true }
+                epic_id:           { type: string, nullable: true }
+      responses:
+        '200':
+          description: Updated task
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { description: Task not found }
+    delete:
+      tags: [Tasks]
+      summary: Delete (soft-delete) a task
+      responses:
+        '200': { description: Task deleted }
+        '404': { description: Task not found }
+
+  /api/tasks/{taskId}/time-logs:
+    parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Tasks]
+      summary: List time logs for a task
+      responses:
+        '200':
+          description: Time log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:         { type: string }
+                    minutes:    { type: integer }
+                    note:       { type: string, nullable: true }
+                    logged_by:  { type: string }
+                    logged_at:  { type: string, format: date-time }
+    post:
+      tags: [Tasks]
+      summary: Log time on a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minutes]
+              properties:
+                minutes: { type: integer, minimum: 1, maximum: 14400 }
+                note:    { type: string }
+      responses:
+        '201': { description: Time log created }
+        '400': { description: Validation error }
+
+  /api/tasks/{taskId}/attachments:
+    parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Tasks]
+      summary: List attachments for a task
+      responses:
+        '200':
+          description: Attachment metadata list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:        { type: string }
+                    file_name: { type: string }
+                    file_size: { type: integer }
+                    mime_type: { type: string }
+                    uploaded_by: { type: string }
+                    created_at:  { type: string, format: date-time }
+
+  /api/tasks/{taskId}/attachments/presign:
+    parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Tasks]
+      summary: Get a presigned R2 upload URL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_name, mime_type, file_size]
+              properties:
+                file_name: { type: string }
+                mime_type: { type: string }
+                file_size: { type: integer }
+      responses:
+        '200':
+          description: Presigned upload URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upload_url: { type: string, format: uri }
+                  r2_key:     { type: string }
+
+  # ── Sprints ────────────────────────────────────────────────────────────────
+  /api/sprints:
+    get:
+      tags: [Sprints]
+      summary: List sprints
+      responses:
+        '200':
+          description: Sprint list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Sprint' }
+    post:
+      tags: [Sprints]
+      summary: Create a sprint (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:       { type: string }
+                start_date: { type: string, format: date }
+                end_date:   { type: string, format: date }
+                goal:       { type: string }
+      responses:
+        '201': { description: Sprint created }
+        '403': { description: Admin only }
+
+  /api/sprints/{id}/burndown:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Sprints]
+      summary: Burndown chart data for a sprint
+      responses:
+        '200':
+          description: Burndown series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    date:      { type: string, format: date }
+                    remaining: { type: number }
+                    ideal:     { type: number }
+
+  # ── Epics ──────────────────────────────────────────────────────────────────
+  /api/epics:
+    get:
+      tags: [Epics]
+      summary: List epics
+      responses:
+        '200':
+          description: Epic list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Epic' }
+    post:
+      tags: [Epics]
+      summary: Create an epic (admin only)
+      responses:
+        '201': { description: Epic created }
+
+  # ── Goals ──────────────────────────────────────────────────────────────────
+  /api/goals:
+    get:
+      tags: [Goals]
+      summary: List goals / OKRs
+      responses:
+        '200':
+          description: Goal list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Goal' }
+    post:
+      tags: [Goals]
+      summary: Create a goal (admin only)
+      responses:
+        '201': { description: Goal created }
+
+  # ── Timeline ───────────────────────────────────────────────────────────────
+  /api/timeline:
+    get:
+      tags: [Timeline]
+      summary: Gantt data — tasks with dates + sprints
+      responses:
+        '200':
+          description: Timeline payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:         { type: string }
+                        title:      { type: string }
+                        status:     { type: string }
+                        priority:   { type: string }
+                        start_date: { type: string, format: date, nullable: true }
+                        due_date:   { type: string, format: date, nullable: true }
+                        epic_id:    { type: string, nullable: true }
+                        epic_title: { type: string, nullable: true }
+                        epic_color: { type: string, nullable: true }
+                  sprints:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:         { type: string }
+                        name:       { type: string }
+                        start_date: { type: string, format: date, nullable: true }
+                        end_date:   { type: string, format: date, nullable: true }
+
+  # ── Budgets ────────────────────────────────────────────────────────────────
+  /api/budgets:
+    get:
+      tags: [Budgets]
+      summary: List budgets with actual spend totals
+      responses:
+        '200': { description: Budget list }
+    post:
+      tags: [Budgets]
+      summary: Create a budget (admin only)
+      responses:
+        '201': { description: Budget created }
+
+  # ── Members ────────────────────────────────────────────────────────────────
+  /api/workspaces/me/members:
+    get:
+      tags: [Members]
+      summary: List workspace members (enriched from Clerk)
+      responses:
+        '200': { description: Member list }
+
+  # ── Notifications ──────────────────────────────────────────────────────────
+  /api/notifications:
+    get:
+      tags: [Notifications]
+      summary: List notifications for current user
+      parameters:
+        - name: unread_only
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200': { description: Notification list }
+
+  /api/notifications/mark-read:
+    post:
+      tags: [Notifications]
+      summary: Mark notifications as read
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: Omit to mark all as read
+      responses:
+        '200': { description: Marked as read }
+
+  # ── Support ────────────────────────────────────────────────────────────────
+  /api/support/ticket:
+    post:
+      tags: [Support]
+      summary: Create a support ticket via desk-ninja
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, description]
+              properties:
+                subject:
+                  type: string
+                  maxLength: 200
+                description:
+                  type: string
+                  maxLength: 5000
+                priority:
+                  type: string
+                  enum: [low, medium, high, urgent]
+                  default: medium
+      responses:
+        '201':
+          description: Ticket created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticketNumber: { type: string }
+                  portalUrl:    { type: string, format: uri }
+        '503': { description: Support service unavailable (DESK_NINJA_API_KEY not set) }
+
+  # ── Subscription ───────────────────────────────────────────────────────────
+  /api/ninja-stack/status:
+    get:
+      tags: [Subscription]
+      summary: Get ninja-stack subscription status for the workspace
+      responses:
+        '200':
+          description: Subscription status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubscriptionStatus' }
+
+  /api/ninja-stack/activate:
+    post:
+      tags: [Subscription]
+      summary: Activate a ninja-stack subscription code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, example: nsk_xxxxxxxx }
+      responses:
+        '200':
+          description: Activation result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubscriptionStatus' }
+        '400': { description: Invalid code }
+        '403': { description: Code does not include plan-ninja }
+        '502': { description: Could not reach ninja-core }

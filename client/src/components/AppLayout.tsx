@@ -6,6 +6,7 @@ import { AppSidebar } from '@/components/AppSidebar';
 import { CommandPalette } from '@/components/CommandPalette';
 import { OnboardingWizard, useOnboarding } from '@/components/OnboardingWizard';
 import { NotificationBell } from '@/components/NotificationBell';
+import { SubscriptionBanner } from '@/components/SubscriptionBanner';
 import { cn } from '@/lib/utils';
 
 interface AppLayoutProps {
@@ -95,6 +96,7 @@ export function AppLayout({ children }: AppLayoutProps) {
           </div>
         </div>
 
+        <SubscriptionBanner />
         <main className="flex-1 overflow-y-auto">{children}</main>
       </div>
 

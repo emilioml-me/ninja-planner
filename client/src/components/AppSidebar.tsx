@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'wouter';
 import { UserButton } from '@clerk/clerk-react';
+import { ContactSupportDialog } from '@/components/ContactSupportDialog';
 import {
   LayoutDashboard,
   CheckSquare,
@@ -19,6 +20,7 @@ import {
   Wallet,
   History,
   CalendarDays,
+  CreditCard,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -41,6 +43,7 @@ const NAV = [
   { href: '/members',      label: 'Team',          icon: UsersRound },
   { href: '/integrations', label: 'Integrations',  icon: Plug },
   { href: '/webhooks',     label: 'Webhooks',       icon: Webhook },
+  { href: '/settings/billing', label: 'Billing',   icon: CreditCard },
 ];
 
 interface AppSidebarProps {
@@ -93,6 +96,9 @@ export function AppSidebar({ onClose }: AppSidebarProps) {
       </nav>
 
       {/* Footer */}
+      <div className="px-2 pb-1">
+        <ContactSupportDialog />
+      </div>
       <div className="flex items-center justify-between px-4 py-3 border-t">
         <UserButton afterSignOutUrl="/" />
         <ThemeToggle />
