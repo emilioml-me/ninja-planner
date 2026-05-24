@@ -296,8 +296,8 @@ export default function Tasks() {
   }, []);
 
   useEffect(() => {
-    window.addEventListener('plan-ninja:new-task', openNewTask);
-    return () => window.removeEventListener('plan-ninja:new-task', openNewTask);
+    window.addEventListener('ninja-planner:new-task', openNewTask);
+    return () => window.removeEventListener('ninja-planner:new-task', openNewTask);
   }, [openNewTask]);
 
   const createMutation = useMutation({

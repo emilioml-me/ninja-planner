@@ -44,7 +44,7 @@ export function SubscriptionBanner() {
         <span className="text-sm">
           {isExpired
             ? 'Your ninja-stack subscription has expired. Renew your code to continue without interruption.'
-            : 'Activate your ninja-stack subscription to ensure continued access to plan-ninja.'}
+            : 'Activate your ninja-stack subscription to ensure continued access to Ninja Planner.'}
         </span>
         <Button
           size="sm"

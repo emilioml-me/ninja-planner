@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-const STORAGE_KEY = 'plan-ninja:onboarded';
+const STORAGE_KEY = 'ninja-planner:onboarded';
 
 export function useOnboarding() {
   const [open, setOpen] = useState(() => {
@@ -100,7 +100,7 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
               <Rocket className="h-7 w-7 text-primary" />
             </div>
             <div>
-              <h2 className="text-xl font-bold">Welcome to plan-ninja, {firstName}!</h2>
+              <h2 className="text-xl font-bold">Welcome to Ninja Planner, {firstName}!</h2>
               <p className="text-sm text-muted-foreground mt-1">
                 Your team's command centre for tasks, revenue, roadmap, and weekly reviews.
                 Let's get you set up in 2 quick steps.
@@ -177,7 +177,7 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
               <h2 className="text-xl font-bold">Invite your team</h2>
               <p className="text-sm text-muted-foreground mt-1">
                 Team members are managed through your organisation in Clerk.
-                Invite them there and they'll appear in plan-ninja automatically.
+                Invite them there and they'll appear in Ninja Planner automatically.
               </p>
             </div>
             <div className="rounded-lg bg-muted/50 p-4 text-sm text-left space-y-1">
@@ -185,7 +185,7 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
               <ol className="list-decimal list-inside space-y-1 text-muted-foreground text-xs">
                 <li>Open the Clerk organisation switcher (top-left of most Clerk apps)</li>
                 <li>Go to <strong>Manage Organisation → Members</strong></li>
-                <li>Send email invites — they'll see plan-ninja on sign-in</li>
+                <li>Send email invites — they'll see Ninja Planner on sign-in</li>
               </ol>
             </div>
             <Button className="w-full gap-2" onClick={onComplete}>

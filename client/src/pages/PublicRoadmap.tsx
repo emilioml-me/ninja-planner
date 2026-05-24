@@ -26,8 +26,8 @@ const STATUS_META: Record<string, { label: string; dot: string }> = {
 
 const STATUS_ORDER = ['building', 'idea', 'live'];
 
-const VISITOR_KEY = 'plan-ninja:visitor_id';
-const VOTES_KEY   = (token: string) => `plan-ninja:votes:${token}`;
+const VISITOR_KEY = 'ninja-planner:visitor_id';
+const VOTES_KEY   = (token: string) => `ninja-planner:votes:${token}`;
 
 function getOrCreateVisitorId(): string {
   let id = localStorage.getItem(VISITOR_KEY);
@@ -229,7 +229,7 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
       {/* Footer */}
       <div className="border-t mt-12">
         <div className="max-w-5xl mx-auto px-6 py-4 flex justify-between items-center">
-          <p className="text-xs text-muted-foreground">Powered by plan-ninja</p>
+          <p className="text-xs text-muted-foreground">Powered by Ninja Planner</p>
           <p className="text-xs text-muted-foreground">Updates automatically</p>
         </div>
       </div>

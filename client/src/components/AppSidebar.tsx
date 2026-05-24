@@ -60,7 +60,7 @@ export function AppSidebar({ onClose }: AppSidebarProps) {
         <div className="h-8 w-8 rounded-md bg-primary flex items-center justify-center shrink-0">
           <Briefcase className="h-4 w-4 text-primary-foreground" />
         </div>
-        <span className="font-semibold text-sm flex-1">plan-ninja</span>
+        <span className="font-semibold text-sm flex-1">Ninja Planner</span>
         {onClose && (
           <Button
             variant="ghost"

@@ -56,7 +56,7 @@ export default function Billing() {
           Subscription
         </h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Manage your ninja-stack subscription for plan-ninja.
+          Manage your ninja-stack subscription for Ninja Planner.
         </p>
       </div>
 
@@ -97,7 +97,7 @@ export default function Billing() {
           <CardHeader className="pb-3">
             <CardTitle className="text-base">{isExpired ? 'Renew subscription' : 'Activate subscription'}</CardTitle>
             <CardDescription>
-              Enter your ninja-stack subscription code to {isExpired ? 'renew' : 'unlock'} plan-ninja.
+              Enter your ninja-stack subscription code to {isExpired ? 'renew' : 'unlock'} Ninja Planner.
               {' '}
               <a
                 href="https://ninja-core.com"

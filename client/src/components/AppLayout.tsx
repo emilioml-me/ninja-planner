@@ -36,7 +36,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     navigate('/tasks');
     // Small delay so Tasks page can mount before we try to open the dialog
     setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('plan-ninja:new-task'));
+      window.dispatchEvent(new CustomEvent('ninja-planner:new-task'));
     }, 100);
   };
 
@@ -68,7 +68,7 @@ export function AppLayout({ children }: AppLayoutProps) {
             <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(true)}>
               <Menu className="h-5 w-5" />
             </Button>
-            <span className="font-semibold text-sm">plan-ninja</span>
+            <span className="font-semibold text-sm">Ninja Planner</span>
           </div>
           <div className="flex items-center gap-1">
             <NotificationBell />
