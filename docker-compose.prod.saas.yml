@@ -1,11 +1,11 @@
 services:
   ninja-planner:
-    image: ghcr.io/emilioml-me/ninja-planner:latest
+    image: ghcr.io/emilioml-me/ninja-planner:sha-0000000
     container_name: ninja-planner
     restart: unless-stopped
-    env_file: /srv/secrets/plan-ninja.env
+    env_file: /srv/secrets/ninja-planner.env
     ports:
-      - "127.0.0.1:3206:3206"
+      - "127.0.0.1:3207:3206"
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3206/health || exit 1"]
       interval: 30s
