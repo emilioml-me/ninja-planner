@@ -931,16 +931,16 @@ export function TaskFormDialog({
   if (task) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-[580px]">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-[580px] flex flex-col max-h-[90vh]">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Edit Task</DialogTitle>
             <DialogDescription>Update the task details or leave a comment.</DialogDescription>
           </DialogHeader>
 
           <WatchersBar task={task} />
 
-          <Tabs defaultValue="details" className="mt-1">
-            <TabsList className="w-full">
+          <Tabs defaultValue="details" className="mt-1 flex flex-col flex-1 min-h-0 overflow-hidden">
+            <TabsList className="w-full shrink-0">
               <TabsTrigger value="details" className="flex-1">Details</TabsTrigger>
               <TabsTrigger value="checklist" className="flex-1 gap-1.5">
                 Checklist
@@ -965,10 +965,11 @@ export function TaskFormDialog({
               )}
             </TabsList>
 
+            <div className="flex-1 overflow-y-auto">
             {/* ── Details tab ─────────────────────────────────────────────── */}
             <TabsContent value="details" className="mt-4">
               <Form {...form}>
-                <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
+                <form id="task-edit-form" onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4 pb-2">
                   <FormField control={form.control} name="title" render={({ field }) => (
                     <FormItem>
                       <FormLabel>Title</FormLabel>
@@ -1140,12 +1141,6 @@ export function TaskFormDialog({
                     </FormItem>
                   )} />
 
-                  <DialogFooter>
-                    <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-                    <Button type="submit" disabled={isPending}>
-                      {isPending ? 'Saving...' : 'Update Task'}
-                    </Button>
-                  </DialogFooter>
                 </form>
               </Form>
             </TabsContent>
@@ -1178,7 +1173,7 @@ export function TaskFormDialog({
             {/* ── Activity tab ────────────────────────────────────────────── */}
             {activity.length > 0 && (
               <TabsContent value="activity" className="mt-4">
-                <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
+                <div className="space-y-2 pr-1">
                   {[...activity].reverse().map((entry) => (
                     <div key={entry.id} className="flex items-start gap-2 text-xs">
                       <div className="h-5 w-5 rounded-full bg-muted flex items-center justify-center shrink-0 mt-0.5 text-[10px] font-medium text-muted-foreground">
@@ -1195,7 +1190,15 @@ export function TaskFormDialog({
                 </div>
               </TabsContent>
             )}
+            </div>{/* end scrollable tab area */}
           </Tabs>
+
+          <DialogFooter className="shrink-0 border-t pt-4">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+            <Button type="submit" form="task-edit-form" disabled={isPending}>
+              {isPending ? 'Saving...' : 'Update Task'}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     );
