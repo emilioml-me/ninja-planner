@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
+import { safeFormat } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -185,7 +186,7 @@ export default function Changelog() {
                           </span>
                         )}
                         <span className="text-[10px] text-muted-foreground shrink-0">
-                          {format(new Date(task.completed_at), 'MMM d')}
+                          {safeFormat(task.completed_at, 'MMM d')}
                         </span>
                       </div>
                     ))}

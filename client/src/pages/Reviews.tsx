@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
+import { safeFormat } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -193,7 +194,7 @@ export default function Reviews() {
                   )}
                 >
                   <p className="text-sm font-medium">
-                    Week of {format(new Date(r.week_start + 'T00:00:00'), 'MMM d, yyyy')}
+                    Week of {safeFormat(r.week_start, 'MMM d, yyyy')}
                   </p>
                   <div className="flex items-center gap-2 mt-1">
                     {r.health_score && <HealthDots score={r.health_score} />}
@@ -215,7 +216,7 @@ export default function Reviews() {
                 <div className="flex items-center justify-between">
                   <div>
                     <h2 className="text-lg font-semibold">
-                      Week of {format(new Date(detail.week_start + 'T00:00:00'), 'MMMM d, yyyy')}
+                      Week of {safeFormat(detail.week_start, 'MMMM d, yyyy')}
                     </h2>
                     {detail.health_score && (
                       <div className="flex items-center gap-2 mt-1">

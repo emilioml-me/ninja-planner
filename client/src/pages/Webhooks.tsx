@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
+import { safeFormat } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -250,7 +251,7 @@ export default function Webhooks() {
               </CardHeader>
               <CardContent className="px-4 pb-3 pt-0">
                 <p className="text-xs text-muted-foreground mb-2">
-                  Added {format(new Date(ep.created_at), 'MMM d, yyyy')}
+                  Added {safeFormat(ep.created_at, 'MMM d, yyyy')}
                   {' · '}
                   <span className={ep.active ? 'text-green-600 dark:text-green-400' : ''}>
                     {ep.active ? 'Active' : 'Disabled'}

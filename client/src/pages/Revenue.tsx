@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
+import { safeFormat } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { StatCard } from '@/components/StatCard';
 import { Button } from '@/components/ui/button';
@@ -396,7 +397,7 @@ export default function Revenue() {
                 return (
                   <TableRow key={t.id}>
                     <TableCell className="font-medium">
-                      {format(new Date(t.period_start), 'MMM yyyy')}
+                      {safeFormat(t.period_start, 'MMM yyyy')}
                     </TableCell>
                     <TableCell>
                       <Badge variant={periodTypeColor[t.period_type] as 'default' | 'secondary' | 'outline'}>

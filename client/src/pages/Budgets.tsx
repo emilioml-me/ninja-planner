@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
+import { safeFormat } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 import { Button } from '@/components/ui/button';
@@ -322,7 +323,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
               entries.map((e) => (
                 <div key={e.id} className="flex items-center gap-2 text-xs group rounded px-1 py-1 hover:bg-muted/40">
                   <span className="text-muted-foreground w-20 shrink-0">
-                    {format(new Date(e.entry_date + 'T00:00:00'), 'MMM d')}
+                    {safeFormat(e.entry_date, 'MMM d')}
                   </span>
                   <span className="flex-1 truncate">{e.description}</span>
                   {e.category && (

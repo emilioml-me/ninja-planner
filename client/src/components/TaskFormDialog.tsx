@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { formatDistanceToNow } from 'date-fns';
+import { safeFromNow } from '@/lib/utils';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -272,7 +272,7 @@ function CommentsTab({ task, members }: { task: Task; members: WorkspaceMember[]
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="text-xs font-medium">{isOwn ? 'You' : name}</span>
                     <span className="text-[10px] text-muted-foreground shrink-0">
-                      {c.created_at ? formatDistanceToNow(new Date(c.created_at), { addSuffix: true }) : ''}
+                      {safeFromNow(c.created_at, { addSuffix: true })}
                     </span>
                   </div>
                   <p className="text-sm mt-0.5 whitespace-pre-wrap break-words">{c.body}</p>
@@ -1155,7 +1155,7 @@ export function TaskFormDialog({
                       <div className="flex-1 min-w-0">
                         <span className="text-foreground">{formatAction(entry.action, entry.payload)}</span>
                         <span className="text-muted-foreground ml-1.5">
-                          {entry.created_at ? `· ${formatDistanceToNow(new Date(entry.created_at), { addSuffix: true })}` : ''}
+                          {safeFromNow(entry.created_at, { addSuffix: true }) ? `· ${safeFromNow(entry.created_at, { addSuffix: true })}` : ''}
                         </span>
                       </div>
                     </div>

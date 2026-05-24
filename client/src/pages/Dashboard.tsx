@@ -2,6 +2,7 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { format, isBefore, isToday, startOfDay } from 'date-fns';
+import { safeFormat } from '@/lib/utils';
 import { Link } from 'wouter';
 import { useApiClient } from '@/lib/api';
 import { useIntegrationsSummary } from '@/hooks/use-integrations';
@@ -397,7 +398,7 @@ export default function Dashboard() {
                             isOverdue ? 'text-destructive font-medium' : 'text-muted-foreground',
                           )}>
                             {isOverdue
-                              ? `Due ${format(new Date(task.due_date!), 'MMM d')}`
+                              ? `Due ${safeFormat(task.due_date, 'MMM d')}`
                               : 'Due today'}
                           </span>
                         </div>
@@ -478,7 +479,7 @@ export default function Dashboard() {
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <p className="text-xs text-muted-foreground">
-                        Week of {format(new Date(lastReview.week_start + 'T00:00:00'), 'MMM d, yyyy')}
+                        Week of {safeFormat(lastReview.week_start, 'MMM d, yyyy')}
                       </p>
                       {lastReview.health_score && <HealthDots score={lastReview.health_score} />}
                     </div>
