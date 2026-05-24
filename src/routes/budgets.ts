@@ -14,8 +14,8 @@ const budgetSchema = z.object({
   description:   z.string().max(2000).optional(),
   target_amount: z.number().min(0),
   currency:      z.string().length(3).default('USD'),
-  period_start:  z.string().date().optional(),
-  period_end:    z.string().date().optional(),
+  period_start:  z.string().date().nullable().optional(),
+  period_end:    z.string().date().nullable().optional(),
   status:        z.enum(['active', 'closed']).optional(),
 });
 

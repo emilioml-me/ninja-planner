@@ -17,8 +17,8 @@ const createSchema = z.object({
   name:       z.string().min(1).max(255),
   goal:       z.string().optional(),
   status:     z.enum(SPRINT_STATUSES).optional(),
-  start_date: z.string().date().optional(),
-  end_date:   z.string().date().optional(),
+  start_date: z.string().date().nullable().optional(),
+  end_date:   z.string().date().nullable().optional(),
 });
 
 const updateSchema = createSchema.partial();

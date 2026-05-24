@@ -14,7 +14,7 @@ router.use(requireWorkspace);
 const createSchema = z.object({
   title:        z.string().min(1).max(500),
   description:  z.string().optional(),
-  due_date:     z.string().date().optional(),
+  due_date:     z.string().date().nullable().optional(),
 });
 
 const updateSchema = z.object({
