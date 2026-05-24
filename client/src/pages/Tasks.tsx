@@ -305,6 +305,7 @@ export default function Tasks() {
       apiRequest<Task>('POST', '/api/tasks', data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setDialogOpen(false);
       toast({ title: 'Task created' });
     },
@@ -316,6 +317,7 @@ export default function Tasks() {
       apiRequest<Task>('PATCH', `/api/tasks/${id}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setDialogOpen(false);
       setEditingTask(null);
       toast({ title: 'Task updated' });

@@ -711,11 +711,12 @@ function SprintTaskList({ sprintId, memberMap }: { sprintId: string; memberMap: 
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['/api/sprints', sprintId, 'tasks'] });
       qc.invalidateQueries({ queryKey: ['/api/sprints'] });
+      qc.invalidateQueries({ queryKey: ['/api/tasks'] });
     },
   });
 
   if (isLoading) return <Skeleton className="h-10 w-full" />;
-  if (tasks.length === 0) return <p className="text-xs text-muted-foreground pl-6">No tasks in this sprint. Assign tasks via the Tasks page.</p>;
+  if (tasks.length === 0) return <p className="text-xs text-muted-foreground pl-6">No tasks yet. Assign tasks via the task Edit dialog.</p>;
 
   return (
     <div className="space-y-1.5 pl-6">

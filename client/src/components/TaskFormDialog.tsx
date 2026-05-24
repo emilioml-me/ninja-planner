@@ -84,6 +84,7 @@ export interface Task {
 interface DependencyTask { id: string; title: string; status: string; priority: string; }
 interface TaskDependencies { blocked_by: DependencyTask[]; blocks: DependencyTask[]; }
 interface Epic { id: string; title: string; color: string; status: string; }
+interface Sprint { id: string; name: string; status: string; }
 
 const taskFormSchema = z.object({
   title: z.string().min(1, 'Title is required').max(500),
@@ -95,6 +96,7 @@ const taskFormSchema = z.object({
   assignee_clerk_id: z.string().optional(),
   recurrence_rule: z.enum(['daily', 'weekly', 'biweekly', 'monthly', '']).optional(),
   epic_id: z.string().optional(),
+  sprint_id: z.string().optional(),
   story_points: z.string().optional(), // stored as string in form, converted to int on submit
   start_date: z.string().optional(),
 });
@@ -844,10 +846,16 @@ export function TaskFormDialog({
   const { apiRequest } = useApiClient();
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
 
-  // Load available epics for the selector
+  // Load available epics and sprints for the selectors
   const { data: epics = [] } = useQuery<Epic[]>({
     queryKey: ['/api/epics'],
     queryFn: () => apiRequest('GET', '/api/epics'),
+    enabled: open,
+  });
+
+  const { data: sprints = [] } = useQuery<Sprint[]>({
+    queryKey: ['/api/sprints'],
+    queryFn: () => apiRequest('GET', '/api/sprints'),
     enabled: open,
   });
 
@@ -871,6 +879,7 @@ export function TaskFormDialog({
       assignee_clerk_id: '',
       recurrence_rule: '',
       epic_id: '',
+      sprint_id: '',
       story_points: '',
       start_date: '',
     },
@@ -888,6 +897,7 @@ export function TaskFormDialog({
         assignee_clerk_id: task?.assignee_clerk_id ?? '',
         recurrence_rule: (task?.recurrence_rule ?? '') as '' | 'daily' | 'weekly' | 'biweekly' | 'monthly',
         epic_id: task?.epic_id ?? '',
+        sprint_id: task?.sprint_id ?? '',
         story_points: task?.story_points != null ? String(task.story_points) : '',
         start_date: task?.start_date ? task.start_date.substring(0, 10) : '',
       });
@@ -910,6 +920,7 @@ export function TaskFormDialog({
       assignee_clerk_id: data.assignee_clerk_id || null,
       recurrence_rule: data.recurrence_rule || null,
       epic_id: data.epic_id || null,
+      sprint_id: data.sprint_id || null,
       story_points: sp != null && !isNaN(sp) ? sp : null,
       start_date: data.start_date ? data.start_date : null,
       checklist,
@@ -1074,6 +1085,24 @@ export function TaskFormDialog({
                   )} />
 
                   <div className="grid grid-cols-2 gap-4">
+                    {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 && (
+                      <FormField control={form.control} name="sprint_id" render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Sprint</FormLabel>
+                          <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
+                            <FormControl><SelectTrigger><SelectValue placeholder="No sprint" /></SelectTrigger></FormControl>
+                            <SelectContent>
+                              <SelectItem value="__none__">No sprint</SelectItem>
+                              {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').map((s) => (
+                                <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )} />
+                    )}
+
                     {epics.filter((e) => e.status !== 'archived').length > 0 && (
                       <FormField control={form.control} name="epic_id" render={({ field }) => (
                         <FormItem>
@@ -1283,6 +1312,24 @@ export function TaskFormDialog({
                 <FormMessage />
               </FormItem>
             )} />
+
+            {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 && (
+              <FormField control={form.control} name="sprint_id" render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Sprint</FormLabel>
+                  <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
+                    <FormControl><SelectTrigger><SelectValue placeholder="No sprint" /></SelectTrigger></FormControl>
+                    <SelectContent>
+                      <SelectItem value="__none__">No sprint</SelectItem>
+                      {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').map((s) => (
+                        <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )} />
+            )}
 
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
