@@ -48,7 +48,7 @@ function NotifItem({
           <p className="text-xs text-muted-foreground line-clamp-2">{notif.body}</p>
         )}
         <p className="text-[11px] text-muted-foreground">
-          {formatDistanceToNow(new Date(notif.created_at), { addSuffix: true })}
+          {notif.created_at ? formatDistanceToNow(new Date(notif.created_at), { addSuffix: true }) : ''}
         </p>
       </div>
       {unread && (

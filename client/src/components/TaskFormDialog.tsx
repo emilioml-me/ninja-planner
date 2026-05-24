@@ -272,7 +272,7 @@ function CommentsTab({ task, members }: { task: Task; members: WorkspaceMember[]
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="text-xs font-medium">{isOwn ? 'You' : name}</span>
                     <span className="text-[10px] text-muted-foreground shrink-0">
-                      {formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}
+                      {c.created_at ? formatDistanceToNow(new Date(c.created_at), { addSuffix: true }) : ''}
                     </span>
                   </div>
                   <p className="text-sm mt-0.5 whitespace-pre-wrap break-words">{c.body}</p>
