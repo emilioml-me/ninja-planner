@@ -1,6 +1,10 @@
 services:
   ninja-planner:
-    image: ghcr.io/emilioml-me/ninja-planner:sha-0000000
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY}
     container_name: ninja-planner
     restart: unless-stopped
     env_file: /srv/secrets/ninja-planner.env
