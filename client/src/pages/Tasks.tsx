@@ -29,6 +29,8 @@ import {
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 
+interface Sprint { id: string; name: string; status: string; }
+
 interface TaskTemplate {
   id: string;
   name: string;
@@ -110,6 +112,7 @@ function TaskListView({
   selectedIds,
   onToggleSelect,
   onToggleAll,
+  sprintMap = {},
 }: {
   tasks: Task[];
   onEdit: (task: Task) => void;
@@ -119,6 +122,7 @@ function TaskListView({
   selectedIds: Set<string>;
   onToggleSelect: (id: string) => void;
   onToggleAll: (ids: string[]) => void;
+  sprintMap?: Record<string, string>;
 }) {
   const now = new Date();
   const todayStart = startOfDay(now);
@@ -160,6 +164,7 @@ function TaskListView({
             <TableHead>Status</TableHead>
             <TableHead>Priority</TableHead>
             <TableHead>Assignee</TableHead>
+            <TableHead>Sprint</TableHead>
             <TableHead>Due</TableHead>
             <TableHead>Tags</TableHead>
             <TableHead className="w-10" />
@@ -207,6 +212,11 @@ function TaskListView({
                   ) : (
                     <span className="text-xs text-muted-foreground">—</span>
                   )}
+                </TableCell>
+                <TableCell>
+                  {task.sprint_id && sprintMap[task.sprint_id]
+                    ? <Badge variant="outline" className="text-xs font-normal">{sprintMap[task.sprint_id]}</Badge>
+                    : <span className="text-xs text-muted-foreground">—</span>}
                 </TableCell>
                 <TableCell>
                   {task.due_date ? (
@@ -288,6 +298,14 @@ export default function Tasks() {
     staleTime: 60_000,
   });
 
+  const { data: sprints = [] } = useQuery<Sprint[]>({
+    queryKey: ['/api/sprints'],
+    queryFn: () => apiRequest<Sprint[]>('GET', '/api/sprints'),
+    staleTime: 30_000,
+  });
+
+  const sprintMap = Object.fromEntries(sprints.map((s) => [s.id, s.name]));
+
   // Listen for command palette "new task" event
   const openNewTask = useCallback(() => {
     setEditingTask(null);
@@ -355,6 +373,7 @@ export default function Tasks() {
     },
     onSuccess: (_, { ids }) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setSelectedIds(new Set());
       toast({ title: `${ids.length} task${ids.length !== 1 ? 's' : ''} updated` });
     },
@@ -600,6 +619,7 @@ export default function Tasks() {
             selectedIds={selectedIds}
             onToggleSelect={toggleSelect}
             onToggleAll={toggleAll}
+            sprintMap={sprintMap}
           />
         )}
       </div>
@@ -664,6 +684,40 @@ export default function Tasks() {
                       })}
                     >
                       {m.display_name}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+
+            {/* Bulk sprint assign */}
+            {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-1.5 h-8">
+                    Sprint <ChevronDown className="h-3 w-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent>
+                  <DropdownMenuLabel>Assign to sprint</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => bulkUpdateMutation.mutate({
+                      ids: [...selectedIds],
+                      update: { sprint_id: null },
+                    })}
+                  >
+                    No sprint
+                  </DropdownMenuItem>
+                  {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').map((s) => (
+                    <DropdownMenuItem
+                      key={s.id}
+                      onClick={() => bulkUpdateMutation.mutate({
+                        ids: [...selectedIds],
+                        update: { sprint_id: s.id },
+                      })}
+                    >
+                      {s.name}
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuContent>
