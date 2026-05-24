@@ -1084,58 +1084,61 @@ export function TaskFormDialog({
                     </FormItem>
                   )} />
 
-                  <div className="grid grid-cols-2 gap-4">
-                    {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 && (
-                      <FormField control={form.control} name="sprint_id" render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Sprint</FormLabel>
-                          <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
-                            <FormControl><SelectTrigger><SelectValue placeholder="No sprint" /></SelectTrigger></FormControl>
-                            <SelectContent>
-                              <SelectItem value="__none__">No sprint</SelectItem>
-                              {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').map((s) => (
-                                <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <FormMessage />
-                        </FormItem>
-                      )} />
-                    )}
+                  {(sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 ||
+                    epics.filter((e) => e.status !== 'archived').length > 0) && (
+                    <div className="grid grid-cols-2 gap-4">
+                      {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 && (
+                        <FormField control={form.control} name="sprint_id" render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Sprint</FormLabel>
+                            <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
+                              <FormControl><SelectTrigger><SelectValue placeholder="No sprint" /></SelectTrigger></FormControl>
+                              <SelectContent>
+                                <SelectItem value="__none__">No sprint</SelectItem>
+                                {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').map((s) => (
+                                  <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <FormMessage />
+                          </FormItem>
+                        )} />
+                      )}
 
-                    {epics.filter((e) => e.status !== 'archived').length > 0 && (
-                      <FormField control={form.control} name="epic_id" render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Epic</FormLabel>
-                          <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
-                            <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
-                            <SelectContent>
-                              <SelectItem value="__none__">No epic</SelectItem>
-                              {epics.filter((e) => e.status !== 'archived').map((e) => (
-                                <SelectItem key={e.id} value={e.id}>
-                                  <span className="flex items-center gap-1.5">
-                                    <span className="h-2 w-2 rounded-full inline-block" style={{ backgroundColor: e.color }} />
-                                    {e.title}
-                                  </span>
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <FormMessage />
-                        </FormItem>
-                      )} />
-                    )}
+                      {epics.filter((e) => e.status !== 'archived').length > 0 && (
+                        <FormField control={form.control} name="epic_id" render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Epic</FormLabel>
+                            <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
+                              <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
+                              <SelectContent>
+                                <SelectItem value="__none__">No epic</SelectItem>
+                                {epics.filter((e) => e.status !== 'archived').map((e) => (
+                                  <SelectItem key={e.id} value={e.id}>
+                                    <span className="flex items-center gap-1.5">
+                                      <span className="h-2 w-2 rounded-full inline-block" style={{ backgroundColor: e.color }} />
+                                      {e.title}
+                                    </span>
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <FormMessage />
+                          </FormItem>
+                        )} />
+                      )}
+                    </div>
+                  )}
 
-                    <FormField control={form.control} name="story_points" render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Story Points</FormLabel>
-                        <FormControl>
-                          <Input type="number" min={0} max={144} placeholder="–" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )} />
-                  </div>
+                  <FormField control={form.control} name="story_points" render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Story Points</FormLabel>
+                      <FormControl>
+                        <Input type="number" min={0} max={144} placeholder="–" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )} />
 
                   <DialogFooter>
                     <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
