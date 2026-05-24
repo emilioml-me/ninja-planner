@@ -206,7 +206,9 @@ export default function Roadmap() {
   };
 
   const handleSubmit = (d: FormData) => {
-    editing ? updateMut.mutate(d) : createMut.mutate(d);
+    // Strip empty external_ref — backend rejects empty string as invalid URL
+    const payload: FormData = { ...d, external_ref: d.external_ref || undefined };
+    editing ? updateMut.mutate(payload) : createMut.mutate(payload);
   };
 
   const openShare = async () => {

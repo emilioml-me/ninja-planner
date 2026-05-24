@@ -1040,10 +1040,10 @@ export function TaskFormDialog({
                     <FormField control={form.control} name="assignee_clerk_id" render={({ field }) => (
                       <FormItem>
                         <FormLabel>Assignee</FormLabel>
-                        <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                        <Select onValueChange={(v) => field.onChange(v === '__unassigned__' ? '' : v)} value={field.value || '__unassigned__'}>
                           <FormControl><SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger></FormControl>
                           <SelectContent>
-                            <SelectItem value="">Unassigned</SelectItem>
+                            <SelectItem value="__unassigned__">Unassigned</SelectItem>
                             {members.map((m) => (
                               <SelectItem key={m.clerk_user_id} value={m.clerk_user_id}>
                                 {m.clerk_user_id === userId ? `${m.display_name} (me)` : m.display_name}
@@ -1059,10 +1059,10 @@ export function TaskFormDialog({
                   <FormField control={form.control} name="recurrence_rule" render={({ field }) => (
                     <FormItem>
                       <FormLabel>Recurrence</FormLabel>
-                      <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                      <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
                         <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
                         <SelectContent>
-                          <SelectItem value="">None</SelectItem>
+                          <SelectItem value="__none__">None</SelectItem>
                           <SelectItem value="daily">Daily</SelectItem>
                           <SelectItem value="weekly">Weekly</SelectItem>
                           <SelectItem value="biweekly">Every 2 weeks</SelectItem>
@@ -1078,10 +1078,10 @@ export function TaskFormDialog({
                       <FormField control={form.control} name="epic_id" render={({ field }) => (
                         <FormItem>
                           <FormLabel>Epic</FormLabel>
-                          <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                          <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
                             <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
                             <SelectContent>
-                              <SelectItem value="">No epic</SelectItem>
+                              <SelectItem value="__none__">No epic</SelectItem>
                               {epics.filter((e) => e.status !== 'archived').map((e) => (
                                 <SelectItem key={e.id} value={e.id}>
                                   <span className="flex items-center gap-1.5">
@@ -1155,7 +1155,7 @@ export function TaskFormDialog({
                       <div className="flex-1 min-w-0">
                         <span className="text-foreground">{formatAction(entry.action, entry.payload)}</span>
                         <span className="text-muted-foreground ml-1.5">
-                          · {formatDistanceToNow(new Date(entry.created_at), { addSuffix: true })}
+                          {entry.created_at ? `· ${formatDistanceToNow(new Date(entry.created_at), { addSuffix: true })}` : ''}
                         </span>
                       </div>
                     </div>
@@ -1251,10 +1251,10 @@ export function TaskFormDialog({
               <FormField control={form.control} name="assignee_clerk_id" render={({ field }) => (
                 <FormItem>
                   <FormLabel>Assignee</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                  <Select onValueChange={(v) => field.onChange(v === '__unassigned__' ? '' : v)} value={field.value || '__unassigned__'}>
                     <FormControl><SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger></FormControl>
                     <SelectContent>
-                      <SelectItem value="">Unassigned</SelectItem>
+                      <SelectItem value="__unassigned__">Unassigned</SelectItem>
                       {members.map((m) => (
                         <SelectItem key={m.clerk_user_id} value={m.clerk_user_id}>
                           {m.clerk_user_id === userId ? `${m.display_name} (me)` : m.display_name}
@@ -1270,10 +1270,10 @@ export function TaskFormDialog({
             <FormField control={form.control} name="recurrence_rule" render={({ field }) => (
               <FormItem>
                 <FormLabel>Recurrence</FormLabel>
-                <Select onValueChange={field.onChange} value={field.value ?? ''}>
+                <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
                   <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
                   <SelectContent>
-                    <SelectItem value="">None</SelectItem>
+                    <SelectItem value="__none__">None</SelectItem>
                     <SelectItem value="daily">Daily</SelectItem>
                     <SelectItem value="weekly">Weekly</SelectItem>
                     <SelectItem value="biweekly">Every 2 weeks</SelectItem>
