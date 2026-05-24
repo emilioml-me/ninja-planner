@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z }      from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool }             from '../config/db.js';
+import { clerkClient }      from '../config/clerk.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -28,15 +29,25 @@ router.post('/ticket', async (req, res, next) => {
       return res.status(503).json({ error: 'Support is not available right now. Please email support directly.' });
     }
 
-    // Look up the calling user's name + email from workspace_members
+    // Look up the calling user's name + email — DB first, Clerk as fallback
     const memberResult = await pool.query<{ display_name: string | null; email: string | null }>(
       `SELECT display_name, email FROM workspace_members
        WHERE workspace_id = $1 AND clerk_user_id = $2`,
       [req.workspace.id, req.auth.userId],
     );
-    const member = memberResult.rows[0];
+    let memberEmail = memberResult.rows[0]?.email ?? null;
+    let memberName  = memberResult.rows[0]?.display_name ?? null;
 
-    if (!member?.email) {
+    if (!memberEmail) {
+      // Fallback: fetch from Clerk (handles existing members before migration 024)
+      try {
+        const clerkUser = await clerkClient.users.getUser(req.auth.userId as string);
+        memberEmail = clerkUser.emailAddresses[0]?.emailAddress ?? null;
+        memberName  = memberName ?? ([clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(' ') || memberEmail);
+      } catch { /* best-effort */ }
+    }
+
+    if (!memberEmail) {
       return res.status(422).json({ error: 'Could not resolve your email address. Please contact support directly.' });
     }
 
@@ -52,8 +63,8 @@ router.post('/ticket', async (req, res, next) => {
         subject,
         body:          description,
         priority,
-        customerEmail: member.email,
-        customerName:  member.display_name ?? undefined,
+        customerEmail: memberEmail,
+        customerName:  memberName ?? undefined,
         tags:          ['ninja-planner'],
       }),
       signal: AbortSignal.timeout(10_000),

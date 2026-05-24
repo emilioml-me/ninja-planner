@@ -48,16 +48,29 @@ router.post('/clerk', async (req, res) => {
         break;
       }
 
-      case 'organizationMembership.created': {
+      case 'organizationMembership.created':
+      case 'organizationMembership.updated': {
         const d = event.data as {
           organization: { id: string };
-          public_user_data: { user_id: string };
+          public_user_data: {
+            user_id: string;
+            first_name: string | null;
+            last_name: string | null;
+            identifier: string | null;   // email in most cases
+            image_url: string | null;
+          };
           role: string;
         };
+        const pud = d.public_user_data;
+        const display_name =
+          [pud.first_name, pud.last_name].filter(Boolean).join(' ') || pud.identifier || null;
         await upsertMemberFromClerk({
-          clerkOrgId: d.organization.id,
-          clerkUserId: d.public_user_data.user_id,
-          role: d.role,
+          clerkOrgId:   d.organization.id,
+          clerkUserId:  pud.user_id,
+          role:         d.role,
+          display_name,
+          email:        pud.identifier ?? null,
+          avatar_url:   pud.image_url  ?? null,
         });
         break;
       }

@@ -1,4 +1,6 @@
 import { pool } from '../config/db.js';
+import { clerkClient } from '../config/clerk.js';
+import { logger } from '../config/logger.js';
 
 export interface Workspace {
   id: string;
@@ -14,6 +16,9 @@ export interface WorkspaceMember {
   workspace_id: string;
   clerk_user_id: string;
   role: string;
+  display_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
   created_at: Date;
 }
 
@@ -84,13 +89,54 @@ export async function upsertMemberFromClerk(data: {
   clerkOrgId: string;
   clerkUserId: string;
   role: string;
+  display_name?: string | null;
+  email?: string | null;
+  avatar_url?: string | null;
 }): Promise<void> {
   await pool.query(
-    `INSERT INTO workspace_members (workspace_id, clerk_user_id, role)
-     SELECT w.id, $2, $3 FROM workspaces w WHERE w.clerk_org_id = $1
-     ON CONFLICT (workspace_id, clerk_user_id) DO UPDATE SET role = EXCLUDED.role`,
-    [data.clerkOrgId, data.clerkUserId, data.role],
+    `INSERT INTO workspace_members (workspace_id, clerk_user_id, role, display_name, email, avatar_url)
+     SELECT w.id, $2, $3, $4, $5, $6 FROM workspaces w WHERE w.clerk_org_id = $1
+     ON CONFLICT (workspace_id, clerk_user_id) DO UPDATE
+       SET role         = EXCLUDED.role,
+           display_name = COALESCE(EXCLUDED.display_name, workspace_members.display_name),
+           email        = COALESCE(EXCLUDED.email,        workspace_members.email),
+           avatar_url   = COALESCE(EXCLUDED.avatar_url,   workspace_members.avatar_url)`,
+    [data.clerkOrgId, data.clerkUserId, data.role, data.display_name ?? null, data.email ?? null, data.avatar_url ?? null],
   );
+}
+
+/**
+ * Lazily backfill display_name/email/avatar_url for a workspace member.
+ * Call fire-and-forget (no await) — never throws.
+ */
+export async function syncMemberDisplayName(
+  workspaceId: string,
+  clerkUserId: string,
+): Promise<void> {
+  try {
+    const check = await pool.query<{ display_name: string | null }>(
+      'SELECT display_name FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+      [workspaceId, clerkUserId],
+    );
+    if (!check.rows[0] || check.rows[0].display_name !== null) return; // already populated
+
+    const user = await clerkClient.users.getUser(clerkUserId);
+    const display_name =
+      [user.firstName, user.lastName].filter(Boolean).join(' ') ||
+      user.emailAddresses[0]?.emailAddress ||
+      clerkUserId;
+    const email      = user.emailAddresses[0]?.emailAddress ?? null;
+    const avatar_url = user.imageUrl ?? null;
+
+    await pool.query(
+      `UPDATE workspace_members
+          SET display_name = $1, email = $2, avatar_url = $3
+        WHERE workspace_id = $4 AND clerk_user_id = $5`,
+      [display_name, email, avatar_url, workspaceId, clerkUserId],
+    );
+  } catch (err) {
+    logger.warn({ err, workspaceId, clerkUserId }, 'syncMemberDisplayName failed (non-fatal)');
+  }
 }
 
 export async function deleteMemberFromClerk(data: {
