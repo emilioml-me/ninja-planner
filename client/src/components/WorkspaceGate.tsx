@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useAuth } from '@clerk/clerk-react';
+import { useAuth, CreateOrganization } from '@clerk/clerk-react';
 import { Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useApiClient } from '@/lib/api';
@@ -28,16 +28,21 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
     staleTime: 5 * 60 * 1000,
   });
 
-  // No org selected — Clerk org selector handles this
+  // No org selected — show Clerk's built-in org creation UI
   if (!orgId) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center space-y-3 max-w-sm px-4">
-          <AlertTriangle className="h-10 w-10 text-yellow-500 mx-auto" />
-          <h2 className="text-lg font-semibold">No organisation selected</h2>
-          <p className="text-sm text-muted-foreground">
-            Please select or create an organisation in Clerk to continue.
-          </p>
+        <div className="flex flex-col items-center gap-6">
+          <div className="text-center space-y-1">
+            <h1 className="text-2xl font-bold">Welcome to Ninja Planner</h1>
+            <p className="text-sm text-muted-foreground">
+              Create a workspace to get started.
+            </p>
+          </div>
+          <CreateOrganization
+            afterCreateOrganizationUrl="/dashboard"
+            skipInvitationScreen
+          />
         </div>
       </div>
     );

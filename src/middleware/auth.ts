@@ -15,9 +15,12 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       secretKey: process.env.CLERK_SECRET_KEY,
     });
 
+    // Clerk v2 tokens nest org context under "o.id"; fall back to legacy "org_id"
+    const p = payload as Record<string, unknown>;
+    const orgObj = p.o as { id?: string } | null | undefined;
     req.auth = {
       userId: payload.sub,
-      orgId: (payload as Record<string, unknown>).org_id as string | null ?? null,
+      orgId: orgObj?.id ?? (p.org_id as string | null) ?? null,
       memberRole: null,
     };
 
