@@ -3,6 +3,7 @@ pipeline {
     agent {
         docker {
             image 'node:20-alpine'
+            // Mount docker socket so we can build/push images from inside the container
             args  '-v /var/run/docker.sock:/var/run/docker.sock -u root'
             reuseNode true
         }
@@ -23,29 +24,47 @@ pipeline {
 
     stages {
 
-        stage('Install') {
+        stage('Bootstrap') {
             steps {
+                // docker-cli + openssh-client not present in node:20-alpine by default
+                sh 'apk add --no-cache docker-cli openssh-client'
                 sh 'npm ci'
             }
         }
 
         stage('Full Test Suite') {
             parallel {
+                stage('Typecheck') {
+                    steps {
+                        sh 'npm run typecheck'
+                    }
+                }
+                stage('Backend Tests') {
+                    steps {
+                        sh 'npm test'
+                    }
+                }
                 stage('Build') {
                     steps {
-                        sh 'npm run build'
+                        // Build without a real Clerk key — catches TS/Vite errors in CI
+                        withEnv(['VITE_CLERK_PUBLISHABLE_KEY=pk_test_ci_placeholder']) {
+                            sh 'npm run build'
+                        }
                     }
                 }
             }
         }
 
-        stage('DB Migration Gate') {
+        stage('Pending Migrations') {
             steps {
-                echo '━━━ Drizzle migration diff ━━━'
-                sh 'npx drizzle-kit generate 2>&1 || echo "(no pending migrations)"'
-                echo '━━━ End of migration diff ━━━'
+                echo '━━━ Pending SQL migrations (will be applied automatically on startup) ━━━'
+                sh '''
+                    echo "Migration files in this release:"
+                    ls -1 migrations/*.sql | sort
+                '''
+                echo '━━━ End of migration list ━━━'
                 input(
-                    message: 'Review migration SQL above. Approve to proceed?',
+                    message: 'Review migration list above. Approve to build & deploy?',
                     ok: 'Approve & Deploy'
                 )
             }
@@ -64,11 +83,16 @@ pipeline {
                     )]) {
                         sh '''
                             echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+
                             docker build \
                                 --build-arg VITE_CLERK_PUBLISHABLE_KEY=${CLERK_PK} \
-                                -t ${IMAGE}:${VERSION} .
+                                -t ${IMAGE}:${VERSION} \
+                                -t ${IMAGE}:latest \
+                                .
+
                             docker push ${IMAGE}:${VERSION}
-                            echo "✅ Pushed ${IMAGE}:${VERSION}"
+                            docker push ${IMAGE}:latest
+                            echo "✅ Pushed ${IMAGE}:${VERSION} and ${IMAGE}:latest"
                         '''
                     }
                 }
@@ -87,8 +111,20 @@ pipeline {
 
         stage('Deploy to Production') {
             steps {
-                sshagent(credentials: [env.DEPLOY_CRED]) {
-                    sh "ssh -o StrictHostKeyChecking=no ubuntu@${DEPLOY_HOST} 'bash /srv/scripts/deploy.sh ${APP_NAME} ${VERSION}'"
+                // sshagent DSL is unavailable in the node:20-alpine Docker agent.
+                // Use withCredentials + manual key file instead.
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: env.DEPLOY_CRED,
+                    keyFileVariable: 'SSH_KEY'
+                )]) {
+                    sh """
+                        chmod 600 ${SSH_KEY}
+                        ssh -i ${SSH_KEY} \
+                            -o StrictHostKeyChecking=no \
+                            -o BatchMode=yes \
+                            ubuntu@${DEPLOY_HOST} \
+                            'bash /srv/scripts/deploy.sh ${APP_NAME} ${VERSION}'
+                    """
                 }
             }
         }
