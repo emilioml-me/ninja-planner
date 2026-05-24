@@ -362,14 +362,21 @@ export default function Budgets() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/budgets'] });
 
+  // Strip empty period strings — backend z.string().date() rejects ""
+  const sanitize = (d: BudgetForm) => ({
+    ...d,
+    period_start: d.period_start || undefined,
+    period_end:   d.period_end   || undefined,
+  });
+
   const createMut = useMutation({
-    mutationFn: (d: BudgetForm) => apiRequest('POST', '/api/budgets', d),
+    mutationFn: (d: BudgetForm) => apiRequest('POST', '/api/budgets', sanitize(d)),
     onSuccess: () => { invalidate(); setOpen(false); toast({ title: 'Budget created' }); },
     onError: () => toast({ title: 'Failed to create budget', variant: 'destructive' }),
   });
 
   const updateMut = useMutation({
-    mutationFn: (d: BudgetForm) => apiRequest('PATCH', `/api/budgets/${editing!.id}`, d),
+    mutationFn: (d: BudgetForm) => apiRequest('PATCH', `/api/budgets/${editing!.id}`, sanitize(d)),
     onSuccess: () => { invalidate(); setEditing(null); toast({ title: 'Budget updated' }); },
     onError: () => toast({ title: 'Failed to update budget', variant: 'destructive' }),
   });
