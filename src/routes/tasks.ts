@@ -45,8 +45,8 @@ const createSchema = z.object({
   description:        z.string().optional(),
   status:             z.enum(TASK_STATUSES).optional(),
   priority:           z.enum(TASK_PRIORITIES).optional(),
-  assignee_clerk_id:  z.string().optional(),
-  due_date:           z.string().date().optional(),
+  assignee_clerk_id:  z.string().nullable().optional(),   // null = unassigned
+  due_date:           z.string().date().nullable().optional(), // null = no due date
   start_date:         z.string().date().nullable().optional(),
   tags:               z.array(z.string()).optional(),
   position:           z.number().int().optional(),

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useApiClient } from '@/lib/api';
@@ -80,7 +80,8 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
 
   return (
     <Dialog open={open} onOpenChange={() => {/* block dismissal */}}>
-      <DialogContent className="sm:max-w-md" hideCloseButton>
+      <DialogContent className="sm:max-w-md" hideCloseButton aria-describedby={undefined}>
+        <DialogTitle className="sr-only">Get Started</DialogTitle>
         {/* Step indicators */}
         <div className="flex items-center justify-center gap-2 mb-2">
           {STEPS.map((s, i) => (

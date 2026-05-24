@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useQueryClient } from '@tanstack/react-query';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Search, LayoutDashboard, CheckSquare, TrendingUp, Map, ClipboardList, UsersRound, User, Plus, ArrowRight, Target, Zap, BarChart2, Plug, Webhook } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -142,7 +142,8 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="p-0 gap-0 sm:max-w-lg overflow-hidden" hideCloseButton>
+      <DialogContent className="p-0 gap-0 sm:max-w-lg overflow-hidden" hideCloseButton aria-describedby={undefined}>
+        <DialogTitle className="sr-only">Command Palette</DialogTitle>
         {/* Search input */}
         <div className="flex items-center gap-3 px-4 py-3 border-b">
           <Search className="h-4 w-4 text-muted-foreground shrink-0" />
