@@ -65,7 +65,7 @@ export default function Landing() {
             <div className="h-7 w-7 rounded-md bg-primary flex items-center justify-center">
               <Briefcase className="h-4 w-4 text-primary-foreground" />
             </div>
-            <span className="font-semibold text-sm tracking-tight">plan-ninja</span>
+            <span className="font-semibold text-sm tracking-tight">Ninja Planner</span>
           </div>
           <Button size="sm" onClick={() => setSignInOpen(true)}>
             Sign in
@@ -173,9 +173,9 @@ export default function Landing() {
             <div className="h-5 w-5 rounded bg-primary flex items-center justify-center">
               <Briefcase className="h-3 w-3 text-primary-foreground" />
             </div>
-            <span className="font-medium text-foreground">plan-ninja</span>
+            <span className="font-medium text-foreground">Ninja Planner</span>
           </div>
-          <span>© {new Date().getFullYear()} plan-ninja. All rights reserved.</span>
+          <span>© {new Date().getFullYear()} Ninja Planner. All rights reserved.</span>
         </div>
       </footer>
 

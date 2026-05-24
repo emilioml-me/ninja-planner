@@ -33,7 +33,7 @@ router.get('/openapi.json', (_req, res) => {
 router.use('/', swaggerUi.serve);
 router.get('/', swaggerUi.setup(undefined, {
   swaggerOptions: { url: '/api/docs/openapi.json' },
-  customSiteTitle: 'plan-ninja API Docs',
+  customSiteTitle: 'Ninja Planner API Docs',
 }));
 
 export default router;

@@ -54,7 +54,7 @@ router.post('/ticket', async (req, res, next) => {
         priority,
         customerEmail: member.email,
         customerName:  member.display_name ?? undefined,
-        tags:          ['plan-ninja'],
+        tags:          ['ninja-planner'],
       }),
       signal: AbortSignal.timeout(10_000),
     });
