@@ -939,7 +939,7 @@ export function TaskFormDialog({
 
           <WatchersBar task={task} />
 
-          <Tabs defaultValue="details" className="mt-1 flex flex-col flex-1 min-h-0 overflow-hidden">
+          <Tabs defaultValue="details" className="mt-1 flex flex-col flex-1 min-h-0">
             <TabsList className="w-full shrink-0">
               <TabsTrigger value="details" className="flex-1">Details</TabsTrigger>
               <TabsTrigger value="checklist" className="flex-1 gap-1.5">
@@ -965,7 +965,7 @@ export function TaskFormDialog({
               )}
             </TabsList>
 
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 overflow-y-auto min-h-0 pr-1">
             {/* ── Details tab ─────────────────────────────────────────────── */}
             <TabsContent value="details" className="mt-4">
               <Form {...form}>
