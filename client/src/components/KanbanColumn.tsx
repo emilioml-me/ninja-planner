@@ -174,6 +174,7 @@ export function KanbanColumn({
   onAddCard,
   onCardClick,
   onDeleteCard,
+  members = [],
 }: KanbanColumnProps) {
   const { setNodeRef } = useDroppable({ id: columnId });
   const sortedCards = [...cards].sort((a, b) => a.position - b.position);
