@@ -16,7 +16,7 @@ const STAGES = ['prospect', 'proposal', 'active', 'churned'] as const;
 const createSchema = z.object({
   name:           z.string().min(1).max(255),
   contact_name:   z.string().max(255).optional(),
-  contact_email:  z.string().email().optional(),
+  contact_email:  z.preprocess((v) => (v === '' ? undefined : v), z.string().email().optional()),
   stage:          z.enum(STAGES).optional(),
   mrr:            z.number().min(0).optional(),
   notes:          z.string().optional(),

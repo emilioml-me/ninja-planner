@@ -23,7 +23,7 @@ const entrySchema = z.object({
   description: z.string().min(1).max(500),
   amount:      z.number().max(1_000_000_000),  // L2: cap to prevent display overflows
   category:    z.string().max(100).optional(),
-  entry_date:  z.string().date().optional(),
+  entry_date:  z.string().date().nullable().optional(),
 });
 
 // ─── Budget CRUD ──────────────────────────────────────────────────────────────
