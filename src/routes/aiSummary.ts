@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
 
@@ -8,8 +9,17 @@ router.use(requireWorkspace);
 const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://10.10.2.20:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'qwen2.5:14b';
 
+// 5 AI requests per minute per IP — Ollama holds each request for up to 30 s
+const aiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many AI summary requests, please try again later' },
+});
+
 // POST /api/sprints/:sprintId/ai-summary
-router.post('/', async (req, res, next) => {
+router.post('/', aiLimiter, async (req, res, next) => {
   try {
     const { sprintId } = req.params as Record<string, string>;
     // Load sprint + task breakdown

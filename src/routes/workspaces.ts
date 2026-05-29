@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getWorkspacesForUser,
   updateWorkspace,
@@ -32,15 +33,11 @@ router.get('/:id', requireWorkspace, async (req, res) => {
   res.json(req.workspace);
 });
 
-// PATCH /api/workspaces/:id
-router.patch('/:id', requireWorkspace, async (req, res, next) => {
+// PATCH /api/workspaces/:id  [admin only — accepts org:admin and org:owner]
+router.patch('/:id', requireWorkspace, requireAdmin, async (req, res, next) => {
   try {
     if (req.params.id !== req.workspace.id) {
       res.status(403).json({ error: 'Access denied' });
-      return;
-    }
-    if (req.auth.memberRole !== 'org:admin') {
-      res.status(403).json({ error: 'Admin access required' });
       return;
     }
 

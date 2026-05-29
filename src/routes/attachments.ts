@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
+import rateLimit from 'express-rate-limit';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
 import { getUploadUrl, getDownloadUrl, deleteObject, verifyObjectMimeType } from '../lib/r2.js';
@@ -46,6 +47,15 @@ const confirmSchema = z.object({
   r2_key:    z.string().min(1).max(500),
 });
 
+// 10 presign requests per minute per IP — each can authorise a 50 MB upload
+const presignLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many upload requests, please try again later' },
+});
+
 async function verifyTask(taskId: string, workspaceId: string): Promise<boolean> {
   const r = await pool.query(
     'SELECT id FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
@@ -75,7 +85,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // POST /api/tasks/:taskId/attachments/presign — get upload URL
-router.post('/presign', async (req, res, next) => {
+router.post('/presign', presignLimiter, async (req, res, next) => {
   try {
     const { taskId } = req.params as Record<string, string>;
     if (!await verifyTask(taskId, req.workspace.id)) {
@@ -172,9 +182,9 @@ router.delete('/:id', async (req, res, next) => {
       res.status(403).json({ error: 'Not allowed' }); return;
     }
 
-    // Delete from R2 then DB
+    // Delete from R2 then DB — re-check workspace_id in the DELETE to close TOCTOU gap
     await deleteObject(att.rows[0].r2_key).catch(() => {/* best effort */});
-    await pool.query('DELETE FROM task_attachments WHERE id = $1', [req.params.id]);
+    await pool.query('DELETE FROM task_attachments WHERE id = $1 AND workspace_id = $2', [req.params.id, req.workspace.id]);
     res.status(204).send();
   } catch (err) { next(err); }
 });

@@ -137,16 +137,16 @@ router.get('/:id/tasks', async (req, res, next) => {
       `SELECT t.id, t.title, t.status, t.priority, t.assignee_clerk_id
        FROM roadmap_task_links rtl
        JOIN tasks t ON t.id = rtl.task_id
-       WHERE rtl.roadmap_item_id = $1 AND t.deleted_at IS NULL
+       WHERE rtl.roadmap_item_id = $1 AND t.workspace_id = $2 AND t.deleted_at IS NULL
        ORDER BY t.created_at`,
-      [req.params.id],
+      [req.params.id, req.workspace.id],
     );
     res.json(result.rows);
   } catch (err) { next(err); }
 });
 
-// POST /api/roadmap/:id/tasks  — link a task
-router.post('/:id/tasks', async (req, res, next) => {
+// POST /api/roadmap/:id/tasks  — link a task  [admin only]
+router.post('/:id/tasks', requireAdmin, async (req, res, next) => {
   try {
     const parsed = z.object({ taskId: z.string().uuid() }).safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -169,8 +169,8 @@ router.post('/:id/tasks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/roadmap/:id/tasks/:taskId  — unlink a task
-router.delete('/:id/tasks/:taskId', async (req, res, next) => {
+// DELETE /api/roadmap/:id/tasks/:taskId  — unlink a task  [admin only]
+router.delete('/:id/tasks/:taskId', requireAdmin, async (req, res, next) => {
   try {
     const result = await pool.query(
       `DELETE FROM roadmap_task_links

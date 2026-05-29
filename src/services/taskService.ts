@@ -265,8 +265,24 @@ const RECURRENCE_DAYS: Record<string, number> = {
  * Spawns a fresh copy of a recurring task when the original is completed.
  * The new task's due_date is bumped by the recurrence interval from today
  * (or from the original due_date if it's in the future).
+ * Includes a 2-minute dedup window to prevent double-spawn on client retries.
  */
-export async function spawnRecurringTask(task: Task): Promise<Task> {
+export async function spawnRecurringTask(task: Task): Promise<Task | null> {
+  // Dedup: skip if an active task with the same title+recurrence was already
+  // spawned from this workspace in the last 2 minutes (handles retry races)
+  const dedupCheck = await pool.query<{ id: string }>(
+    `SELECT id FROM tasks
+     WHERE workspace_id = $1
+       AND title = $2
+       AND recurrence_rule = $3
+       AND status <> 'done'
+       AND deleted_at IS NULL
+       AND created_at >= now() - interval '2 minutes'
+     LIMIT 1`,
+    [task.workspace_id, task.title, task.recurrence_rule],
+  );
+  if (dedupCheck.rows.length > 0) return null;
+
   const days = RECURRENCE_DAYS[task.recurrence_rule!] ?? 7;
   const base = task.due_date ? new Date(task.due_date) : new Date();
   // If the original due_date has already passed, bump from today instead

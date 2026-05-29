@@ -63,6 +63,10 @@ router.post('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, next)
       return;
     }
     const ipHash = hashIp(req.ip);
+    if (!ipHash) {
+      res.status(400).json({ error: 'Unable to process vote: client IP could not be determined' });
+      return;
+    }
     const voteCount = await addRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash);
     if (voteCount === null) {
       res.status(404).json({ error: 'Item not found' });
@@ -88,6 +92,10 @@ router.delete('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, nex
       return;
     }
     const ipHash = hashIp(req.ip);
+    if (!ipHash) {
+      res.status(400).json({ error: 'Unable to process vote: client IP could not be determined' });
+      return;
+    }
     const voteCount = await removeRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash);
     if (voteCount === null) {
       res.status(404).json({ error: 'Item not found' });
