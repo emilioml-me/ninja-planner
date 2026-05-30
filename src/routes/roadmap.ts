@@ -16,6 +16,12 @@ router.use(requireWorkspace);
 
 const STATUSES = ['idea', 'building', 'live', 'archived'] as const;
 
+// M5: Validate filter query params — enum check on status, length cap on phase
+const filterSchema = z.object({
+  status: z.enum(STATUSES).optional(),
+  phase:  z.string().max(100).optional(),
+});
+
 const createSchema = z.object({
   title:        z.string().min(1).max(500),
   description:  z.string().optional(),
@@ -30,10 +36,12 @@ const updateSchema = createSchema.partial();
 // GET /api/roadmap
 router.get('/', async (req, res, next) => {
   try {
-    const filters = {
-      status: req.query.status as string | undefined,
-      phase:  req.query.phase  as string | undefined,
-    };
+    const parsed = filterSchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const filters = parsed.data;
     const items = await getRoadmap(req.workspace.id, filters);
     res.json(items);
   } catch (err) {

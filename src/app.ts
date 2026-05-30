@@ -77,7 +77,9 @@ export function createApp() {
     },
   }));
 
-  app.use(cors({ origin: process.env.ALLOWED_ORIGIN, credentials: true }));
+  // M2: Fall back to false (block all cross-origin) rather than undefined (allow all)
+  // when ALLOWED_ORIGIN is not set — prevents wide-open CORS in misconfigured deploys.
+  app.use(cors({ origin: process.env.ALLOWED_ORIGIN ?? false, credentials: true }));
 
   app.use(rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
@@ -120,8 +122,10 @@ export function createApp() {
   app.use('/api/sprints/:sprintId/ai-summary',    aiSummaryRouter);
   app.use('/api/support',        supportRouter);
   app.use('/api/ninja-stack',    ninjaStackRouter);
-  // API docs — available in dev; disable in prod if desired
-  app.use('/api/docs',           docsRouter);
+  // M3: API docs only in non-production — avoids exposing the full OpenAPI schema publicly
+  if (process.env.NODE_ENV !== 'production') {
+    app.use('/api/docs', docsRouter);
+  }
 
   if (process.env.NODE_ENV === 'production') {
     const __dirname = dirname(fileURLToPath(import.meta.url));

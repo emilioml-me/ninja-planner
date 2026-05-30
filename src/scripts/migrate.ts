@@ -56,7 +56,7 @@ async function run() {
       const entries = await readdir(MIGRATIONS_DIR);
       files = entries.filter((f) => f.endsWith('.sql')).sort();
     } catch (err) {
-      console.error(`[migrate] Cannot read migrations directory: ${MIGRATIONS_DIR}`, err);
+      console.error('[migrate] Cannot read migrations directory: ' + MIGRATIONS_DIR, err);
       process.exit(1);
     }
 
@@ -92,7 +92,7 @@ async function run() {
         ran++;
       } catch (err) {
         await client.query('ROLLBACK');
-        console.error(`[migrate] FAILED ${file}`, err);
+        console.error('[migrate] FAILED ' + file, err);
         process.exit(1);
       }
     }
