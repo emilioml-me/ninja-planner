@@ -15,6 +15,43 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { SeoHead } from '@/components/SeoHead';
+import { buildSoftwareApp, buildFAQ } from '@/lib/structured-data';
+
+const FAQ_ITEMS = [
+  {
+    question: '¿Que es Plan Ninja y para quien esta pensado?',
+    answer: 'Plan Ninja es un planificador de equipo y dashboard empresarial diseñado para pymes y equipos en Mexico y LATAM. Centraliza tareas, metas, roadmap y metricas de negocio en un solo workspace.',
+  },
+  {
+    question: '¿Como ayuda Plan Ninja a organizar a mi equipo?',
+    answer: 'Con tableros Kanban, asignacion de tareas, seguimiento de sprints y un dashboard compartido, todo el equipo ve el trabajo pendiente, los avances y los bloqueos en tiempo real.',
+  },
+  {
+    question: '¿Puedo monitorear las metricas de negocio desde Plan Ninja?',
+    answer: 'Si. El dashboard centraliza KPIs como MRR, pipeline de ventas y avance hacia metas. Se conecta con tu CRM para mantener los datos actualizados automaticamente.',
+  },
+  {
+    question: '¿Plan Ninja tiene una version gratuita?',
+    answer: 'Si. Puedes empezar gratis con un workspace para tu equipo, tableros ilimitados y acceso a todas las funciones principales. Los planes de pago desbloquean integraciones avanzadas y mas miembros.',
+  },
+  {
+    question: '¿Plan Ninja funciona para equipos remotos o hibridos?',
+    answer: 'Absolutamente. Plan Ninja es 100% web, por lo que tu equipo puede acceder desde cualquier lugar. Las revisiones semanales y el board de tareas mantienen a todos alineados sin importar donde esten.',
+  },
+];
+
+const STRUCTURED_DATA = [
+  buildSoftwareApp({
+    name: 'Plan Ninja',
+    url: 'https://plan-ninja.com',
+    description: 'Planificador de equipo y dashboard empresarial para pymes en Mexico y LATAM.',
+    applicationCategory: 'ProductivityApplication',
+    price: '0',
+    priceCurrency: 'MXN',
+  }),
+  buildFAQ(FAQ_ITEMS),
+];
 
 const FEATURES = [
   {
@@ -58,6 +95,12 @@ export default function Landing() {
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
+      <SeoHead
+        title="Planificador de Equipo y Dashboard Empresarial"
+        description="Gestiona tareas, proyectos y metricas de tu negocio en un solo lugar. Dashboard para equipos y pymes en Mexico. Sin complicaciones."
+        canonical="https://plan-ninja.com/"
+        structuredData={STRUCTURED_DATA}
+      />
       {/* Navbar */}
       <header className="sticky top-0 z-50 border-b bg-background/80 backdrop-blur-sm">
         <div className="max-w-6xl mx-auto flex items-center justify-between px-6 h-14">

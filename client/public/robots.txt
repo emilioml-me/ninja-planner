@@ -1,0 +1,37 @@
+User-agent: *
+Allow: /
+
+# Auth routes — no SEO value
+Disallow: /login
+Disallow: /register
+Disallow: /sign-in
+Disallow: /sign-up
+Disallow: /invite/
+Disallow: /forgot-password
+Disallow: /reset-password
+
+# App / dashboard routes — behind auth, no SEO value
+Disallow: /dashboard/
+Disallow: /my-tasks
+Disallow: /tasks
+Disallow: /revenue
+Disallow: /roadmap
+Disallow: /reviews
+Disallow: /workload
+Disallow: /goals
+Disallow: /sprints
+Disallow: /epics
+Disallow: /budgets
+Disallow: /changelog
+Disallow: /timeline
+Disallow: /members
+Disallow: /integrations
+Disallow: /webhooks
+Disallow: /settings/
+Disallow: /admin/
+
+# API routes
+Disallow: /api/
+
+# Sitemap location
+Sitemap: https://plan-ninja.com/sitemap.xml
