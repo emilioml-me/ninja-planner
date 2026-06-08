@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
-import { requireAdmin } from '../middleware/requireAdmin.js';
+import { requireAdmin, ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 
 const router = Router();
@@ -158,7 +158,6 @@ router.post('/:id/entries', async (req, res, next) => {
 // DELETE /api/budgets/:id/entries/:entryId
 router.delete('/:id/entries/:entryId', async (req, res, next) => {
   try {
-    const ADMIN_ROLES = new Set(['org:admin', 'org:owner']);
     const isAdmin = ADMIN_ROLES.has(req.auth.memberRole ?? '');
     const query = isAdmin
       ? 'DELETE FROM budget_entries WHERE id = $1 AND budget_id = $2 AND workspace_id = $3'

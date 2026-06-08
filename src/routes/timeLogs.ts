@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 import {
   getTimeLogs, addTimeLog, deleteTimeLog,
@@ -9,8 +10,6 @@ import {
 // mergeParams: true — :taskId comes from the parent tasks router
 const router = Router({ mergeParams: true });
 router.use(requireWorkspace);
-
-const ADMIN_ROLES = new Set(['org:admin', 'org:owner']);
 
 const createSchema = z.object({
   minutes: z.number().int().min(1).max(14400),

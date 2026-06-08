@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 
-const ADMIN_ROLES = new Set(['org:admin', 'org:owner']);
+export const ADMIN_ROLES = new Set(['org:admin', 'org:owner']);
 
 /**
  * Middleware that rejects requests from non-admin workspace members with 403.

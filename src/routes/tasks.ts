@@ -18,11 +18,10 @@ import { getWorkload } from '../services/commentService.js';
 import { pool } from '../config/db.js';
 import { createNotification } from '../services/notificationService.js';
 import { fireWebhooks } from '../services/webhookService.js';
-import { getGoalProgressForTask } from '../services/goalService.js';
+import { checkAndNotifyGoalMilestones } from '../services/goalService.js';
 import {
   sendTaskAssignedEmail,
   sendDueDateReminderEmail,
-  sendGoalMilestoneEmail,
   resolveClerkEmail,
 } from '../services/emailService.js';
 
@@ -201,6 +200,15 @@ router.put('/capacity/:memberId', requireAdmin, async (req, res, next) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
+    // Verify the target user is actually a member of this workspace before writing.
+    const memberCheck = await pool.query(
+      'SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+      [req.workspace.id, req.params.memberId],
+    );
+    if (memberCheck.rows.length === 0) {
+      res.status(404).json({ error: 'Member not found in this workspace' }); return;
+    }
+
     await pool.query(
       `INSERT INTO member_capacity (workspace_id, user_clerk_id, capacity_points)
        VALUES ($1, $2, $3)
@@ -370,9 +378,12 @@ router.patch('/:id', async (req, res, next) => {
         return;
       }
     }
-    // H3: capture pre-update assignee to detect actual changes (prevent spurious assignment emails)
-    const prevTask = await getTaskById(req.params.id, req.workspace.id);
-    const prevAssigneeClerkId = prevTask?.task.assignee_clerk_id ?? null;
+    // Lightweight read — only the field we need, avoids loading the full activity log.
+    const prevRow = await pool.query<{ assignee_clerk_id: string | null }>(
+      'SELECT assignee_clerk_id FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
+      [req.params.id, req.workspace.id],
+    );
+    const prevAssigneeClerkId = prevRow.rows[0]?.assignee_clerk_id ?? null;
     const task = await updateTask(req.params.id, req.workspace.id, parsed.data);
     if (!task) {
       res.status(404).json({ error: 'Task not found' });
@@ -444,63 +455,11 @@ router.patch('/:id', async (req, res, next) => {
 
     // Goal milestone notifications — when task marked done, check 50%/100% crossings
     if (parsed.data.status === 'done') {
-      getGoalProgressForTask(task.id, req.workspace.id).then((goals) => {
-        for (const goal of goals) {
-          if (goal.total_tasks === 0) continue;
-          const pct = goal.done_tasks / goal.total_tasks;
-          const prevPct = (goal.done_tasks - 1) / goal.total_tasks;
-          const crossed50  = pct >= 0.5 && prevPct < 0.5;
-          const crossed100 = goal.done_tasks === goal.total_tasks && goal.done_tasks > 0;
-
-          if (crossed100) {
-            // Dedup: don't re-notify if a 100% milestone notification was sent for this goal in the last 24h
-            pool.query(
-              `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
-               SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM notifications
-                 WHERE workspace_id = $1 AND recipient_clerk_id = $2
-                   AND type = 'goal_milestone' AND body = $4
-                   AND created_at > NOW() - INTERVAL '24 hours'
-               )`,
-              [req.workspace.id, goal.created_by, `🎉 Goal complete: "${goal.title}"`, `${goal.id}:100`],
-            ).catch(() => {});
-            resolveClerkEmail(goal.created_by).then((user) => {
-              if (!user) return;
-              return sendGoalMilestoneEmail({
-                to: user.email,
-                recipientName: user.name,
-                goalTitle: goal.title,
-                milestone: '100%',
-                workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-              });
-            }).catch(() => {});
-          } else if (crossed50) {
-            // Dedup: don't re-notify if a 50% milestone notification was sent for this goal in the last 24h
-            pool.query(
-              `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
-               SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM notifications
-                 WHERE workspace_id = $1 AND recipient_clerk_id = $2
-                   AND type = 'goal_milestone' AND body = $4
-                   AND created_at > NOW() - INTERVAL '24 hours'
-               )`,
-              [req.workspace.id, goal.created_by, `Halfway there on "${goal.title}" (50%)`, `${goal.id}:50`],
-            ).catch(() => {});
-            resolveClerkEmail(goal.created_by).then((user) => {
-              if (!user) return;
-              return sendGoalMilestoneEmail({
-                to: user.email,
-                recipientName: user.name,
-                goalTitle: goal.title,
-                milestone: '50%',
-                workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-              });
-            }).catch(() => {});
-          }
-        }
-      }).catch(() => {});
+      checkAndNotifyGoalMilestones(
+        task.id,
+        req.workspace.id,
+        process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+      );
     }
 
     // Notify watchers (fire-and-forget, skip the user who made the update)

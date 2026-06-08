@@ -3,14 +3,14 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
+import { logger } from '../config/logger.js';
 import { getUploadUrl, getDownloadUrl, deleteObject, verifyObjectMimeType } from '../lib/r2.js';
 
 // mergeParams: true — :taskId comes from the parent tasks router
 const router = Router({ mergeParams: true });
 router.use(requireWorkspace);
-
-const ADMIN_ROLES   = new Set(['org:admin', 'org:owner']);
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 const ALLOWED_MIME  = new Set([
   'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -129,8 +129,11 @@ router.post('/', async (req, res, next) => {
     // C2: Verify the object's actual Content-Type matches the declared MIME
     const mimeOk = await verifyObjectMimeType(r2_key, mime_type);
     if (!mimeOk) {
-      // Object content-type mismatch — delete the orphaned object and reject
-      await deleteObject(r2_key).catch(() => {});
+      // Object content-type mismatch — delete the orphaned object and reject.
+      // Log on failure so ops can manually clean up the orphaned R2 object.
+      await deleteObject(r2_key).catch((err) => {
+        logger.error({ err, r2_key }, 'Failed to delete orphaned R2 object after MIME rejection — manual cleanup required');
+      });
       res.status(400).json({ error: 'Uploaded file MIME type does not match the declared type.' }); return;
     }
 

@@ -1,4 +1,7 @@
 import { pool } from '../config/db.js';
+import { createNotification } from './notificationService.js';
+import { resolveClerkEmail, sendGoalMilestoneEmail } from './emailService.js';
+import { logger } from '../config/logger.js';
 
 export interface Goal {
   id: string;
@@ -159,4 +162,68 @@ export async function removeGoalLink(
     [goalId, workspaceId, entityId],
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+// ─── milestone notifications ─────────────────────────────────────────────────
+
+async function _notifyGoalMilestone(
+  workspaceId: string,
+  goal: { id: string; title: string; created_by: string },
+  milestone: '50%' | '100%',
+  workspaceUrl: string,
+): Promise<void> {
+  const dedupBody = `${goal.id}:${milestone === '100%' ? '100' : '50'}`;
+  const title = milestone === '100%'
+    ? `Goal complete: "${goal.title}"`
+    : `Halfway there on "${goal.title}" (50%)`;
+
+  await pool.query(
+    `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
+     SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM notifications
+       WHERE workspace_id = $1 AND recipient_clerk_id = $2
+         AND type = 'goal_milestone' AND body = $4
+         AND created_at > NOW() - INTERVAL '24 hours'
+     )`,
+    [workspaceId, goal.created_by, title, dedupBody],
+  );
+
+  const user = await resolveClerkEmail(goal.created_by);
+  if (user) {
+    await sendGoalMilestoneEmail({
+      to: user.email,
+      recipientName: user.name,
+      goalTitle: goal.title,
+      milestone,
+      workspaceUrl,
+    });
+  }
+}
+
+/**
+ * After a task is marked done, check all linked goals for 50%/100% milestone
+ * crossings and fire dedup-guarded notifications + emails.
+ * Fire-and-forget — never throws.
+ */
+export function checkAndNotifyGoalMilestones(
+  taskId: string,
+  workspaceId: string,
+  workspaceUrl: string,
+): void {
+  getGoalProgressForTask(taskId, workspaceId).then(async (goals) => {
+    for (const goal of goals) {
+      if (goal.total_tasks === 0) continue;
+      const pct     = goal.done_tasks / goal.total_tasks;
+      const prevPct = (goal.done_tasks - 1) / goal.total_tasks;
+
+      if (goal.done_tasks === goal.total_tasks && goal.done_tasks > 0) {
+        await _notifyGoalMilestone(workspaceId, goal, '100%', workspaceUrl);
+      } else if (pct >= 0.5 && prevPct < 0.5) {
+        await _notifyGoalMilestone(workspaceId, goal, '50%', workspaceUrl);
+      }
+    }
+  }).catch((err) => {
+    logger.warn({ err, taskId, workspaceId }, 'checkAndNotifyGoalMilestones failed');
+  });
 }

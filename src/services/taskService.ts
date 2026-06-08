@@ -17,6 +17,7 @@ export interface Task {
   epic_id: string | null;
   recurrence_rule: string | null;
   story_points: number | null;
+  spawned_from_id: string | null;
   deleted_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -90,8 +91,8 @@ export async function createTask(
     description?: string;
     status?: string;
     priority?: string;
-    assignee_clerk_id?: string;
-    due_date?: string;
+    assignee_clerk_id?: string | null;
+    due_date?: string | null;
     tags?: string[];
     position?: number;
     sprint_id?: string | null;
@@ -99,13 +100,14 @@ export async function createTask(
     recurrence_rule?: string | null;
     story_points?: number | null;
     checklist?: { id: string; text: string; done: boolean }[];
+    spawned_from_id?: string | null;
   },
   createdBy: string,
 ): Promise<Task> {
   const result = await pool.query<Task>(
     `INSERT INTO tasks
-       (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, sprint_id, epic_id, recurrence_rule, story_points, checklist)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, sprint_id, epic_id, recurrence_rule, story_points, checklist, spawned_from_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      RETURNING *`,
     [
       workspaceId,
@@ -123,6 +125,7 @@ export async function createTask(
       data.recurrence_rule ?? null,
       data.story_points ?? null,
       JSON.stringify(data.checklist ?? []),
+      data.spawned_from_id ?? null,
     ],
   );
   return result.rows[0];
@@ -268,18 +271,17 @@ const RECURRENCE_DAYS: Record<string, number> = {
  * Includes a 2-minute dedup window to prevent double-spawn on client retries.
  */
 export async function spawnRecurringTask(task: Task): Promise<Task | null> {
-  // Dedup: skip if an active task with the same title+recurrence was already
-  // spawned from this workspace in the last 2 minutes (handles retry races)
+  // Dedup: skip if a task already spawned from this specific task exists within
+  // the last 2 minutes — prevents double-spawn on client retries without the
+  // false-positive risk of matching tasks that share a title and recurrence rule.
   const dedupCheck = await pool.query<{ id: string }>(
     `SELECT id FROM tasks
      WHERE workspace_id = $1
-       AND title = $2
-       AND recurrence_rule = $3
-       AND status <> 'done'
+       AND spawned_from_id = $2
        AND deleted_at IS NULL
        AND created_at >= now() - interval '2 minutes'
      LIMIT 1`,
-    [task.workspace_id, task.title, task.recurrence_rule],
+    [task.workspace_id, task.id],
   );
   if (dedupCheck.rows.length > 0) return null;
 
@@ -299,11 +301,12 @@ export async function spawnRecurringTask(task: Task): Promise<Task | null> {
       description:       task.description ?? undefined,
       status:            'todo',
       priority:          task.priority,
-      assignee_clerk_id: task.assignee_clerk_id ?? undefined,
+      assignee_clerk_id: task.assignee_clerk_id ?? null,
       due_date:          newDueDate,
       tags:              task.tags,
       position:          0,
       recurrence_rule:   task.recurrence_rule,
+      spawned_from_id:   task.id,
     },
     task.created_by,
   );

@@ -1,19 +1,7 @@
 import { createHmac, randomBytes } from 'crypto';
-import { lookup } from 'dns/promises';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
-
-// Mirrors the SSRF check in webhook-endpoints.ts — applied at delivery time to catch DNS rebinding.
-const PRIVATE_IP_RE = /^(127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|::1$|fd[0-9a-f]{2}:|0\.0\.0\.0)$/i;
-
-async function resolvedIpIsSafe(hostname: string): Promise<boolean> {
-  try {
-    const { address } = await lookup(hostname);
-    return !PRIVATE_IP_RE.test(address);
-  } catch {
-    return false; // DNS failure or invalid hostname — treat as unsafe
-  }
-}
+import { resolvedIpIsSafe } from '../lib/ssrf.js';
 
 export interface WebhookEndpoint {
   id: string;
