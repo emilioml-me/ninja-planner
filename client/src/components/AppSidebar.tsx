@@ -21,6 +21,13 @@ import {
   History,
   CalendarDays,
   CreditCard,
+  LineChart,
+  FileText,
+  Calendar,
+  Key,
+  Settings2,
+  Link2,
+  Copy,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -40,10 +47,18 @@ const NAV = [
   { href: '/changelog',    label: 'Changelog',     icon: History      },
   { href: '/timeline',     label: 'Timeline',      icon: CalendarDays },
   { href: '/workload',     label: 'Workload',      icon: BarChart2    },
-  { href: '/members',      label: 'Team',          icon: UsersRound },
-  { href: '/integrations', label: 'Integrations',  icon: Plug },
-  { href: '/webhooks',     label: 'Webhooks',       icon: Webhook },
-  { href: '/settings/billing', label: 'Billing',   icon: CreditCard },
+  { href: '/analytics',     label: 'Analytics',     icon: LineChart },
+  { href: '/calendar',      label: 'Calendar',      icon: Calendar },
+  { href: '/meeting-notes', label: 'Meeting Notes', icon: FileText },
+  { href: '/automations',   label: 'Automations',   icon: Zap },
+  { href: '/members',       label: 'Team',          icon: UsersRound },
+  { href: '/integrations',  label: 'Integrations',  icon: Plug },
+  { href: '/webhooks',      label: 'Webhooks',       icon: Webhook },
+  { href: '/sprint-templates',        label: 'Sprint Templates', icon: Copy },
+  { href: '/settings/api-keys',       label: 'API Keys',         icon: Key },
+  { href: '/settings/custom-fields',  label: 'Custom Fields',    icon: Settings2 },
+  { href: '/settings/guest-links',    label: 'Guest Links',      icon: Link2 },
+  { href: '/settings/billing',        label: 'Billing',          icon: CreditCard },
 ];
 
 interface AppSidebarProps {

@@ -24,7 +24,7 @@ import {
 } from '@/components/ui/dialog';
 import {
   Plus, Search, X, LayoutGrid, List, MoreVertical, Pencil, Trash2, Clock, Calendar,
-  CheckSquare, ChevronDown, Download, FileText,
+  CheckSquare, ChevronDown, Download, FileText, Upload,
 } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
@@ -283,6 +283,9 @@ export default function Tasks() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importCsv, setImportCsv] = useState('');
+  const [importResult, setImportResult] = useState<{ imported: number; skipped: number } | null>(null);
 
   const { data: tasks = [], isLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
@@ -391,6 +394,16 @@ export default function Tasks() {
       toast({ title: `${ids.length} task${ids.length !== 1 ? 's' : ''} deleted` });
     },
     onError: (err: Error) => toast({ title: 'Bulk delete failed', description: err.message, variant: 'destructive' }),
+  });
+
+  const importMutation = useMutation({
+    mutationFn: (csv: string) => apiRequest<{ imported: number; skipped: number }>('POST', '/api/tasks/import', { csv }),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      setImportResult(res);
+      setImportCsv('');
+    },
+    onError: (err: Error) => toast({ title: 'Import failed', description: err.message, variant: 'destructive' }),
   });
 
   const toggleSelect = (id: string) => {
@@ -550,6 +563,15 @@ export default function Tasks() {
           >
             <Download className="h-4 w-4" />
             <span className="hidden sm:inline">Export</span>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-2"
+            onClick={() => { setImportOpen(true); setImportResult(null); }}
+          >
+            <Upload className="h-4 w-4" />
+            <span className="hidden sm:inline">Import</span>
           </Button>
           {templates.length > 0 && (
             <Button
@@ -803,6 +825,48 @@ export default function Tasks() {
               </button>
             ))}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* CSV Import */}
+      <Dialog open={importOpen} onOpenChange={(o) => { setImportOpen(o); if (!o) setImportResult(null); }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Import Tasks from CSV</DialogTitle>
+            <DialogDescription>
+              Paste CSV text with headers: title, description, status, priority, due_date, tags
+            </DialogDescription>
+          </DialogHeader>
+          {importResult ? (
+            <div className="space-y-3">
+              <div className="text-center py-4">
+                <div className="text-2xl font-bold text-green-600">{importResult.imported}</div>
+                <div className="text-sm text-muted-foreground">tasks imported</div>
+                {importResult.skipped > 0 && (
+                  <div className="text-sm text-muted-foreground mt-1">{importResult.skipped} rows skipped</div>
+                )}
+              </div>
+              <Button className="w-full" onClick={() => setImportOpen(false)}>Done</Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <textarea
+                className="w-full h-48 border rounded p-2 text-sm font-mono resize-none"
+                placeholder={'title,status,priority,due_date,tags\nBuild login,todo,high,2026-07-01,auth\nFix bug,in_progress,medium,,'}
+                value={importCsv}
+                onChange={(e) => setImportCsv(e.target.value)}
+              />
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button>
+                <Button
+                  onClick={() => importMutation.mutate(importCsv)}
+                  disabled={!importCsv.trim() || importMutation.isPending}
+                >
+                  Import
+                </Button>
+              </DialogFooter>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

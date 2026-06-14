@@ -41,6 +41,15 @@ import timelineRouter         from './routes/timeline.js';
 import supportRouter          from './routes/support.js';
 import ninjaStackRouter       from './routes/ninjaStack.js';
 import docsRouter             from './routes/docs.js';
+import analyticsRouter        from './routes/analytics.js';
+import meetingNotesRouter     from './routes/meetingNotes.js';
+import sprintTemplatesRouter  from './routes/sprintTemplates.js';
+import projectSharesRouter    from './routes/projectShares.js';
+import guestViewRouter        from './routes/guestView.js';
+import apiKeysRouter          from './routes/apiKeys.js';
+import customFieldsRouter     from './routes/customFields.js';
+import automationsRouter      from './routes/automations.js';
+import csvImportRouter        from './routes/csvImport.js';
 
 export function createApp() {
   const app = express();
@@ -92,11 +101,13 @@ export function createApp() {
   app.use('/webhooks', express.raw({ type: 'application/json' }), webhooksRouter);
   app.use(express.json());
   app.use('/public', shareRouter);
+  app.use('/public/g', guestViewRouter);
 
   app.use('/api', requireAuth);
 
   app.use('/api/workspaces', workspacesRouter);
   app.use('/api/workspaces', membersRouter);
+  app.use('/api/tasks/import',   csvImportRouter);  // must be before tasksRouter to avoid /:id capture
   app.use('/api/tasks',                          tasksRouter);
   app.use('/api/tasks/:taskId/comments',         commentsRouter);
   app.use('/api/revenue',        revenueRouter);
@@ -122,6 +133,13 @@ export function createApp() {
   app.use('/api/sprints/:sprintId/ai-summary',    aiSummaryRouter);
   app.use('/api/support',        supportRouter);
   app.use('/api/ninja-stack',    ninjaStackRouter);
+  app.use('/api/analytics',      analyticsRouter);
+  app.use('/api/meeting-notes',  meetingNotesRouter);
+  app.use('/api/sprint-templates', sprintTemplatesRouter);
+  app.use('/api/project-shares', projectSharesRouter);
+  app.use('/api/api-keys',       apiKeysRouter);
+  app.use('/api/custom-fields',  customFieldsRouter);
+  app.use('/api/automations',    automationsRouter);
   // M3: API docs only in non-production — avoids exposing the full OpenAPI schema publicly
   if (process.env.NODE_ENV !== 'production') {
     app.use('/api/docs', docsRouter);

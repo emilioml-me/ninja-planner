@@ -26,6 +26,15 @@ import Timeline from './pages/Timeline';
 import Billing  from './pages/Billing';
 import PublicRoadmap from './pages/PublicRoadmap';
 import AcceptInvite from './pages/AcceptInvite';
+import Analytics from './pages/Analytics';
+import MeetingNotes from './pages/MeetingNotes';
+import Calendar from './pages/Calendar';
+import Automations from './pages/Automations';
+import ApiKeys from './pages/ApiKeys';
+import GuestView from './pages/GuestView';
+import CustomFields from './pages/CustomFields';
+import GuestLinks from './pages/GuestLinks';
+import SprintTemplates from './pages/SprintTemplates';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -62,6 +71,14 @@ function AuthenticatedApp() {
             <Route path="/members"           component={Members} />
             <Route path="/integrations"  component={Integrations} />
             <Route path="/webhooks"      component={Webhooks} />
+            <Route path="/analytics"     component={Analytics} />
+            <Route path="/meeting-notes" component={MeetingNotes} />
+            <Route path="/calendar"      component={Calendar} />
+            <Route path="/automations"   component={Automations} />
+            <Route path="/settings/api-keys"      component={ApiKeys} />
+            <Route path="/settings/custom-fields" component={CustomFields} />
+            <Route path="/settings/guest-links"   component={GuestLinks} />
+            <Route path="/sprint-templates"        component={SprintTemplates} />
             <Route component={() => <Redirect to="/dashboard" />} />
           </Switch>
         </ErrorBoundary>
@@ -78,6 +95,10 @@ export default function App() {
         {/* Public share pages — no auth required */}
         <Route path="/r/:token">
           {(params) => <PublicRoadmap token={params.token} />}
+        </Route>
+        {/* Guest view pages — no auth required */}
+        <Route path="/g/:token">
+          {(params) => <GuestView token={params.token} />}
         </Route>
         {/* Workspace invite accept page */}
         <Route path="/invite/:token">

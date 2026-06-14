@@ -24,6 +24,7 @@ import {
   sendDueDateReminderEmail,
   resolveClerkEmail,
 } from '../services/emailService.js';
+import { dispatchAutomations } from '../services/automationService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -284,6 +285,13 @@ router.post('/', async (req, res, next) => {
     }
 
     fireWebhooks(req.workspace.id, 'task.created', { task });
+    dispatchAutomations({
+      type: 'task.created',
+      workspaceId: req.workspace.id,
+      taskId: task.id,
+      assigneeId: task.assignee_clerk_id,
+      title: task.title,
+    }).catch(() => {});
 
     // Due-date reminder — in-app only at creation (task-assigned email already covers it)
     if (task.assignee_clerk_id && task.due_date && task.assignee_clerk_id !== req.auth.userId) {
@@ -379,11 +387,12 @@ router.patch('/:id', async (req, res, next) => {
       }
     }
     // Lightweight read — only the field we need, avoids loading the full activity log.
-    const prevRow = await pool.query<{ assignee_clerk_id: string | null }>(
-      'SELECT assignee_clerk_id FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
+    const prevRow = await pool.query<{ assignee_clerk_id: string | null; status: string }>(
+      'SELECT assignee_clerk_id, status FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
       [req.params.id, req.workspace.id],
     );
     const prevAssigneeClerkId = prevRow.rows[0]?.assignee_clerk_id ?? null;
+    const prevStatus = prevRow.rows[0]?.status ?? null;
     const task = await updateTask(req.params.id, req.workspace.id, parsed.data);
     if (!task) {
       res.status(404).json({ error: 'Task not found' });
@@ -485,6 +494,27 @@ router.patch('/:id', async (req, res, next) => {
       fireWebhooks(req.workspace.id, 'task.completed', { task });
     } else {
       fireWebhooks(req.workspace.id, 'task.updated', { task });
+    }
+
+    // Automation dispatch
+    if (parsed.data.status !== undefined && prevStatus && parsed.data.status !== prevStatus) {
+      dispatchAutomations({
+        type: 'task.status_changed',
+        workspaceId: req.workspace.id,
+        taskId: task.id,
+        oldStatus: prevStatus,
+        newStatus: task.status,
+        assigneeId: task.assignee_clerk_id,
+      }).catch(() => {});
+    }
+    if (assigneeActuallyChanged && parsed.data.assignee_clerk_id) {
+      dispatchAutomations({
+        type: 'task.assigned',
+        workspaceId: req.workspace.id,
+        taskId: task.id,
+        assigneeId: parsed.data.assignee_clerk_id,
+        title: task.title,
+      }).catch(() => {});
     }
 
     res.json(task);

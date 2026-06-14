@@ -1,0 +1,48 @@
+// API key auth middleware — for /api/external/* routes consumed by third-party integrations
+import type { Request, Response, NextFunction } from 'express';
+import { createHash } from 'crypto';
+import { pool } from '../config/db.js';
+
+function hashKey(key: string): string {
+  return createHash('sha256').update(key).digest('hex');
+}
+
+declare module 'express-serve-static-core' {
+  interface Request {
+    apiKey?: {
+      workspace_id: string;
+      scopes: string[];
+    };
+  }
+}
+
+export async function apiKeyAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const header = req.headers['authorization'] ?? '';
+  const key    = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!key) { res.status(401).json({ error: 'API key required' }); return; }
+
+  const hash = hashKey(key);
+  const { rows } = await pool.query(
+    `SELECT workspace_id, scopes FROM api_keys
+     WHERE key_hash = $1 AND revoked_at IS NULL`,
+    [hash],
+  ).catch(() => ({ rows: [] as { workspace_id: string; scopes: string[] }[] }));
+
+  if (rows.length === 0) { res.status(401).json({ error: 'Invalid or revoked API key' }); return; }
+
+  // Fire-and-forget usage timestamp update
+  pool.query('UPDATE api_keys SET last_used_at = now() WHERE key_hash = $1', [hash]).catch(() => {});
+
+  req.apiKey = { workspace_id: rows[0].workspace_id, scopes: rows[0].scopes };
+  next();
+}
+
+export function requireScope(scope: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.apiKey?.scopes.includes(scope)) {
+      res.status(403).json({ error: `Scope required: ${scope}` });
+      return;
+    }
+    next();
+  };
+}
