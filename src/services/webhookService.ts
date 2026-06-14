@@ -188,6 +188,7 @@ async function _deliverToEndpoint(
           'X-Ninja-Retry': String(attempt),
         },
         body,
+        redirect: 'error',
         signal: AbortSignal.timeout(8_000),
       });
       httpStatus = res.status;

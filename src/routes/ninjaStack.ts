@@ -16,8 +16,8 @@ router.get('/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/ninja-stack/activate  (any workspace member can activate)
-router.post('/activate', async (req, res, next) => {
+// POST /api/ninja-stack/activate  [admin only]
+router.post('/activate', requireAdmin, async (req, res, next) => {
   try {
     const { code } = z.object({ code: z.string().min(1) }).parse(req.body);
     const status = await activateSubscription(req.workspace.id, code);

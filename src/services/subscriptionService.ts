@@ -64,11 +64,11 @@ export async function getSubscriptionStatus(workspaceId: string): Promise<Subscr
     return { active: true, plan: row.plan, code: row.code, expiresAt: row.expires_at?.toISOString() ?? null, adminOverride: true };
   }
 
-  if (row.expires_at && new Date(row.expires_at) < new Date()) {
-    return { active: false, plan: row.plan, code: row.code, expiresAt: row.expires_at.toISOString(), adminOverride: false, reason: 'expired' };
-  }
+  // Treat expired rows as stale so ninja-core gets a chance to confirm a renewal.
+  // Only return 'expired' after revalidation fails or confirms the code is invalid.
+  const expired = row.expires_at && new Date(row.expires_at) < new Date();
+  const stale   = expired || Date.now() - new Date(row.last_verified_at).getTime() > REVALIDATE_AFTER;
 
-  const stale = Date.now() - new Date(row.last_verified_at).getTime() > REVALIDATE_AFTER;
   if (stale) {
     // C4: coalesce concurrent revalidation fetches for the same workspace
     let inflightPromise = revalidationInFlight.get(workspaceId);
@@ -80,7 +80,10 @@ export async function getSubscriptionStatus(workspaceId: string): Promise<Subscr
     }
     const result = await inflightPromise;
     if (result === null) {
-      // ninja-core unreachable — serve cached state optimistically
+      // ninja-core unreachable — if cached value is expired fail closed, otherwise serve optimistically
+      if (expired) {
+        return { active: false, plan: row.plan, code: row.code, expiresAt: row.expires_at!.toISOString(), adminOverride: false, reason: 'expired' };
+      }
       return { active: true, plan: row.plan, code: row.code, expiresAt: row.expires_at?.toISOString() ?? null, adminOverride: false };
     }
     if (!result.valid) {

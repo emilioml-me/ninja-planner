@@ -117,9 +117,9 @@ export async function addGoalLink(
   if (goalCheck.rows.length === 0) throw new Error('Goal not found');
 
   const result = await pool.query<GoalLink>(
-    `INSERT INTO goal_links (goal_id, entity_type, entity_id) VALUES ($1, $2, $3)
+    `INSERT INTO goal_links (goal_id, entity_type, entity_id, workspace_id) VALUES ($1, $2, $3, $4)
      ON CONFLICT (goal_id, entity_type, entity_id) DO NOTHING RETURNING *`,
-    [goalId, entityType, entityId],
+    [goalId, entityType, entityId, workspaceId],
   );
   return result.rows[0] ?? null;
 }

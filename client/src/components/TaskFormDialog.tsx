@@ -402,14 +402,8 @@ function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
       <Button
         type="button" variant="ghost" size="icon"
         className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
-        onClick={() => {
-          // Find dep id — remove by querying with task pairs
-          apiRequest('GET', `/api/tasks/${task.id}/dependencies`).then((d: TaskDependencies) => {
-            // We need the dep id from the DB — re-fetch the raw deps list
-          });
-          // Fallback: re-query and delete by task pair via the route
-          qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'dependencies'] });
-        }}
+        onClick={() => removeMutation.mutate(t.id)}
+        disabled={removeMutation.isPending}
       >
         <Trash2 className="h-3 w-3 text-muted-foreground" />
       </Button>

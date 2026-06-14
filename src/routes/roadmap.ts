@@ -64,31 +64,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
   }
 });
 
-// PATCH /api/roadmap/:id  [admin only]
-router.patch('/:id', requireAdmin, async (req, res, next) => {
-  try {
-    const parsed = updateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.flatten() });
-      return;
-    }
-    if (Object.keys(parsed.data).length === 0) {
-      res.status(400).json({ error: 'No fields to update' });
-      return;
-    }
-    const item = await updateRoadmapItem(req.params.id, req.workspace.id, parsed.data);
-    if (!item) {
-      res.status(404).json({ error: 'Roadmap item not found' });
-      return;
-    }
-    res.json(item);
-  } catch (err) {
-    next(err);
-  }
-});
-
 // PATCH /api/roadmap/reorder  — bulk priority update for drag-to-reorder  [admin only]
 // Body: { items: [{ id: string, priority: number }] }
+// Must be registered before PATCH /:id so Express doesn't treat "reorder" as an id param.
 router.patch('/reorder', requireAdmin, async (req, res, next) => {
   try {
     const schema = z.object({
@@ -113,6 +91,58 @@ router.patch('/reorder', requireAdmin, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// PATCH /api/roadmap/:id  [admin only]
+// Must be after PATCH /reorder so the literal route matches first.
+router.patch('/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const parsed = updateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    if (Object.keys(parsed.data).length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+    const item = await updateRoadmapItem(req.params.id, req.workspace.id, parsed.data);
+    if (!item) {
+      res.status(404).json({ error: 'Roadmap item not found' });
+      return;
+    }
+    res.json(item);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Share token management ───────────────────────────────────────────────────
+// All /share routes must be registered before DELETE /:id so Express doesn't
+// treat the literal string "share" as an id param.
+
+// GET /api/roadmap/share  — get current token (admin only; null if none)
+router.get('/share', requireAdmin, async (req, res, next) => {
+  try {
+    const st = await getShareToken(req.workspace.id, 'roadmap');
+    res.json({ token: st?.token ?? null });
+  } catch (err) { next(err); }
+});
+
+// POST /api/roadmap/share  — always generate a fresh token (invalidates previous)  [admin only]
+router.post('/share', requireAdmin, async (req, res, next) => {
+  try {
+    const st = await regenerateShareToken(req.workspace.id, 'roadmap', req.auth.userId);
+    res.json({ token: st.token });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/roadmap/share  — revoke token  [admin only]
+router.delete('/share', requireAdmin, async (req, res, next) => {
+  try {
+    await revokeShareToken(req.workspace.id, 'roadmap');
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
 // DELETE /api/roadmap/:id  [admin only]
@@ -188,32 +218,6 @@ router.delete('/:id/tasks/:taskId', requireAdmin, async (req, res, next) => {
     );
     if ((result.rowCount ?? 0) === 0) { res.status(404).json({ error: 'Link not found' }); return; }
     res.status(204).send();
-  } catch (err) { next(err); }
-});
-
-// ─── Share token management ───────────────────────────────────────────────────
-
-// GET /api/roadmap/share  — get current token (admin only; null if none)
-router.get('/share', requireAdmin, async (req, res, next) => {
-  try {
-    const st = await getShareToken(req.workspace.id, 'roadmap');
-    res.json({ token: st?.token ?? null });
-  } catch (err) { next(err); }
-});
-
-// POST /api/roadmap/share  — always generate a fresh token (invalidates previous)  [admin only]
-router.post('/share', requireAdmin, async (req, res, next) => {
-  try {
-    const st = await regenerateShareToken(req.workspace.id, 'roadmap', req.auth.userId);
-    res.json({ token: st.token });
-  } catch (err) { next(err); }
-});
-
-// DELETE /api/roadmap/share  — revoke token  [admin only]
-router.delete('/share', requireAdmin, async (req, res, next) => {
-  try {
-    await revokeShareToken(req.workspace.id, 'roadmap');
-    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 

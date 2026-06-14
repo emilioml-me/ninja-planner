@@ -271,20 +271,6 @@ const RECURRENCE_DAYS: Record<string, number> = {
  * Includes a 2-minute dedup window to prevent double-spawn on client retries.
  */
 export async function spawnRecurringTask(task: Task): Promise<Task | null> {
-  // Dedup: skip if a task already spawned from this specific task exists within
-  // the last 2 minutes — prevents double-spawn on client retries without the
-  // false-positive risk of matching tasks that share a title and recurrence rule.
-  const dedupCheck = await pool.query<{ id: string }>(
-    `SELECT id FROM tasks
-     WHERE workspace_id = $1
-       AND spawned_from_id = $2
-       AND deleted_at IS NULL
-       AND created_at >= now() - interval '2 minutes'
-     LIMIT 1`,
-    [task.workspace_id, task.id],
-  );
-  if (dedupCheck.rows.length > 0) return null;
-
   const days = RECURRENCE_DAYS[task.recurrence_rule!] ?? 7;
   const base = task.due_date ? new Date(task.due_date) : new Date();
   // If the original due_date has already passed, bump from today instead
@@ -294,20 +280,57 @@ export async function spawnRecurringTask(task: Task): Promise<Task | null> {
   base.setDate(base.getDate() + days);
   const newDueDate = base.toISOString().split('T')[0];
 
-  return createTask(
-    task.workspace_id,
-    {
-      title:             task.title,
-      description:       task.description ?? undefined,
-      status:            'todo',
-      priority:          task.priority,
-      assignee_clerk_id: task.assignee_clerk_id ?? null,
-      due_date:          newDueDate,
-      tags:              task.tags,
-      position:          0,
-      recurrence_rule:   task.recurrence_rule,
-      spawned_from_id:   task.id,
-    },
-    task.created_by,
-  );
+  // Dedup + insert are wrapped in a single transaction with a row-level lock on
+  // the parent task to prevent concurrent completions from spawning duplicate copies.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock the parent task row so concurrent completions queue here
+    await client.query('SELECT id FROM tasks WHERE id = $1 FOR UPDATE', [task.id]);
+
+    const dedupCheck = await client.query<{ id: string }>(
+      `SELECT id FROM tasks
+       WHERE workspace_id = $1
+         AND spawned_from_id = $2
+         AND deleted_at IS NULL
+         AND created_at >= now() - interval '2 minutes'
+       LIMIT 1`,
+      [task.workspace_id, task.id],
+    );
+
+    if (dedupCheck.rows.length > 0) {
+      await client.query('COMMIT');
+      return null;
+    }
+
+    const result = await client.query<Task>(
+      `INSERT INTO tasks
+         (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, recurrence_rule, spawned_from_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING *`,
+      [
+        task.workspace_id,
+        task.title,
+        task.description ?? null,
+        'todo',
+        task.priority,
+        task.assignee_clerk_id ?? null,
+        newDueDate,
+        task.tags ?? [],
+        0,
+        task.created_by,
+        task.recurrence_rule,
+        task.id,
+      ],
+    );
+
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }

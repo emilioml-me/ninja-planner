@@ -83,7 +83,7 @@ export async function sendTaskAssignedEmail(opts: {
     <h2>You've been assigned a task</h2>
     <p>Hi ${escHtml(opts.recipientName)},</p>
     <p><strong>${escHtml(opts.assigner)}</strong> assigned you the task <strong>"${escHtml(opts.taskTitle)}"</strong>.</p>
-    <a href="${escHtml(opts.workspaceUrl)}/tasks" class="cta">View Task</a>
+    <a href="${escHtml(safeHref(opts.workspaceUrl))}/tasks" class="cta">View Task</a>
     <p style="color:#71717a;font-size:13px">If you weren't expecting this, you can ignore this email.</p>
   `;
   await sendEmail({
@@ -157,7 +157,7 @@ export async function sendGoalMilestoneEmail(opts: {
     <p>Hi ${escHtml(opts.recipientName)},</p>
     <p>Your goal <strong>"${escHtml(opts.goalTitle)}"</strong> just reached <strong>${opts.milestone}</strong> completion${is100 ? ' — congratulations!' : '.'}
     </p>
-    <a href="${escHtml(opts.workspaceUrl)}/goals" class="cta">View Goal</a>
+    <a href="${escHtml(safeHref(opts.workspaceUrl))}/goals" class="cta">View Goal</a>
   `;
   await sendEmail({
     to: opts.to,
@@ -197,4 +197,9 @@ function escHtml(str: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+/** Returns the URL only if it starts with https:// or http://, otherwise empty string. */
+function safeHref(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : '';
 }
