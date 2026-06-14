@@ -1,6 +1,7 @@
 // Automation event dispatcher — called from task route event points
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
+import { isSafeWebhookUrl, resolvedIpIsSafe } from '../lib/ssrf.js';
 
 export type AutomationTrigger =
   | { type: 'task.status_changed'; workspaceId: string; taskId: string; oldStatus: string; newStatus: string; assigneeId?: string | null }
@@ -65,7 +66,9 @@ async function executeAction(
     }
     case 'post_webhook': {
       const url = cfg.url as string;
-      if (!url) break;
+      if (!url || !isSafeWebhookUrl(url)) break;
+      const { hostname } = new URL(url);
+      if (!(await resolvedIpIsSafe(hostname))) break;
       await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

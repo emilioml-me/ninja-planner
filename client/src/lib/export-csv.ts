@@ -7,7 +7,9 @@ export function downloadCsv(filename: string, rows: Record<string, unknown>[]): 
   const headers = Object.keys(rows[0]);
   const escape = (val: unknown): string => {
     if (val == null) return '';
-    const str = String(val);
+    let str = String(val);
+    // Prefix formula-injection characters so spreadsheets treat them as text
+    if (/^[=+\-@\t\r]/.test(str)) str = `'${str}`;
     // Wrap in quotes if it contains comma, newline, or quote
     if (str.includes(',') || str.includes('\n') || str.includes('"')) {
       return `"${str.replace(/"/g, '""')}"`;

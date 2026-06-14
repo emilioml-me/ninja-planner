@@ -65,7 +65,7 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
 
     const startDate = req.body.start_date ?? new Date().toISOString().split('T')[0];
     const end = new Date(startDate);
-    end.setDate(end.getDate() + t.duration_days);
+    end.setDate(end.getDate() + t.duration_days - 1);
     const endDate = end.toISOString().split('T')[0];
 
     const name = req.body.name ?? t.name;

@@ -105,7 +105,7 @@ router.delete('/:id', async (req, res, next) => {
     if (!isAdmin && rows[0].created_by !== req.auth.userId) {
       res.status(403).json({ error: 'Forbidden' }); return;
     }
-    await pool.query('DELETE FROM meeting_notes WHERE id = $1', [req.params.id]);
+    await pool.query('DELETE FROM meeting_notes WHERE id = $1 AND workspace_id = $2', [req.params.id, req.workspace.id]);
     res.status(204).send();
   } catch (err) { next(err); }
 });
