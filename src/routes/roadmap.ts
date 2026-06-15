@@ -112,6 +112,28 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
       return;
     }
     res.json(item);
+
+    // Phase 6 — Roadmap → GTD Capture: when an item moves to "building" (in-progress),
+    // push it to the ninja-task GTD inbox for every non-guest workspace member.
+    // Fire-and-forget; response has already been sent above.
+    if (parsed.data.status === 'building' && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
+      pool.query<{ clerk_user_id: string }>(
+        "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role != 'guest'",
+        [req.workspace.id],
+      ).then(async (membersResult) => {
+        const { captureToNinjaTaskGtd } = await import("../integrations/ninjatask.js");
+        for (const member of membersResult.rows) {
+          try {
+            await captureToNinjaTaskGtd({
+              title: item.title,
+              clerkId: member.clerk_user_id,
+            });
+          } catch (err) {
+            console.error("[ninja-task] GTD capture failed for:", member.clerk_user_id, err);
+          }
+        }
+      }).catch((err: Error) => console.error("[ninja-task] GTD roadmap push failed:", err));
+    }
   } catch (err) {
     next(err);
   }

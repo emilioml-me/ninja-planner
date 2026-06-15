@@ -10,6 +10,8 @@ import pinoHttp           from 'pino-http';
 import { logger }      from './config/logger.js';
 import { requireAuth } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { createNinjaTaskWebhookRouter } from './routes/ninjataskWebhook.js';
+import { pool } from './config/db.js';
 
 import healthRouter     from './routes/health.js';
 import webhooksRouter   from './routes/webhooks.js';
@@ -102,6 +104,10 @@ export function createApp() {
   app.use(express.json());
   app.use('/public', shareRouter);
   app.use('/public/g', guestViewRouter);
+
+  // Inbound webhooks from external ninja services — registered BEFORE requireAuth
+  // so they can be called by server-to-server requests without a Clerk browser session.
+  app.use('/api/integrations', createNinjaTaskWebhookRouter(pool));
 
   app.use('/api', requireAuth);
 

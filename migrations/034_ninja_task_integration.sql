@@ -1,0 +1,4 @@
+BEGIN;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS external_ninja_task_id VARCHAR;
+ALTER TABLE sprints ADD COLUMN IF NOT EXISTS ninja_task_quest_id VARCHAR;
+COMMIT;

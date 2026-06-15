@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { fetchAllSummaries, getIntegrationsStatus } from '../integrations/index.js';
 import { fetchCrmDeals } from '../integrations/crm.js';
+import { getNinjaTaskProfile } from '../integrations/ninjatask.js';
 import { upsertActualRevenue } from '../services/revenueService.js';
 import type { IntegrationsSummary } from '../integrations/types.js';
 
@@ -108,6 +109,26 @@ router.post('/sync-revenue', requireWorkspace, async (req, res, next) => {
     );
 
     res.json({ synced: byMonth.size, periods: Object.fromEntries(byMonth) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/integrations/ninja-task/profile?clerkId=...
+ * Browser-facing proxy: fetches a user's XP/level from ninja-task.
+ * Returns null (not an error) if the integration is not configured or the call fails.
+ */
+router.get('/ninja-task/profile', requireWorkspace, async (req, res, next) => {
+  try {
+    const clerkId = req.query.clerkId as string | undefined;
+    if (!clerkId) {
+      res.status(400).json({ error: 'clerkId query param required' });
+      return;
+    }
+    const result = await getNinjaTaskProfile(clerkId);
+    // Graceful degradation: always return 200; caller checks for null
+    res.json(result ?? null);
   } catch (err) {
     next(err);
   }

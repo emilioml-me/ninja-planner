@@ -201,6 +201,15 @@ export default function Members() {
 
 // ─── Member Stats Dialog ───────────────────────────────────────────────────────
 
+interface NinjaTaskProfile {
+  level: number;
+  xp: number;
+  coins: number;
+  username: string | null;
+  longestStreak: number;
+  avatar: unknown | null;
+}
+
 function MemberStatsDialog({
   clerkUserId,
   name,
@@ -219,6 +228,14 @@ function MemberStatsDialog({
     queryKey: ['/api/workspaces/me/members', clerkUserId, 'stats'],
     queryFn: () => apiRequest<MemberStats>('GET', `/api/workspaces/me/members/${clerkUserId}/stats`),
     staleTime: 60_000,
+  });
+
+  const { data: ntProfile } = useQuery<NinjaTaskProfile | null>({
+    queryKey: ['/api/integrations/ninja-task/profile', clerkUserId],
+    queryFn: () => apiRequest<NinjaTaskProfile | null>('GET', `/api/integrations/ninja-task/profile?clerkId=${encodeURIComponent(clerkUserId)}`),
+    staleTime: 5 * 60_000,
+    // Graceful degradation — never throw for missing integration
+    retry: false,
   });
 
   return (
@@ -283,6 +300,27 @@ function MemberStatsDialog({
               <span>Total tasks assigned</span>
               <span>{stats.total}</span>
             </div>
+
+            {ntProfile && (
+              <>
+                <Separator />
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
+                    <Zap className="h-3 w-3 text-yellow-500" /> ninja-task
+                  </p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <StatPill icon={<span className="text-[10px] font-bold text-yellow-500">Lv</span>} label="Level" value={ntProfile.level} />
+                    <StatPill icon={<Zap className="h-3.5 w-3.5 text-yellow-500" />} label="XP" value={ntProfile.xp} />
+                    <StatPill icon={<span className="text-[10px] font-bold text-amber-500">🪙</span>} label="Coins" value={ntProfile.coins} />
+                  </div>
+                  {ntProfile.longestStreak > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Longest streak: <span className="font-semibold text-foreground">{ntProfile.longestStreak} days</span>
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground py-4 text-center">No stats available.</p>

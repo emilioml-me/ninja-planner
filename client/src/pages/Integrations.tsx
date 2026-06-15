@@ -5,16 +5,17 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
-  Users, CreditCard, HeadphonesIcon, CalendarDays,
+  Users, CreditCard, HeadphonesIcon, CalendarDays, Zap,
   CheckCircle2, Circle, RefreshCw, Plug,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const INTEGRATION_META = {
-  crm:      { icon: Users,           color: 'text-blue-500',   bg: 'bg-blue-500/10'   },
-  payments: { icon: CreditCard,      color: 'text-green-500',  bg: 'bg-green-500/10'  },
-  helpdesk: { icon: HeadphonesIcon,  color: 'text-orange-500', bg: 'bg-orange-500/10' },
-  schedule: { icon: CalendarDays,    color: 'text-purple-500', bg: 'bg-purple-500/10' },
+  crm:       { icon: Users,           color: 'text-blue-500',   bg: 'bg-blue-500/10',   envPrefix: 'CRM_NINJA'      },
+  payments:  { icon: CreditCard,      color: 'text-green-500',  bg: 'bg-green-500/10',  envPrefix: 'PAYMENT_NINJA'  },
+  helpdesk:  { icon: HeadphonesIcon,  color: 'text-orange-500', bg: 'bg-orange-500/10', envPrefix: 'DESK_NINJA'     },
+  schedule:  { icon: CalendarDays,    color: 'text-purple-500', bg: 'bg-purple-500/10', envPrefix: 'NINJA_SCHEDULE' },
+  ninjatask: { icon: Zap,             color: 'text-yellow-500', bg: 'bg-yellow-500/10', envPrefix: 'NINJA_TASK'     },
 } as const;
 
 type IntegrationKey = keyof typeof INTEGRATION_META;
@@ -131,8 +132,8 @@ export default function Integrations() {
               {!configured && (
                 <CardContent className="pt-0">
                   <p className="text-xs text-muted-foreground">
-                    Set <code className="bg-muted px-1 rounded text-[11px]">{key.replace(/([A-Z])/g, '_$1').toUpperCase()}_URL</code> and{' '}
-                    <code className="bg-muted px-1 rounded text-[11px]">{key.replace(/([A-Z])/g, '_$1').toUpperCase()}_API_KEY</code> in your environment to enable.
+                    Set <code className="bg-muted px-1 rounded text-[11px]">{meta.envPrefix}_URL</code> and{' '}
+                    <code className="bg-muted px-1 rounded text-[11px]">{meta.envPrefix}_API_KEY</code> in your environment to enable.
                   </p>
                 </CardContent>
               )}
@@ -178,6 +179,16 @@ function IntegrationDataPreview({ integrationKey, data }: { integrationKey: Inte
     return (
       <div className="flex gap-6 text-sm">
         <div><p className="text-xs text-muted-foreground">Today</p><p className="font-semibold">{d.todayCount} appointments</p></div>
+      </div>
+    );
+  }
+  if (integrationKey === 'ninjatask') {
+    const d = data as import('@/types/integrations').NinjaTaskSummary;
+    return (
+      <div className="flex gap-6 text-sm">
+        <div><p className="text-xs text-muted-foreground">Level</p><p className="font-semibold">{d.level}</p></div>
+        <div><p className="text-xs text-muted-foreground">XP</p><p className="font-semibold">{d.xp.toLocaleString()}</p></div>
+        <div><p className="text-xs text-muted-foreground">Coins</p><p className="font-semibold">{d.coins.toLocaleString()}</p></div>
       </div>
     );
   }

@@ -6,17 +6,23 @@ import { fetchScheduleSummary } from './schedule.js';
 import type { IntegrationsSummary, IntegrationsStatus } from './types.js';
 
 export * from './types.js';
+export * from './ninjatask.js';
 
 // ─── Aggregated summary (all in parallel) ────────────────────────────────────
 
 export async function fetchAllSummaries(): Promise<IntegrationsSummary> {
+  const config = getServiceConfig('NINJA_TASK');
+  const ninjataskResult = config
+    ? { configured: true as const, data: { level: 0, xp: 0, coins: 0 }, error: null }
+    : { configured: false as const, data: null, error: null };
+
   const [crm, payments, helpdesk, schedule] = await Promise.all([
     fetchCrmSummary(),
     fetchPaymentsSummary(),
     fetchHelpdeskSummary(),
     fetchScheduleSummary(),
   ]);
-  return { crm, payments, helpdesk, schedule };
+  return { crm, payments, helpdesk, schedule, ninjatask: ninjataskResult };
 }
 
 // ─── Status only (no external calls — just reads env vars) ───────────────────
@@ -42,6 +48,11 @@ export function getIntegrationsStatus(): IntegrationsStatus {
       configured:  !!getServiceConfig('NINJA_SCHEDULE'),
       label:       'ninja-schedule',
       description: 'Scheduling — appointments, bookings',
+    },
+    ninjatask: {
+      configured:  !!getServiceConfig('NINJA_TASK'),
+      label:       'ninja-task',
+      description: 'Gamified tasks — sync planner tasks, quests & GTD',
     },
   };
 }

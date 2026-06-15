@@ -25,6 +25,7 @@ import {
   resolveClerkEmail,
 } from '../services/emailService.js';
 import { dispatchAutomations } from '../services/automationService.js';
+import { pushTaskToNinjaTask } from '../integrations/ninjatask.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -293,6 +294,25 @@ router.post('/', async (req, res, next) => {
       title: task.title,
     }).catch(() => {});
 
+    // Push to ninja-task if assignee is set and integration is configured
+    if (task.assignee_clerk_id && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
+      pushTaskToNinjaTask({
+        title: task.title,
+        description: task.description,
+        priority: task.priority,
+        dueDate: task.due_date,
+        tags: task.tags ?? [],
+        clerkId: task.assignee_clerk_id,
+      }).then((result) => {
+        if (result?.id) {
+          pool.query(
+            'UPDATE tasks SET external_ninja_task_id = $1 WHERE id = $2',
+            [result.id, task.id],
+          ).catch((err: Error) => console.error('[ninja-task] failed to store external_id:', err));
+        }
+      }).catch((err: Error) => console.error('[ninja-task] task push failed:', err));
+    }
+
     // Due-date reminder — in-app only at creation (task-assigned email already covers it)
     if (task.assignee_clerk_id && task.due_date && task.assignee_clerk_id !== req.auth.userId) {
       createNotification({
@@ -515,6 +535,40 @@ router.patch('/:id', async (req, res, next) => {
         assigneeId: parsed.data.assignee_clerk_id,
         title: task.title,
       }).catch(() => {});
+    }
+
+    // Push to ninja-task when assignee is set for the first time on an existing task
+    if (
+      assigneeActuallyChanged &&
+      parsed.data.assignee_clerk_id &&
+      !prevAssigneeClerkId &&
+      process.env.NINJA_TASK_URL &&
+      process.env.NINJA_TASK_API_KEY
+    ) {
+      // Only push if not already synced
+      const extIdRow = await pool.query<{ external_ninja_task_id: string | null }>(
+        'SELECT external_ninja_task_id FROM tasks WHERE id = $1',
+        [task.id],
+      ).catch(() => null);
+      const alreadySynced = extIdRow?.rows[0]?.external_ninja_task_id != null;
+
+      if (!alreadySynced) {
+        pushTaskToNinjaTask({
+          title: task.title,
+          description: task.description,
+          priority: task.priority,
+          dueDate: task.due_date,
+          tags: task.tags ?? [],
+          clerkId: parsed.data.assignee_clerk_id,
+        }).then((result) => {
+          if (result?.id) {
+            pool.query(
+              'UPDATE tasks SET external_ninja_task_id = $1 WHERE id = $2',
+              [result.id, task.id],
+            ).catch((err: Error) => console.error('[ninja-task] failed to store external_id on patch:', err));
+          }
+        }).catch((err: Error) => console.error('[ninja-task] task push on patch failed:', err));
+      }
     }
 
     res.json(task);

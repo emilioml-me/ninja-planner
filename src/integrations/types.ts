@@ -52,18 +52,27 @@ export interface ScheduleSummary {
   upcomingToday: { title: string; time: string }[];
 }
 
+// ─── ninja-task ───────────────────────────────────────────────────────────────
+export interface NinjaTaskSummary {
+  level: number;
+  xp: number;
+  coins: number;
+}
+
 // ─── Aggregated response from GET /api/integrations/summary ──────────────────
 export interface IntegrationsSummary {
-  crm:      IntegrationResult<CrmSummary>;
-  payments: IntegrationResult<PaymentSummary>;
-  helpdesk: IntegrationResult<HelpdeskSummary>;
-  schedule: IntegrationResult<ScheduleSummary>;
+  crm:       IntegrationResult<CrmSummary>;
+  payments:  IntegrationResult<PaymentSummary>;
+  helpdesk:  IntegrationResult<HelpdeskSummary>;
+  schedule:  IntegrationResult<ScheduleSummary>;
+  ninjatask: IntegrationResult<NinjaTaskSummary>;
 }
 
 // ─── Status-only response from GET /api/integrations/status ──────────────────
 export interface IntegrationsStatus {
-  crm:      { configured: boolean; label: string; description: string };
-  payments: { configured: boolean; label: string; description: string };
-  helpdesk: { configured: boolean; label: string; description: string };
-  schedule: { configured: boolean; label: string; description: string };
+  crm:       { configured: boolean; label: string; description: string };
+  payments:  { configured: boolean; label: string; description: string };
+  helpdesk:  { configured: boolean; label: string; description: string };
+  schedule:  { configured: boolean; label: string; description: string };
+  ninjatask: { configured: boolean; label: string; description: string };
 }

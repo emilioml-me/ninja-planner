@@ -98,6 +98,28 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     const sprint = await updateSprint(req.params.id, req.workspace.id, parsed.data);
     if (!sprint) { res.status(404).json({ error: 'Sprint not found' }); return; }
 
+    // Phase 5 — Sprint → Quest Sync: when a sprint goes active, create a ninja-task quest
+    // for every non-guest workspace member. Fire-and-forget; never blocks the response.
+    if (parsed.data.status === 'active' && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
+      pool.query<{ clerk_user_id: string }>(
+        "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role != 'guest'",
+        [req.workspace.id],
+      ).then(async (membersResult) => {
+        const { createQuestInNinjaTask } = await import("../integrations/ninjatask.js");
+        for (const member of membersResult.rows) {
+          try {
+            await createQuestInNinjaTask({
+              title: sprint.name,
+              description: sprint.goal ?? null,
+              clerkId: member.clerk_user_id,
+            });
+          } catch (err) {
+            console.error("[ninja-task] quest create failed for member:", member.clerk_user_id, err);
+          }
+        }
+      }).catch((err: Error) => console.error("[ninja-task] member fetch failed:", err));
+    }
+
     // When completing a sprint, include the count of still-incomplete tasks
     if (parsed.data.status === 'completed') {
       const incompleteResult = await pool.query<{ count: number }>(
