@@ -52,6 +52,7 @@ import apiKeysRouter          from './routes/apiKeys.js';
 import customFieldsRouter     from './routes/customFields.js';
 import automationsRouter      from './routes/automations.js';
 import csvImportRouter        from './routes/csvImport.js';
+import externalRouter         from './routes/external.js';
 
 export function createApp() {
   const app = express();
@@ -94,9 +95,12 @@ export function createApp() {
 
   app.use(rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
-  // Skip HTTP logging in test
+  // Skip HTTP logging in test; redact Authorization to keep raw API keys out of logs
   if (process.env.NODE_ENV !== 'test') {
-    app.use(pinoHttp({ logger }));
+    app.use(pinoHttp({
+      logger,
+      redact: ['req.headers.authorization', 'req.headers.cookie'],
+    }));
   }
 
   app.use('/health', healthRouter);
@@ -108,6 +112,9 @@ export function createApp() {
   // Inbound webhooks from external ninja services — registered BEFORE requireAuth
   // so they can be called by server-to-server requests without a Clerk browser session.
   app.use('/api/integrations', createNinjaTaskWebhookRouter(pool));
+
+  // External REST API — uses API key auth instead of Clerk; must be before requireAuth
+  app.use('/api/external', externalRouter);
 
   app.use('/api', requireAuth);
 

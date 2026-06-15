@@ -265,9 +265,9 @@ function OkrTab() {
                 {g.key_results.length > 0 && (
                   <div className="space-y-1 pt-1">
                     {g.key_results.map((kr) => {
-                      const pct = kr.target_value > 0
-                        ? Math.min(100, Math.round((kr.current_value / kr.target_value) * 100))
-                        : 0;
+                      const cur = kr.current_value ?? 0;
+                      const tgt = kr.target_value ?? 0;
+                      const pct = tgt > 0 ? Math.min(100, Math.round((cur / tgt) * 100)) : 0;
                       return (
                         <div key={kr.id} className="flex items-center gap-3 text-sm text-muted-foreground">
                           <span className="flex-1">↳ {kr.title}</span>

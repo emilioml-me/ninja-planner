@@ -671,6 +671,7 @@ function TimeTab({ task }: { task: Task }) {
       qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] });
       setHours(''); setMins(''); setNote('');
     },
+    onError: () => toast({ title: 'Failed to log time', variant: 'destructive' }),
   });
 
   const deleteMut = useMutation({

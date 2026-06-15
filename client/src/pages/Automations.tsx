@@ -230,6 +230,7 @@ export default function Automations() {
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
       apiRequest('PATCH', `/api/automations/${id}`, { active }),
     onSuccess: () => invalidate(),
+    onError: () => toast({ title: 'Failed to update rule', variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({

@@ -30,10 +30,20 @@ export async function apiKeyAuth(req: Request, res: Response, next: NextFunction
 
   if (rows.length === 0) { res.status(401).json({ error: 'Invalid or revoked API key' }); return; }
 
+  const ws = await pool.query<{ id: string; name: string; plan: string }>(
+    'SELECT id, name, plan FROM workspaces WHERE id = $1',
+    [rows[0].workspace_id],
+  ).catch(() => ({ rows: [] as { id: string; name: string; plan: string }[] }));
+
+  if (ws.rows.length === 0) { res.status(401).json({ error: 'Workspace not found' }); return; }
+
   // Fire-and-forget usage timestamp update
   pool.query('UPDATE api_keys SET last_used_at = now() WHERE key_hash = $1', [hash]).catch(() => {});
 
-  req.apiKey = { workspace_id: rows[0].workspace_id, scopes: rows[0].scopes };
+  req.apiKey   = { workspace_id: rows[0].workspace_id, scopes: rows[0].scopes };
+  req.workspace = ws.rows[0];
+  // Stub req.auth so TypeScript is satisfied — external routes must not use Clerk fields
+  req.auth = { userId: '', orgId: null, memberRole: null };
   next();
 }
 
