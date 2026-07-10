@@ -2,10 +2,21 @@
 // Registered BEFORE requireAuth in app.ts so ninja-task can call it without a browser session.
 import { Router } from 'express';
 import { createHmac } from 'crypto';
+import rateLimit from 'express-rate-limit';
 import type { Pool } from 'pg';
 
 export function createNinjaTaskWebhookRouter(pool: Pool) {
   const router = Router();
+
+  // Tighter than the global 200/min limiter — this is a public, unauthenticated-until-HMAC
+  // endpoint that triggers a DB write on every request.
+  const webhookLimiter = rateLimit({
+    windowMs: 60_000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many requests' },
+  });
 
   /**
    * POST /api/integrations/ninja-task/webhook
@@ -18,7 +29,7 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
    * When a task is completed in ninja-task, the matching planner task (linked
    * via external_ninja_task_id) is moved to status='done'.
    */
-  router.post('/ninja-task/webhook', (req, res) => {
+  router.post('/ninja-task/webhook', webhookLimiter, (req, res) => {
     const secret = process.env.NINJA_TASK_WEBHOOK_SECRET;
     if (!secret) {
       res.status(500).json({ error: 'Webhook secret not configured' });

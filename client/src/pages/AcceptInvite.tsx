@@ -34,7 +34,8 @@ export default function AcceptInvite({ token }: { token: string }) {
       setInfoError('Invalid invite link');
       return;
     }
-    fetch(`/api/invites/token/${token}`)
+    const controller = new AbortController();
+    fetch(`/api/invites/token/${token}`, { signal: controller.signal })
       .then(async (r) => {
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
@@ -43,7 +44,11 @@ export default function AcceptInvite({ token }: { token: string }) {
         return r.json() as Promise<InviteInfo>;
       })
       .then(setInfo)
-      .catch((e: Error) => setInfoError(e.message));
+      .catch((e: Error) => {
+        if (controller.signal.aborted) return;
+        setInfoError(e.message);
+      });
+    return () => controller.abort();
   }, [token]);
 
   const handleAccept = async () => {

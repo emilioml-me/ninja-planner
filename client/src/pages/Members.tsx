@@ -405,7 +405,11 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
                   variant="outline"
                   className="gap-2"
                   disabled={generateMut.isPending}
-                  onClick={() => generateMut.mutate()}
+                  onClick={() => {
+                    if (window.confirm('Regenerating will invalidate the current link — anyone you already shared it with will no longer be able to use it. Continue?')) {
+                      generateMut.mutate();
+                    }
+                  }}
                 >
                   <RefreshCw className="h-3.5 w-3.5" /> Regenerate
                 </Button>

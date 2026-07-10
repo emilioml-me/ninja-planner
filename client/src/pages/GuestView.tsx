@@ -37,13 +37,19 @@ export default function GuestView({ token }: GuestViewProps) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`/public/g/${token}`)
+    const controller = new AbortController();
+    setLoading(true);
+    fetch(`/public/g/${token}`, { signal: controller.signal })
       .then(async (r) => {
         if (!r.ok) throw new Error(await r.text());
         return r.json();
       })
       .then((d) => { setData(d); setLoading(false); })
-      .catch((e) => { setError(e.message); setLoading(false); });
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        setError(e.message); setLoading(false);
+      });
+    return () => controller.abort();
   }, [token]);
 
   if (loading) {

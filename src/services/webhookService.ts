@@ -157,7 +157,11 @@ async function _deliverToEndpoint(
 ): Promise<void> {
   // Per-endpoint delivery ID so each receiver can correlate retries vs. separate events
   const deliveryId = randomBytes(16).toString('hex');
-  // DNS-rebinding guard: verify the resolved IP is still public at delivery time
+  // DNS-rebinding guard: verify the resolved IP is still public at delivery time.
+  // NOTE: this check and the fetch() below perform separate DNS resolutions, so a
+  // narrow TOCTOU window remains (attacker-controlled DNS could flip between the two).
+  // Fully closing it requires pinning the resolved IP for the actual connection
+  // (e.g. a custom undici Agent with a validating `connect.lookup`) — tracked as follow-up.
   const { hostname } = new URL(endpoint.url);
   if (!(await resolvedIpIsSafe(hostname))) {
     logger.warn({ endpointId: endpoint.id, url: endpoint.url }, 'SSRF: resolved IP is private, aborting delivery');

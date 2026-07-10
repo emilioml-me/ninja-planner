@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getClients,
   createClient,
@@ -35,8 +36,8 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// POST /api/clients
-router.post('/', async (req, res, next) => {
+// POST /api/clients  [admin only]
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -50,8 +51,8 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// PATCH /api/clients/:id
-router.patch('/:id', async (req, res, next) => {
+// PATCH /api/clients/:id  [admin only]
+router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -73,8 +74,8 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// DELETE /api/clients/:id
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/clients/:id  [admin only]
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await deleteClient(req.params.id, req.workspace.id);
     if (!deleted) {

@@ -3,10 +3,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../config/db.js';
-import { apiKeyAuth, requireScope } from '../middleware/apiKeyAuth.js';
+import { apiKeyAuth, apiKeyAuthLimiter, requireScope } from '../middleware/apiKeyAuth.js';
 
 const router = Router();
-router.use(apiKeyAuth);
+router.use(apiKeyAuthLimiter, apiKeyAuth);
 
 const STATUS  = ['todo', 'in_progress', 'done', 'blocked'] as const;
 const PRIORITY = ['urgent', 'high', 'medium', 'low'] as const;

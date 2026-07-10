@@ -65,7 +65,28 @@ export async function getMembersForWorkspace(workspaceId: string): Promise<Works
   return result.rows;
 }
 
+const ADMIN_ROLES = ['org:admin', 'org:owner'];
+
 export async function removeMember(workspaceId: string, memberId: string): Promise<boolean> {
+  // Prevent removing the last remaining admin/owner — would permanently lock the
+  // workspace out of admin-only routes (billing, webhooks, member management, etc.)
+  const target = await pool.query<{ role: string }>(
+    'SELECT role FROM workspace_members WHERE id = $1 AND workspace_id = $2',
+    [memberId, workspaceId],
+  );
+  if (target.rows.length === 0) return false;
+
+  if (ADMIN_ROLES.includes(target.rows[0].role)) {
+    const adminCount = await pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM workspace_members
+       WHERE workspace_id = $1 AND role = ANY($2::text[])`,
+      [workspaceId, ADMIN_ROLES],
+    );
+    if (parseInt(adminCount.rows[0].count, 10) <= 1) {
+      throw Object.assign(new Error('Cannot remove the last admin of a workspace'), { status: 400 });
+    }
+  }
+
   const result = await pool.query(
     'DELETE FROM workspace_members WHERE id = $1 AND workspace_id = $2',
     [memberId, workspaceId],

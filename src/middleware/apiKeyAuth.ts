@@ -1,11 +1,22 @@
 // API key auth middleware — for /api/external/* routes consumed by third-party integrations
 import type { Request, Response, NextFunction } from 'express';
 import { createHash } from 'crypto';
+import rateLimit from 'express-rate-limit';
 import { pool } from '../config/db.js';
 
 function hashKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
 }
+
+// Dedicated brute-force guard — the global app-wide limiter (200/min) is far too
+// permissive for guessing a fixed-format secret key.
+export const apiKeyAuthLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many authentication attempts, please try again later' },
+});
 
 declare module 'express-serve-static-core' {
   interface Request {
