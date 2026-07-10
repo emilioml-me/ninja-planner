@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { format, isBefore, isToday, startOfDay, addDays, isAfter } from 'date-fns';
+import { isBefore, isToday, startOfDay, addDays, isAfter } from 'date-fns';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { useMembers } from '@/hooks/use-members';
@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Clock, Calendar, CheckCircle2, AlertCircle, Inbox, Plus } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, localDateOnly, safeFormat } from '@/lib/utils';
 
 const STATUS_LABEL: Record<string, string> = {
   todo: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked',
@@ -34,7 +34,7 @@ function TaskCard({ task, onClick }: { task: Task; onClick: () => void }) {
   const todayStart = startOfDay(new Date());
   const isOverdue = task.due_date && task.status !== 'done' &&
     isBefore(new Date(task.due_date + 'T23:59:59'), todayStart);
-  const dueToday = task.due_date && isToday(new Date(task.due_date));
+  const dueToday = task.due_date && isToday(localDateOnly(task.due_date));
 
   return (
     <div
@@ -77,7 +77,7 @@ function TaskCard({ task, onClick }: { task: Task; onClick: () => void }) {
               isOverdue ? 'text-destructive font-medium' : dueToday ? 'text-yellow-600' : 'text-muted-foreground',
             )}>
               {isOverdue ? <Clock className="h-3 w-3" /> : <Calendar className="h-3 w-3" />}
-              {format(new Date(task.due_date), 'MMM d')}
+              {safeFormat(task.due_date, 'MMM d')}
             </span>
           )}
           {task.tags.slice(0, 2).map((tag) => (
@@ -164,19 +164,19 @@ export default function MyTasks() {
     (t) => t.due_date && isBefore(new Date(t.due_date + 'T23:59:59'), todayStart),
   );
   const dueToday = myTasks.filter(
-    (t) => t.due_date && isToday(new Date(t.due_date)),
+    (t) => t.due_date && isToday(localDateOnly(t.due_date)),
   );
   const upcoming = myTasks.filter(
     (t) =>
       t.due_date &&
-      isAfter(new Date(t.due_date), todayStart) &&
-      !isToday(new Date(t.due_date)) &&
-      isBefore(new Date(t.due_date), in7Days),
+      isAfter(localDateOnly(t.due_date), todayStart) &&
+      !isToday(localDateOnly(t.due_date)) &&
+      isBefore(localDateOnly(t.due_date), in7Days),
   );
   const later = myTasks.filter(
     (t) =>
       !t.due_date ||
-      isAfter(new Date(t.due_date), in7Days),
+      isAfter(localDateOnly(t.due_date), in7Days),
   );
 
   const groups: TaskGroup[] = [

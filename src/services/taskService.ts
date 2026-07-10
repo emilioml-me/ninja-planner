@@ -1,4 +1,8 @@
+import type { PoolClient } from 'pg';
 import { pool } from '../config/db.js';
+import { logger } from '../config/logger.js';
+
+type Queryable = Pick<PoolClient, 'query'>;
 
 export interface Task {
   id: string;
@@ -84,6 +88,20 @@ export async function getTasks(
   return result.rows;
 }
 
+/** Verifies a sprint_id/epic_id belongs to the given workspace before it's linked to a task. */
+async function assertLinkableToWorkspace(
+  table: 'sprints' | 'epics',
+  id: string | null | undefined,
+  workspaceId: string,
+  db: Queryable = pool,
+): Promise<void> {
+  if (!id) return;
+  const result = await db.query(`SELECT id FROM ${table} WHERE id = $1 AND workspace_id = $2`, [id, workspaceId]);
+  if (result.rows.length === 0) {
+    throw Object.assign(new Error(`Invalid ${table.slice(0, -1)}_id for this workspace`), { status: 400 });
+  }
+}
+
 export async function createTask(
   workspaceId: string,
   data: {
@@ -104,6 +122,10 @@ export async function createTask(
   },
   createdBy: string,
 ): Promise<Task> {
+  // Tenant-isolation guard: a sprint/epic ID from another workspace must never be linkable.
+  await assertLinkableToWorkspace('sprints', data.sprint_id, workspaceId);
+  await assertLinkableToWorkspace('epics', data.epic_id, workspaceId);
+
   const result = await pool.query<Task>(
     `INSERT INTO tasks
        (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, sprint_id, epic_id, recurrence_rule, story_points, checklist, spawned_from_id)
@@ -157,8 +179,13 @@ const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'prior
 export async function updateTask(
   taskId: string,
   workspaceId: string,
-  data: Partial<Pick<Task, 'title' | 'description' | 'status' | 'priority' | 'assignee_clerk_id' | 'due_date' | 'tags'>>,
+  data: Partial<Record<string, unknown>> & { sprint_id?: string | null; epic_id?: string | null },
+  db: Queryable = pool,
 ): Promise<Task | null> {
+  // Tenant-isolation guard: a sprint/epic ID from another workspace must never be linkable.
+  if (data.sprint_id !== undefined) await assertLinkableToWorkspace('sprints', data.sprint_id, workspaceId, db);
+  if (data.epic_id !== undefined) await assertLinkableToWorkspace('epics', data.epic_id, workspaceId, db);
+
   const fields: string[] = [];
   const values: unknown[] = [];
   let i = 1;
@@ -166,13 +193,18 @@ export async function updateTask(
   for (const [key, value] of Object.entries(data)) {
     if (value !== undefined && TASK_UPDATABLE_COLUMNS.has(key)) {
       fields.push(`${key} = $${i++}`);
-      values.push(value);
+      values.push(key === 'checklist' ? JSON.stringify(value) : value);
     }
+  }
+  // due_date changing (cleared, pushed back, or moved up) invalidates any prior
+  // task.due_date_passed dispatch, so the due-date-check job can re-evaluate it.
+  if (data.due_date !== undefined) {
+    fields.push('due_date_passed_notified_at = NULL');
   }
   if (fields.length === 0) return null;
 
   values.push(taskId, workspaceId);
-  const result = await pool.query<Task>(
+  const result = await db.query<Task>(
     `UPDATE tasks SET ${fields.join(', ')}
      WHERE id = $${i++} AND workspace_id = $${i} AND deleted_at IS NULL
      RETURNING *`,
@@ -181,13 +213,88 @@ export async function updateTask(
   return result.rows[0] ?? null;
 }
 
+/**
+ * Locks the task row, reads its pre-update assignee/status, applies the update, and commits —
+ * all in one transaction — so a concurrent PATCH can't read stale "previous" values between
+ * this route's SELECT and its UPDATE (which previously fed automations the wrong old status).
+ */
+export async function updateTaskWithPrevState(
+  taskId: string,
+  workspaceId: string,
+  data: Partial<Record<string, unknown>> & { sprint_id?: string | null; epic_id?: string | null },
+): Promise<{ task: Task; prevAssigneeClerkId: string | null; prevStatus: string | null } | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const prevRow = await client.query<{ assignee_clerk_id: string | null; status: string }>(
+      'SELECT assignee_clerk_id, status FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL FOR UPDATE',
+      [taskId, workspaceId],
+    );
+    if (prevRow.rows.length === 0) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const prevAssigneeClerkId = prevRow.rows[0].assignee_clerk_id;
+    const prevStatus = prevRow.rows[0].status;
+
+    const task = await updateTask(taskId, workspaceId, data, client);
+    await client.query('COMMIT');
+    return task ? { task, prevAssigneeClerkId, prevStatus } : null;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+const ninjaTaskPendingMarker = (taskId: string) => `__pending__:${taskId}`;
+
+/**
+ * Atomically claims the "sync to ninja-task" slot for a task using a per-task pending sentinel
+ * (unique per task, so it can't collide with the DB-level unique constraint on
+ * external_ninja_task_id). Returns true if this call won the race and should proceed to push;
+ * false if another concurrent request already claimed or completed the sync. Optional for
+ * callers where a duplicate push can't happen (e.g. right after INSERT) — they can go straight
+ * to resolveNinjaTaskSync, which also accepts the unclaimed (NULL) state.
+ */
+export async function claimNinjaTaskSync(taskId: string, workspaceId: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE tasks SET external_ninja_task_id = $1
+     WHERE id = $2 AND workspace_id = $3 AND external_ninja_task_id IS NULL`,
+    [ninjaTaskPendingMarker(taskId), taskId, workspaceId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Resolves a sync slot to the real external ID. Matches either an unclaimed (NULL) slot or one
+ * claimed by claimNinjaTaskSync for this same task, so it's safe to call whether or not the
+ * caller claimed first.
+ */
+export async function resolveNinjaTaskSync(taskId: string, externalId: string): Promise<void> {
+  await pool.query(
+    `UPDATE tasks SET external_ninja_task_id = $1
+     WHERE id = $2 AND (external_ninja_task_id IS NULL OR external_ninja_task_id = $3)`,
+    [externalId, taskId, ninjaTaskPendingMarker(taskId)],
+  );
+}
+
+/** Releases a claimed-but-failed sync slot back to NULL so a later attempt can retry. */
+export async function releaseNinjaTaskSync(taskId: string): Promise<void> {
+  await pool.query(
+    `UPDATE tasks SET external_ninja_task_id = NULL WHERE id = $1 AND external_ninja_task_id = $2`,
+    [taskId, ninjaTaskPendingMarker(taskId)],
+  );
+}
+
 export async function updateTaskPosition(
   taskId: string,
   workspaceId: string,
   position: number,
 ): Promise<Task | null> {
   const result = await pool.query<Task>(
-    `UPDATE tasks SET position = $1
+    `UPDATE tasks SET position = $1, updated_at = now()
      WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL
      RETURNING *`,
     [position, taskId, workspaceId],
@@ -217,9 +324,17 @@ export async function reorderTaskInTransaction(
     await client.query('BEGIN');
 
     if (resequence && resequence.length > 0) {
+      // Lock every affected row up front, in a stable sorted order, so two concurrent
+      // reorders of the same column fully serialize instead of interleaving row-by-row
+      // (which previously could leave duplicate `position` values across both writers).
+      const sortedIds = [...resequence.map((r) => r.id)].sort();
+      await client.query(
+        `SELECT id FROM tasks WHERE id = ANY($1::uuid[]) AND workspace_id = $2 ORDER BY id FOR UPDATE`,
+        [sortedIds, workspaceId],
+      );
       // Bulk update using unnest — one round-trip regardless of list size
       await client.query(
-        `UPDATE tasks SET position = u.pos
+        `UPDATE tasks SET position = u.pos, updated_at = now()
          FROM unnest($1::uuid[], $2::int[]) AS u(id, pos)
          WHERE tasks.id = u.id AND tasks.workspace_id = $3 AND tasks.deleted_at IS NULL`,
         [resequence.map((r) => r.id), resequence.map((r) => r.position), workspaceId],
@@ -260,8 +375,13 @@ export async function logTaskActivity(
   );
 }
 
-const RECURRENCE_DAYS: Record<string, number> = {
-  daily: 1, weekly: 7, biweekly: 14, monthly: 30,
+// `monthly` advances the calendar month rather than adding a fixed day count, so a task due
+// on the 31st doesn't drift earlier every few cycles the way a flat 30-day add would.
+const RECURRENCE_ADVANCE: Record<string, (d: Date) => void> = {
+  daily: (d) => d.setDate(d.getDate() + 1),
+  weekly: (d) => d.setDate(d.getDate() + 7),
+  biweekly: (d) => d.setDate(d.getDate() + 14),
+  monthly: (d) => d.setMonth(d.getMonth() + 1),
 };
 
 /**
@@ -271,13 +391,20 @@ const RECURRENCE_DAYS: Record<string, number> = {
  * Includes a 2-minute dedup window to prevent double-spawn on client retries.
  */
 export async function spawnRecurringTask(task: Task): Promise<Task | null> {
-  const days = RECURRENCE_DAYS[task.recurrence_rule!] ?? 7;
+  const advance = task.recurrence_rule ? RECURRENCE_ADVANCE[task.recurrence_rule] : undefined;
+  if (!advance) {
+    logger.warn(
+      { taskId: task.id, recurrenceRule: task.recurrence_rule },
+      '[taskService] spawnRecurringTask: unrecognized recurrence_rule, skipping spawn',
+    );
+    return null;
+  }
   const base = task.due_date ? new Date(task.due_date) : new Date();
   // If the original due_date has already passed, bump from today instead
   if (base < new Date()) {
     base.setTime(Date.now());
   }
-  base.setDate(base.getDate() + days);
+  advance(base);
   const newDueDate = base.toISOString().split('T')[0];
 
   // Dedup + insert are wrapped in a single transaction with a row-level lock on

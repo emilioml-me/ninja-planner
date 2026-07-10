@@ -7,12 +7,15 @@ import {
   getTasks,
   createTask,
   getTaskById,
-  updateTask,
+  updateTaskWithPrevState,
   updateTaskPosition,
   softDeleteTask,
   logTaskActivity,
   reorderTaskInTransaction,
   spawnRecurringTask,
+  claimNinjaTaskSync,
+  resolveNinjaTaskSync,
+  releaseNinjaTaskSync,
 } from '../services/taskService.js';
 import { getWorkload } from '../services/commentService.js';
 import { pool } from '../config/db.js';
@@ -125,7 +128,7 @@ router.post('/alert-check', requireAdmin, async (req, res, next) => {
       `:warning: *${tasks.length} overdue task${tasks.length === 1 ? '' : 's'}* in your workspace:\n` +
       lines.join('\n') + more;
 
-    sendSlackMessage(msg);
+    sendSlackMessage(msg).catch((err: Error) => console.error('[alert-check] slack send failed:', err));
 
     // In-app notification for workspace admins (the requesting admin at minimum)
     await createNotification({
@@ -305,10 +308,8 @@ router.post('/', async (req, res, next) => {
         clerkId: task.assignee_clerk_id,
       }).then((result) => {
         if (result?.id) {
-          pool.query(
-            'UPDATE tasks SET external_ninja_task_id = $1 WHERE id = $2',
-            [result.id, task.id],
-          ).catch((err: Error) => console.error('[ninja-task] failed to store external_id:', err));
+          resolveNinjaTaskSync(task.id, result.id)
+            .catch((err: Error) => console.error('[ninja-task] failed to store external_id:', err));
         }
       }).catch((err: Error) => console.error('[ninja-task] task push failed:', err));
     }
@@ -406,18 +407,15 @@ router.patch('/:id', async (req, res, next) => {
         return;
       }
     }
-    // Lightweight read — only the field we need, avoids loading the full activity log.
-    const prevRow = await pool.query<{ assignee_clerk_id: string | null; status: string }>(
-      'SELECT assignee_clerk_id, status FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
-      [req.params.id, req.workspace.id],
-    );
-    const prevAssigneeClerkId = prevRow.rows[0]?.assignee_clerk_id ?? null;
-    const prevStatus = prevRow.rows[0]?.status ?? null;
-    const task = await updateTask(req.params.id, req.workspace.id, parsed.data);
-    if (!task) {
+    // Reads the pre-update assignee/status and applies the update in one locked transaction,
+    // so a concurrent PATCH on the same task can't slip in between the read and the write and
+    // cause this request to dispatch automations with a stale "previous status".
+    const updateResult = await updateTaskWithPrevState(req.params.id, req.workspace.id, parsed.data);
+    if (!updateResult) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
+    const { task, prevAssigneeClerkId, prevStatus } = updateResult;
     await logTaskActivity(task.id, req.auth.userId, 'updated', parsed.data as Record<string, unknown>);
 
     // H3: Only notify when assignee actually changed, not just echoed in a full-object PATCH
@@ -545,30 +543,31 @@ router.patch('/:id', async (req, res, next) => {
       process.env.NINJA_TASK_URL &&
       process.env.NINJA_TASK_API_KEY
     ) {
-      // Only push if not already synced
-      const extIdRow = await pool.query<{ external_ninja_task_id: string | null }>(
-        'SELECT external_ninja_task_id FROM tasks WHERE id = $1',
-        [task.id],
-      ).catch(() => null);
-      const alreadySynced = extIdRow?.rows[0]?.external_ninja_task_id != null;
-
-      if (!alreadySynced) {
+      // Atomically claim the sync slot so two concurrent PATCHes assigning this task for the
+      // first time can't both see "not yet synced" and both push a duplicate ninja-task.
+      claimNinjaTaskSync(task.id, req.workspace.id).then((claimed) => {
+        if (!claimed) return;
         pushTaskToNinjaTask({
           title: task.title,
           description: task.description,
           priority: task.priority,
           dueDate: task.due_date,
           tags: task.tags ?? [],
-          clerkId: parsed.data.assignee_clerk_id,
+          clerkId: parsed.data.assignee_clerk_id!,
         }).then((result) => {
           if (result?.id) {
-            pool.query(
-              'UPDATE tasks SET external_ninja_task_id = $1 WHERE id = $2',
-              [result.id, task.id],
-            ).catch((err: Error) => console.error('[ninja-task] failed to store external_id on patch:', err));
+            resolveNinjaTaskSync(task.id, result.id)
+              .catch((err: Error) => console.error('[ninja-task] failed to store external_id on patch:', err));
+          } else {
+            releaseNinjaTaskSync(task.id)
+              .catch((err: Error) => console.error('[ninja-task] failed to release sync slot on patch:', err));
           }
-        }).catch((err: Error) => console.error('[ninja-task] task push on patch failed:', err));
-      }
+        }).catch((err: Error) => {
+          console.error('[ninja-task] task push on patch failed:', err);
+          releaseNinjaTaskSync(task.id)
+            .catch((releaseErr: Error) => console.error('[ninja-task] failed to release sync slot on patch:', releaseErr));
+        });
+      }).catch((err: Error) => console.error('[ninja-task] failed to claim sync slot on patch:', err));
     }
 
     res.json(task);

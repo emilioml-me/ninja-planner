@@ -22,7 +22,11 @@ async function logRun(
        VALUES ($1,$2,$3,$4,$5)`,
       [ruleId, workspaceId, JSON.stringify(payload), result, errorMessage ?? null],
     );
-  } catch { /* best-effort */ }
+  } catch (err) {
+    // Best-effort logging, but a swallowed failure here previously left no trace at all —
+    // making "why are automation logs missing" undiagnosable.
+    logger.warn({ err, ruleId, workspaceId }, '[automationService] logRun insert failed');
+  }
 }
 
 async function executeAction(
@@ -90,6 +94,12 @@ function triggerMatches(rule: { trigger_type: string; trigger_config: Record<str
   if (event.type === 'task.status_changed') {
     if (cfg.from_status && cfg.from_status !== event.oldStatus) return false;
     if (cfg.to_status   && cfg.to_status   !== event.newStatus) return false;
+  }
+  // assignee_clerk_id filter applies to every trigger type that carries an assigneeId — this
+  // used to be silently ignored for anything other than task.status_changed, so a rule scoped
+  // to "only when assigned to user X" actually fired for every assignee.
+  if ('assigneeId' in event && cfg.assignee_clerk_id && cfg.assignee_clerk_id !== event.assigneeId) {
+    return false;
   }
   return true;
 }

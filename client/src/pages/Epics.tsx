@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -77,13 +77,18 @@ function EpicFormDialog({
     },
   });
 
-  // Reset when opening
-  useState(() => { if (open) form.reset({
-    title:       epic?.title ?? '',
-    description: epic?.description ?? '',
-    status:      (epic?.status ?? 'active') as FormData['status'],
-    color:       epic?.color ?? '#6366f1',
-  }); });
+  // Reset when opening. This dialog instance is reused across different epics (only `open`
+  // and `epic` change), so a useState initializer here would only ever run once on first
+  // mount — this must be a real effect that re-runs on every reopen, or editing epic B after
+  // closing epic A's edit dialog would show A's stale values and silently overwrite B on save.
+  useEffect(() => {
+    if (open) form.reset({
+      title:       epic?.title ?? '',
+      description: epic?.description ?? '',
+      status:      (epic?.status ?? 'active') as FormData['status'],
+      color:       epic?.color ?? '#6366f1',
+    });
+  }, [open, epic, form]);
 
   const color = form.watch('color');
 

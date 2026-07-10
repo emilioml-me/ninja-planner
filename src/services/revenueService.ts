@@ -8,6 +8,7 @@ export interface RevenueTarget {
   target_amount: string;
   actual_amount: string;
   notes: string | null;
+  crm_synced_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -74,18 +75,28 @@ export async function updateRevenue(
  * Upsert actual_amount for a monthly period.
  * Creates the row with target_amount = 0 if it doesn't exist yet.
  * Idempotent: sets actual_amount to the provided value (replaces, does not add).
+ *
+ * `syncedAt` should be the time the CRM data was fetched (not when this function runs) —
+ * it's compared against the row's stored crm_synced_at so that if two syncs race (e.g. a
+ * retried webhook or overlapping manual + scheduled sync), a call carrying older CRM data can
+ * never clobber a figure that a fresher sync already wrote, regardless of which one commits last.
  */
 export async function upsertActualRevenue(
   workspaceId: string,
   periodStart: string,   // YYYY-MM-DD (first of month)
   actualAmount: number,
+  syncedAt: Date,
 ): Promise<void> {
   await pool.query(
-    `INSERT INTO revenue_targets (workspace_id, period_type, period_start, target_amount, actual_amount, notes)
-     VALUES ($1, 'monthly', $2, 0, $3, 'synced from CRM')
+    `INSERT INTO revenue_targets (workspace_id, period_type, period_start, target_amount, actual_amount, notes, crm_synced_at)
+     VALUES ($1, 'monthly', $2, 0, $3, 'synced from CRM', $4)
      ON CONFLICT (workspace_id, period_type, period_start)
-     DO UPDATE SET actual_amount = $3, notes = COALESCE(revenue_targets.notes, 'synced from CRM')`,
-    [workspaceId, periodStart, actualAmount],
+     DO UPDATE SET
+       actual_amount = $3,
+       crm_synced_at = $4,
+       notes = COALESCE(revenue_targets.notes, 'synced from CRM')
+     WHERE revenue_targets.crm_synced_at IS NULL OR revenue_targets.crm_synced_at < $4`,
+    [workspaceId, periodStart, actualAmount, syncedAt],
   );
 }
 

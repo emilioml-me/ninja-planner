@@ -4,10 +4,18 @@ const NINJA_CORE_URL   = process.env.NINJA_CORE_URL    ?? 'https://ninja-core.co
 const APP_ID           = process.env.NINJA_CORE_APP_ID ?? '';
 const APP_SECRET       = process.env.NINJA_CORE_APP_SECRET ?? '';
 const APP_NAME         = 'plan-ninja';
-const REVALIDATE_AFTER = 24 * 60 * 60 * 1000; // 24 h
+const REVALIDATE_AFTER  = 24 * 60 * 60 * 1000; // 24 h
+const FAILURE_BACKOFF   = 60 * 1000;           // 1 min
 
 // C4: Coalesce concurrent revalidation calls for the same workspace into one fetch
 const revalidationInFlight = new Map<string, Promise<NinjaCoreResult | null>>();
+
+// Tracks the last time callNinjaCore failed per workspace. Without this, every single request
+// while ninja-core is down independently re-triggers a fresh 8s-timeout fetch as soon as the
+// prior one settles (the in-flight map only coalesces truly concurrent calls, not sequential
+// ones) — amplifying load against an already-struggling service for the whole outage. During
+// the backoff window we skip the network call entirely and serve the same optimistic result.
+const lastFailedRevalidation = new Map<string, number>();
 
 export interface SubscriptionStatus {
   active: boolean;
@@ -70,15 +78,28 @@ export async function getSubscriptionStatus(workspaceId: string): Promise<Subscr
   const stale   = expired || Date.now() - new Date(row.last_verified_at).getTime() > REVALIDATE_AFTER;
 
   if (stale) {
-    // C4: coalesce concurrent revalidation fetches for the same workspace
-    let inflightPromise = revalidationInFlight.get(workspaceId);
-    if (!inflightPromise) {
-      inflightPromise = callNinjaCore(row.code).finally(() => {
-        revalidationInFlight.delete(workspaceId);
-      });
-      revalidationInFlight.set(workspaceId, inflightPromise);
+    const lastFailure = lastFailedRevalidation.get(workspaceId);
+    const inBackoff = lastFailure !== undefined && Date.now() - lastFailure < FAILURE_BACKOFF;
+
+    let result: NinjaCoreResult | null;
+    if (inBackoff) {
+      result = null;
+    } else {
+      // C4: coalesce concurrent revalidation fetches for the same workspace
+      let inflightPromise = revalidationInFlight.get(workspaceId);
+      if (!inflightPromise) {
+        inflightPromise = callNinjaCore(row.code).finally(() => {
+          revalidationInFlight.delete(workspaceId);
+        });
+        revalidationInFlight.set(workspaceId, inflightPromise);
+      }
+      result = await inflightPromise;
+      if (result === null) {
+        lastFailedRevalidation.set(workspaceId, Date.now());
+      } else {
+        lastFailedRevalidation.delete(workspaceId);
+      }
     }
-    const result = await inflightPromise;
     if (result === null) {
       // ninja-core unreachable — if cached value is expired fail closed, otherwise serve optimistically
       if (expired) {

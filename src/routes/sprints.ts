@@ -7,11 +7,29 @@ import {
 } from '../services/sprintService.js';
 import { pool } from '../config/db.js';
 import { createNotification } from '../services/notificationService.js';
+import { logger } from '../config/logger.js';
 
 const router = Router();
 router.use(requireWorkspace);
 
 const SPRINT_STATUSES = ['planning', 'active', 'completed'] as const;
+
+// Caps how long a sprint's date range can be — the burndown endpoint below builds one data
+// point per day in this range, so an unbounded range (or end_date before start_date) turns a
+// single GET into a synchronous, event-loop-blocking loop across every workspace's requests.
+const MAX_SPRINT_DAYS = 366;
+
+function validateDateRange(data: { start_date?: string | null; end_date?: string | null }, ctx: z.RefinementCtx) {
+  if (!data.start_date || !data.end_date) return;
+  const start = new Date(data.start_date);
+  const end = new Date(data.end_date);
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+  if (days < 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'end_date must not be before start_date', path: ['end_date'] });
+  } else if (days > MAX_SPRINT_DAYS) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Sprint range cannot exceed ${MAX_SPRINT_DAYS} days`, path: ['end_date'] });
+  }
+}
 
 const createSchema = z.object({
   name:       z.string().min(1).max(255),
@@ -19,9 +37,15 @@ const createSchema = z.object({
   status:     z.enum(SPRINT_STATUSES).optional(),
   start_date: z.string().date().nullable().optional(),
   end_date:   z.string().date().nullable().optional(),
-});
+}).superRefine(validateDateRange);
 
-const updateSchema = createSchema.partial();
+const updateSchema = z.object({
+  name:       z.string().min(1).max(255).optional(),
+  goal:       z.string().optional(),
+  status:     z.enum(SPRINT_STATUSES).optional(),
+  start_date: z.string().date().nullable().optional(),
+  end_date:   z.string().date().nullable().optional(),
+}).superRefine(validateDateRange);
 
 // GET /api/sprints
 router.get('/', async (req, res, next) => {
@@ -30,7 +54,9 @@ router.get('/', async (req, res, next) => {
     res.json(sprints);
 
     // Fire-and-forget: check for sprints ending soon (≤ 2 days) and notify all admins
-    checkSprintEndAlerts(req.workspace.id, sprints).catch(() => {});
+    checkSprintEndAlerts(req.workspace.id, sprints).catch((err) => {
+      logger.warn({ err, workspaceId: req.workspace.id }, '[sprints] checkSprintEndAlerts failed');
+    });
   } catch (err) { next(err); }
 });
 
@@ -75,7 +101,9 @@ async function checkSprintEndAlerts(
              AND created_at > NOW() - INTERVAL '20 hours'
          )`,
         [workspaceId, adminId, title, sprint.id],
-      ).catch(() => {});
+      ).catch((err) => {
+        logger.warn({ err, workspaceId, adminId, sprintId: sprint.id }, '[sprints] sprint_ending notification insert failed');
+      });
     }
   }
 }
@@ -230,9 +258,19 @@ router.get('/:id/burndown', async (req, res, next) => {
       [req.params.id, req.workspace.id],
     );
 
-    // Build date series start_date..min(today, end_date)
+    // Build date series start_date..min(today, end_date). Defensively re-clamped here (in
+    // addition to the create/update validation) so a sprint row with an extreme or inverted
+    // range — from data written before validation existed, or any other path — can't turn this
+    // GET into a synchronous loop of tens of thousands of iterations.
     const start = new Date(start_date);
-    const end   = new Date(end_date);
+    let end = new Date(end_date);
+    if (end < start) {
+      res.json({ total_tasks, total_points, points: [] });
+      return;
+    }
+    const maxEnd = new Date(start);
+    maxEnd.setDate(maxEnd.getDate() + MAX_SPRINT_DAYS);
+    if (end > maxEnd) end = maxEnd;
     const today = new Date();
     const last  = end < today ? end : today;
 

@@ -105,7 +105,7 @@ export async function sendDueDateReminderEmail(opts: {
     <h2>Task due soon</h2>
     <p>Hi ${escHtml(opts.recipientName)},</p>
     <p>This is a reminder that <strong>"${escHtml(opts.taskTitle)}"</strong> is due on <strong>${escHtml(opts.dueDate)}</strong>.</p>
-    <a href="${escHtml(opts.workspaceUrl)}/tasks" class="cta">Open Task</a>
+    <a href="${escHtml(safeHref(opts.workspaceUrl))}/tasks" class="cta">Open Task</a>
   `;
   await sendEmail({
     to: opts.to,
@@ -133,7 +133,7 @@ export async function sendCommentMentionEmail(opts: {
     <blockquote style="margin:0 0 16px;padding:12px 16px;background:#f4f4f5;border-left:3px solid #18181b;border-radius:4px;font-size:14px;color:#3f3f46;">
       ${escHtml(preview)}
     </blockquote>
-    <a href="${escHtml(opts.workspaceUrl)}/tasks" class="cta">View Comment</a>
+    <a href="${escHtml(safeHref(opts.workspaceUrl))}/tasks" class="cta">View Comment</a>
   `;
   await sendEmail({
     to: opts.to,

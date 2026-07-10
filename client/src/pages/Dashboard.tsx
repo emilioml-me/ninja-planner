@@ -2,7 +2,7 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { format, isBefore, isToday, startOfDay } from 'date-fns';
-import { safeFormat } from '@/lib/utils';
+import { safeFormat, localDateOnly } from '@/lib/utils';
 import { Link } from 'wouter';
 import { useApiClient } from '@/lib/api';
 import { useIntegrationsSummary } from '@/hooks/use-integrations';
@@ -229,7 +229,7 @@ export default function Dashboard() {
   }).sort((a, b) => new Date(a.due_date!).getTime() - new Date(b.due_date!).getTime());
 
   const overdueCount  = needsAttention.filter((t) => isBefore(new Date(t.due_date! + 'T23:59:59'), todayStart)).length;
-  const dueTodayCount = needsAttention.filter((t) => isToday(new Date(t.due_date!))).length;
+  const dueTodayCount = needsAttention.filter((t) => isToday(localDateOnly(t.due_date!))).length;
   const inProgress    = tasks.filter((t) => t.status === 'in_progress').length;
 
   // ── Derived: revenue (current month) ───────────────────────────────────────

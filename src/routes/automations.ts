@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
+import { dispatchAutomations } from '../services/automationService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -94,6 +95,45 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     );
     if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
     res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// POST /api/automations/due-date-check  [admin only]
+// Dispatches the task.due_date_passed trigger for tasks that just became overdue.
+// Meant to be hit periodically by an external scheduler, mirroring the POST /api/tasks/alert-check
+// pattern used for the Slack overdue digest. Was previously a dead trigger type: it could be
+// configured on a rule but nothing anywhere ever dispatched it.
+router.post('/due-date-check', requireAdmin, async (req, res, next) => {
+  try {
+    const { rows: overdue } = await pool.query<{
+      id: string; title: string; assignee_clerk_id: string | null;
+    }>(
+      `SELECT id, title, assignee_clerk_id
+       FROM tasks
+       WHERE workspace_id = $1
+         AND status <> 'done'
+         AND deleted_at IS NULL
+         AND due_date < CURRENT_DATE
+         AND due_date_passed_notified_at IS NULL
+       LIMIT 200`,
+      [req.workspace.id],
+    );
+
+    for (const task of overdue) {
+      await dispatchAutomations({
+        type: 'task.due_date_passed',
+        workspaceId: req.workspace.id,
+        taskId: task.id,
+        assigneeId: task.assignee_clerk_id,
+        title: task.title,
+      });
+      await pool.query(
+        `UPDATE tasks SET due_date_passed_notified_at = now() WHERE id = $1 AND workspace_id = $2`,
+        [task.id, req.workspace.id],
+      );
+    }
+
+    res.json({ ok: true, dispatched: overdue.length });
   } catch (err) { next(err); }
 });
 

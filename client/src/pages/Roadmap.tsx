@@ -66,13 +66,21 @@ interface LinkedTask {
 
 const STATUSES = ['idea', 'building', 'live', 'archived'] as const;
 
+// z.string().url() accepts any syntactically valid URL scheme, including `javascript:` — which
+// is later rendered as a clickable <a href> below, so a `javascript:...` value would execute in
+// any workspace member's browser when they click it. Restrict to http(s) explicitly.
+const httpUrlSchema = z.string().max(500).refine(
+  (v) => { try { return ['http:', 'https:'].includes(new URL(v).protocol); } catch { return false; } },
+  { message: 'Must be a valid http(s) URL' },
+);
+
 const formSchema = z.object({
   title: z.string().min(1, 'Required').max(500),
   description: z.string().optional(),
   phase: z.string().max(100).optional(),
   status: z.enum(STATUSES),
   priority: z.coerce.number().int().min(0),
-  external_ref: z.string().url('Must be a valid URL').max(500).or(z.literal('')).optional(),
+  external_ref: httpUrlSchema.or(z.literal('')).optional(),
 });
 type FormData = z.infer<typeof formSchema>;
 
@@ -188,21 +196,27 @@ export default function Roadmap() {
 
   const handleDragStart = (event: DragStartEvent) => setActiveId(String(event.active.id));
 
-  const makeHandleDragEnd = (status: string, col: RoadmapItem[]) => (event: DragEndEvent) => {
+  const makeHandleDragEnd = (status: string) => (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveId(null);
     if (!over || active.id === over.id) return;
+
+    // Read the query cache's CURRENT value synchronously here, rather than using a `col` array
+    // captured in this render's closure. A background refetch that resolved between drag-start
+    // and drag-end could otherwise make this optimistic update overwrite the column with a
+    // stale snapshot — silently un-adding/re-adding items until the next automatic refetch.
+    const current = qc.getQueryData<RoadmapItem[]>(['/api/roadmap']) ?? [];
+    const col = current.filter((i) => i.status === status).sort((a, b) => a.priority - b.priority);
     const oldIndex = col.findIndex((i) => i.id === active.id);
     const newIndex = col.findIndex((i) => i.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
+
     const reordered = arrayMove(col, oldIndex, newIndex);
-    // Optimistic update
-    qc.setQueryData<RoadmapItem[]>(['/api/roadmap'], (old = []) => {
-      const others = old.filter((i) => i.status !== status);
-      const updated = reordered.map((item, idx) => ({ ...item, priority: idx }));
-      return [...others, ...updated];
-    });
-    reorderMut.mutate(reordered.map((item, idx) => ({ id: item.id, priority: idx })));
+    const updated = reordered.map((item, idx) => ({ ...item, priority: idx }));
+    const others = current.filter((i) => i.status !== status);
+
+    qc.setQueryData<RoadmapItem[]>(['/api/roadmap'], [...others, ...updated]);
+    reorderMut.mutate(updated.map((item, idx) => ({ id: item.id, priority: idx })));
   };
 
   const handleSubmit = (d: FormData) => {
@@ -353,7 +367,7 @@ export default function Roadmap() {
                     sensors={sensors}
                     collisionDetection={closestCenter}
                     onDragStart={handleDragStart}
-                    onDragEnd={makeHandleDragEnd(status, col)}
+                    onDragEnd={makeHandleDragEnd(status)}
                   >
                     <SortableContext items={col.map((i) => i.id)} strategy={verticalListSortingStrategy}>
                       <div className="flex-1 space-y-3 overflow-y-auto">

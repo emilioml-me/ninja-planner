@@ -370,30 +370,53 @@ export default function Tasks() {
 
   const bulkUpdateMutation = useMutation({
     mutationFn: async ({ ids, update }: { ids: string[]; update: Partial<Task> }) => {
-      await Promise.all(
+      const results = await Promise.allSettled(
         ids.map((id) => apiRequest('PATCH', `/api/tasks/${id}`, update)),
       );
+      const failed = ids.filter((_, i) => results[i].status === 'rejected');
+      return { succeeded: ids.length - failed.length, failed };
     },
-    onSuccess: (_, { ids }) => {
+    onSuccess: ({ succeeded, failed }) => {
+      // Always refresh — some tasks may have succeeded even if others failed.
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
       queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
-      setSelectedIds(new Set());
-      toast({ title: `${ids.length} task${ids.length !== 1 ? 's' : ''} updated` });
+      setSelectedIds(new Set(failed));
+      if (failed.length === 0) {
+        toast({ title: `${succeeded} task${succeeded !== 1 ? 's' : ''} updated` });
+      } else if (succeeded === 0) {
+        toast({ title: 'Bulk update failed', description: `All ${failed.length} tasks failed to update`, variant: 'destructive' });
+      } else {
+        toast({
+          title: `${succeeded} updated, ${failed.length} failed`,
+          description: 'Failed tasks remain selected — try again or check permissions.',
+          variant: 'destructive',
+        });
+      }
     },
-    onError: (err: Error) => toast({ title: 'Bulk update failed', description: err.message, variant: 'destructive' }),
   });
 
   const bulkDeleteMutation = useMutation({
     mutationFn: async (ids: string[]) => {
-      await Promise.all(ids.map((id) => apiRequest('DELETE', `/api/tasks/${id}`)));
+      const results = await Promise.allSettled(ids.map((id) => apiRequest('DELETE', `/api/tasks/${id}`)));
+      const failed = ids.filter((_, i) => results[i].status === 'rejected');
+      return { succeeded: ids.length - failed.length, failed };
     },
-    onSuccess: (_, ids) => {
+    onSuccess: ({ succeeded, failed }) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
-      setSelectedIds(new Set());
+      setSelectedIds(new Set(failed));
       setBulkDeleteConfirm(false);
-      toast({ title: `${ids.length} task${ids.length !== 1 ? 's' : ''} deleted` });
+      if (failed.length === 0) {
+        toast({ title: `${succeeded} task${succeeded !== 1 ? 's' : ''} deleted` });
+      } else if (succeeded === 0) {
+        toast({ title: 'Bulk delete failed', description: `All ${failed.length} tasks failed to delete`, variant: 'destructive' });
+      } else {
+        toast({
+          title: `${succeeded} deleted, ${failed.length} failed`,
+          description: 'Failed tasks remain selected — try again or check permissions.',
+          variant: 'destructive',
+        });
+      }
     },
-    onError: (err: Error) => toast({ title: 'Bulk delete failed', description: err.message, variant: 'destructive' }),
   });
 
   const importMutation = useMutation({
@@ -773,6 +796,7 @@ export default function Tasks() {
         defaultStatus={defaultStatus}
         isPending={createMutation.isPending || updateMutation.isPending}
         members={members}
+        allTasks={tasks}
       />
 
       {/* Bulk delete confirm */}
@@ -856,11 +880,34 @@ export default function Tasks() {
                 value={importCsv}
                 onChange={(e) => setImportCsv(e.target.value)}
               />
+              {(() => {
+                const lines = importCsv.split(/\r?\n/).filter((l) => l.trim());
+                if (lines.length === 0) return null;
+                const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
+                const rowCount = Math.max(lines.length - 1, 0);
+                const problems: string[] = [];
+                if (!header.includes('title')) problems.push('Header row is missing a "title" column');
+                if (rowCount === 0) problems.push('No data rows found below the header');
+                if (rowCount > 500) problems.push(`${rowCount} rows found — max 500 per import`);
+                return problems.length > 0 ? (
+                  <p className="text-xs text-destructive">{problems.join('. ')}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">{rowCount} row{rowCount !== 1 ? 's' : ''} ready to import</p>
+                );
+              })()}
               <DialogFooter>
                 <Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button>
                 <Button
                   onClick={() => importMutation.mutate(importCsv)}
-                  disabled={!importCsv.trim() || importMutation.isPending}
+                  disabled={(() => {
+                    if (!importCsv.trim() || importMutation.isPending) return true;
+                    const lines = importCsv.split(/\r?\n/).filter((l) => l.trim());
+                    if (lines.length < 2) return true;
+                    const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
+                    if (!header.includes('title')) return true;
+                    if (lines.length - 1 > 500) return true;
+                    return false;
+                  })()}
                 >
                   Import
                 </Button>

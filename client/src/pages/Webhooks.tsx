@@ -21,7 +21,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import {
-  Plus, Trash2, ChevronDown, Copy, CheckCircle2, XCircle, Clock, Power,
+  Plus, Trash2, ChevronDown, Copy, CheckCircle2, XCircle, Clock, Power, Eye, EyeOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -143,6 +143,7 @@ export default function Webhooks() {
   const [open, setOpen] = useState(false);
   const [newSecret, setNewSecret] = useState<string | null>(null);
   const [secretCopied, setSecretCopied] = useState(false);
+  const [secretRevealed, setSecretRevealed] = useState(false);
 
   const { data: endpoints = [], isLoading } = useQuery<WebhookEndpoint[]>({
     queryKey: ['/api/webhooks'],
@@ -160,7 +161,7 @@ export default function Webhooks() {
       qc.invalidateQueries({ queryKey: ['/api/webhooks'] });
       form.reset();
       setOpen(false);
-      if (endpoint.secret) setNewSecret(endpoint.secret);
+      if (endpoint.secret) { setNewSecret(endpoint.secret); setSecretRevealed(false); }
       toast({ title: 'Webhook endpoint created' });
     },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
@@ -276,7 +277,20 @@ export default function Webhooks() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2 mt-2">
-            <Input readOnly value={newSecret ?? ''} className="font-mono text-xs" />
+            <Input
+              readOnly
+              type={secretRevealed ? 'text' : 'password'}
+              value={newSecret ?? ''}
+              className="font-mono text-xs"
+            />
+            <Button
+              size="icon"
+              variant="outline"
+              onClick={() => setSecretRevealed((v) => !v)}
+              title={secretRevealed ? 'Hide' : 'Reveal'}
+            >
+              {secretRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </Button>
             <Button size="icon" variant="outline" onClick={copySecret} title="Copy">
               {secretCopied
                 ? <CheckCircle2 className="h-4 w-4 text-green-500" />

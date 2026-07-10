@@ -4,6 +4,7 @@ import { fetchAllSummaries, getIntegrationsStatus } from '../integrations/index.
 import { fetchCrmDeals } from '../integrations/crm.js';
 import { getNinjaTaskProfile } from '../integrations/ninjatask.js';
 import { upsertActualRevenue } from '../services/revenueService.js';
+import { pool } from '../config/db.js';
 import type { IntegrationsSummary } from '../integrations/types.js';
 
 const router = Router();
@@ -83,6 +84,9 @@ router.get('/summary', requireWorkspace, async (req, res, next) => {
  */
 router.post('/sync-revenue', requireWorkspace, async (req, res, next) => {
   try {
+    // Captured before the fetch so it reflects how fresh this sync's CRM data is — used to
+    // order concurrent/retried syncs regardless of which one's DB write actually lands last.
+    const syncedAt = new Date();
     const result = await fetchCrmDeals('closed_won');
     if (!result.configured) {
       res.status(503).json({ error: 'CRM integration is not configured' });
@@ -104,7 +108,7 @@ router.post('/sync-revenue', requireWorkspace, async (req, res, next) => {
     // Upsert each month
     await Promise.all(
       Array.from(byMonth.entries()).map(([periodStart, amount]) =>
-        upsertActualRevenue(req.workspace.id, periodStart, amount),
+        upsertActualRevenue(req.workspace.id, periodStart, amount, syncedAt),
       ),
     );
 
@@ -124,6 +128,15 @@ router.get('/ninja-task/profile', requireWorkspace, async (req, res, next) => {
     const clerkId = req.query.clerkId as string | undefined;
     if (!clerkId) {
       res.status(400).json({ error: 'clerkId query param required' });
+      return;
+    }
+    // Cross-tenant guard: only allow querying members of the caller's own workspace
+    const memberCheck = await pool.query(
+      'SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+      [req.workspace.id, clerkId],
+    );
+    if (memberCheck.rows.length === 0) {
+      res.status(403).json({ error: 'Not a member of this workspace' });
       return;
     }
     const result = await getNinjaTaskProfile(clerkId);

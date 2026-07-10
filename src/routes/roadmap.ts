@@ -22,13 +22,22 @@ const filterSchema = z.object({
   phase:  z.string().max(100).optional(),
 });
 
+// z.string().url() accepts any syntactically valid scheme, including `javascript:` — the
+// client renders this value as a clickable <a href>, so an unrestricted scheme here is a
+// stored-XSS vector even though the client also validates it (defense in depth: this endpoint
+// can be hit directly, bypassing the client's form validation).
+const httpUrlSchema = z.string().max(500).refine(
+  (v) => { try { return ['http:', 'https:'].includes(new URL(v).protocol); } catch { return false; } },
+  { message: 'external_ref must be a valid http(s) URL' },
+);
+
 const createSchema = z.object({
   title:        z.string().min(1).max(500),
   description:  z.string().optional(),
   phase:        z.string().max(100).optional(),
   status:       z.enum(STATUSES).optional(),
   priority:     z.number().int().min(0).optional(),
-  external_ref: z.string().url().max(500).nullable().optional(),
+  external_ref: httpUrlSchema.nullable().optional(),
 });
 
 const updateSchema = createSchema.partial();

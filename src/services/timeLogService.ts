@@ -61,16 +61,3 @@ export async function deleteTimeLog(
   const result = await pool.query(query, params);
   return (result.rowCount ?? 0) > 0;
 }
-
-export async function getTaskTimeTotal(
-  taskId: string,
-  workspaceId: string,
-): Promise<number> {
-  const result = await pool.query<{ total: number }>(
-    `SELECT COALESCE(SUM(minutes), 0)::int AS total
-     FROM   time_logs
-     WHERE  task_id = $1 AND workspace_id = $2`,
-    [taskId, workspaceId],
-  );
-  return result.rows[0].total;
-}

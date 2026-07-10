@@ -29,11 +29,14 @@ export interface GoalLink {
 }
 
 export async function getGoals(workspaceId: string): Promise<GoalWithProgress[]> {
+  // total_tasks must apply the same deleted_at filter as done_tasks — otherwise a soft-deleted
+  // task keeps inflating the denominator (or, once its sibling done task is also deleted,
+  // corrupts the ratio the other way), permanently desyncing the displayed progress percentage.
   const result = await pool.query<GoalWithProgress>(
     `SELECT
        g.*,
-       COUNT(gl.id) FILTER (WHERE gl.entity_type = 'task')::int                                     AS total_tasks,
-       COUNT(t.id)  FILTER (WHERE gl.entity_type = 'task' AND t.status = 'done' AND t.deleted_at IS NULL)::int AS done_tasks
+       COUNT(t.id) FILTER (WHERE gl.entity_type = 'task' AND t.deleted_at IS NULL)::int                       AS total_tasks,
+       COUNT(t.id) FILTER (WHERE gl.entity_type = 'task' AND t.status = 'done' AND t.deleted_at IS NULL)::int AS done_tasks
      FROM goals g
      LEFT JOIN goal_links gl ON gl.goal_id = g.id
      LEFT JOIN tasks t ON t.id = gl.entity_id AND gl.entity_type = 'task'
@@ -116,6 +119,15 @@ export async function addGoalLink(
   );
   if (goalCheck.rows.length === 0) throw new Error('Goal not found');
 
+  // Tenant-isolation guard: the linked entity must belong to the same workspace as the goal.
+  if (entityType === 'task') {
+    const taskCheck = await pool.query(
+      'SELECT id FROM tasks WHERE id = $1 AND workspace_id = $2',
+      [entityId, workspaceId],
+    );
+    if (taskCheck.rows.length === 0) throw new Error('Task not found in this workspace');
+  }
+
   const result = await pool.query<GoalLink>(
     `INSERT INTO goal_links (goal_id, entity_type, entity_id, workspace_id) VALUES ($1, $2, $3, $4)
      ON CONFLICT (goal_id, entity_type, entity_id) DO NOTHING RETURNING *`,
@@ -138,8 +150,8 @@ export async function getGoalProgressForTask(
   }>(
     `SELECT
        g.id, g.title, g.created_by,
-       COUNT(gl2.id) FILTER (WHERE gl2.entity_type = 'task')::int                                     AS total_tasks,
-       COUNT(t2.id)  FILTER (WHERE gl2.entity_type = 'task' AND t2.status = 'done' AND t2.deleted_at IS NULL)::int AS done_tasks
+       COUNT(t2.id) FILTER (WHERE gl2.entity_type = 'task' AND t2.deleted_at IS NULL)::int                       AS total_tasks,
+       COUNT(t2.id) FILTER (WHERE gl2.entity_type = 'task' AND t2.status = 'done' AND t2.deleted_at IS NULL)::int AS done_tasks
      FROM goal_links gl
      JOIN goals g ON g.id = gl.goal_id AND g.workspace_id = $2
      LEFT JOIN goal_links gl2 ON gl2.goal_id = g.id
@@ -177,17 +189,23 @@ async function _notifyGoalMilestone(
     ? `Goal complete: "${goal.title}"`
     : `Halfway there on "${goal.title}" (50%)`;
 
-  await pool.query(
+  // Permanent (not time-windowed) dedup: dedupBody is unique per (goal, milestone), and
+  // checkAndNotifyGoalMilestones now re-evaluates "is this goal AT this milestone right now"
+  // on every completion rather than trying to detect a "crossing" from a single-task delta —
+  // so this guard is what makes repeated re-checks idempotent instead of re-notifying forever.
+  // The email send below is gated on the same guard (via rowCount) so it doesn't re-fire
+  // independently of the in-app notification.
+  const inserted = await pool.query(
     `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
      SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
      WHERE NOT EXISTS (
        SELECT 1 FROM notifications
        WHERE workspace_id = $1 AND recipient_clerk_id = $2
          AND type = 'goal_milestone' AND body = $4
-         AND created_at > NOW() - INTERVAL '24 hours'
      )`,
     [workspaceId, goal.created_by, title, dedupBody],
   );
+  if ((inserted.rowCount ?? 0) === 0) return;
 
   const user = await resolveClerkEmail(goal.created_by);
   if (user) {
@@ -202,9 +220,16 @@ async function _notifyGoalMilestone(
 }
 
 /**
- * After a task is marked done, check all linked goals for 50%/100% milestone
- * crossings and fire dedup-guarded notifications + emails.
- * Fire-and-forget — never throws.
+ * After a task is marked done, check all linked goals for 50%/100% milestones and fire
+ * dedup-guarded notifications + emails. Fire-and-forget — never throws.
+ *
+ * Evaluates each goal's CURRENT done/total ratio against the thresholds rather than trying to
+ * infer a "just crossed" transition from `done_tasks - 1` (which assumed exactly one task
+ * changed since the last check). Two tasks under the same goal completing close together could
+ * jump done_tasks by more than 1 between reads, causing the old delta-based check to skip a
+ * genuinely-crossed 50% threshold. Because _notifyGoalMilestone's dedup is now permanent per
+ * (goal, milestone) rather than time-windowed, re-evaluating the current state on every call is
+ * idempotent — it only actually notifies the first time a threshold is reached.
  */
 export function checkAndNotifyGoalMilestones(
   taskId: string,
@@ -214,12 +239,11 @@ export function checkAndNotifyGoalMilestones(
   getGoalProgressForTask(taskId, workspaceId).then(async (goals) => {
     for (const goal of goals) {
       if (goal.total_tasks === 0) continue;
-      const pct     = goal.done_tasks / goal.total_tasks;
-      const prevPct = (goal.done_tasks - 1) / goal.total_tasks;
+      const pct = goal.done_tasks / goal.total_tasks;
 
-      if (goal.done_tasks === goal.total_tasks && goal.done_tasks > 0) {
+      if (goal.done_tasks === goal.total_tasks) {
         await _notifyGoalMilestone(workspaceId, goal, '100%', workspaceUrl);
-      } else if (pct >= 0.5 && prevPct < 0.5) {
+      } else if (pct >= 0.5) {
         await _notifyGoalMilestone(workspaceId, goal, '50%', workspaceUrl);
       }
     }

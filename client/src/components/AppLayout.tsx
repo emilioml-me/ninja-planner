@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { Menu, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -32,12 +32,27 @@ export function AppLayout({ children }: AppLayoutProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
+  // Pending create-task dispatch timers, so a repeated click replaces rather than stacks them,
+  // and so none of them fire after this component unmounts.
+  const createTaskTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  useEffect(() => () => {
+    createTaskTimers.current.forEach(clearTimeout);
+  }, []);
+
   const handleCreateTask = () => {
+    createTaskTimers.current.forEach(clearTimeout);
+    createTaskTimers.current = [];
     navigate('/tasks');
-    // Small delay so Tasks page can mount before we try to open the dialog
-    setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('ninja-planner:new-task'));
-    }, 100);
+    // The Tasks page's listener may not have mounted yet by the time navigation completes
+    // (React Query / code-split route mounting is async) — retry a few times over a short
+    // window instead of a single fixed delay, so a slow mount doesn't silently no-op the
+    // dialog. Re-dispatching is harmless if the listener is already up (setDialogOpen(true)
+    // is idempotent).
+    for (const delay of [0, 100, 300, 600]) {
+      createTaskTimers.current.push(
+        setTimeout(() => window.dispatchEvent(new CustomEvent('ninja-planner:new-task')), delay),
+      );
+    }
   };
 
   return (

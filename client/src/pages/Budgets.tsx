@@ -5,7 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
-import { safeFormat } from '@/lib/utils';
+import { safeFormat, todayLocal } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 import { Button } from '@/components/ui/button';
@@ -182,7 +182,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
 
   const entryForm = useForm<EntryForm>({
     resolver: zodResolver(entrySchema),
-    defaultValues: { description: '', amount: 0, category: '', entry_date: new Date().toISOString().slice(0, 10) },
+    defaultValues: { description: '', amount: 0, category: '', entry_date: todayLocal() },
   });
 
   const { data: entries = [] } = useQuery<BudgetEntry[]>({
@@ -197,7 +197,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
       qc.invalidateQueries({ queryKey: ['/api/budgets', budget.id, 'entries'] });
       qc.invalidateQueries({ queryKey: ['/api/budgets'] });
       setAddOpen(false);
-      entryForm.reset({ description: '', amount: 0, category: '', entry_date: new Date().toISOString().slice(0, 10) });
+      entryForm.reset({ description: '', amount: 0, category: '', entry_date: todayLocal() });
       toast({ title: 'Expense added' });
     },
   });

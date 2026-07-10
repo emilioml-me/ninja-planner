@@ -11,6 +11,8 @@ export interface TaskDependency {
 
 export interface DependencyTask {
   id: string;
+  /** ID of the task_dependencies row linking this task — pass this to DELETE, not `id`. */
+  dependency_id: string;
   title: string;
   status: string;
   priority: string;
@@ -30,7 +32,7 @@ export async function getDependencies(
   const [blockedBy, blocks] = await Promise.all([
     // Tasks this task is blocked by (blocking_task_id → this task)
     pool.query<DependencyTask>(
-      `SELECT t.id, t.title, t.status, t.priority
+      `SELECT t.id, td.id AS dependency_id, t.title, t.status, t.priority
        FROM task_dependencies td
        JOIN tasks t ON t.id = td.blocking_task_id
        WHERE td.blocked_task_id = $1 AND td.workspace_id = $2 AND t.deleted_at IS NULL
@@ -39,7 +41,7 @@ export async function getDependencies(
     ),
     // Tasks this task blocks (this task → blocked_task_id)
     pool.query<DependencyTask>(
-      `SELECT t.id, t.title, t.status, t.priority
+      `SELECT t.id, td.id AS dependency_id, t.title, t.status, t.priority
        FROM task_dependencies td
        JOIN tasks t ON t.id = td.blocked_task_id
        WHERE td.blocking_task_id = $1 AND td.workspace_id = $2 AND t.deleted_at IS NULL
@@ -71,13 +73,24 @@ export async function addDependency(
   );
   if (check.rows.length < 2) return null;
 
-  // Basic cycle check: prevent A→B if B→A already exists
+  // Cycle check: walk the full existing graph forward from blockedTaskId (following
+  // blocking_task_id → blocked_task_id edges) and see whether blockingTaskId is reachable.
+  // If it is, adding blockingTaskId → blockedTaskId would close a loop somewhere down the
+  // chain (not just a direct A→B/B→A reversal, which is all the old check looked for —
+  // A blocks B, B blocks C, then C blocks A used to sail through undetected).
   const cycle = await pool.query(
-    `SELECT id FROM task_dependencies
-     WHERE blocking_task_id = $1 AND blocked_task_id = $2 AND workspace_id = $3`,
-    [blockedTaskId, blockingTaskId, workspaceId],
+    `WITH RECURSIVE reachable(task_id) AS (
+       SELECT $1::uuid AS task_id
+       UNION
+       SELECT td.blocked_task_id
+       FROM task_dependencies td
+       JOIN reachable r ON td.blocking_task_id = r.task_id
+       WHERE td.workspace_id = $2
+     )
+     SELECT 1 FROM reachable WHERE task_id = $3 LIMIT 1`,
+    [blockedTaskId, workspaceId, blockingTaskId],
   );
-  if (cycle.rows.length > 0) return null; // would create direct cycle
+  if (cycle.rows.length > 0) return null; // would create a cycle
 
   const result = await pool.query<TaskDependency>(
     `INSERT INTO task_dependencies (workspace_id, blocking_task_id, blocked_task_id, created_by)

@@ -51,6 +51,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Explicit allowlist rather than relying on defSchema.partial() silently stripping unknown
+// keys — every sibling route in this codebase uses an explicit Set for this; relying purely on
+// Zod's implicit key-stripping is fragile if the schema is ever loosened (e.g. .passthrough()).
+const DEF_UPDATABLE = new Set(['name', 'field_type', 'options', 'position']);
+
 // PATCH /api/custom-fields/:id  [admin]
 router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
@@ -61,6 +66,7 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     const values: unknown[] = [];
     let i = 1;
     for (const [k, v] of Object.entries(parsed.data)) {
+      if (!DEF_UPDATABLE.has(k)) continue;
       fields.push(`${k} = $${i++}`);
       values.push(v ?? null);
     }
@@ -110,44 +116,62 @@ router.get('/values/:taskId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const MAX_VALUES_PER_REQUEST = 100;
+
 // PUT /api/custom-fields/values/:taskId  — upsert one or more values
 router.put('/values/:taskId', async (req, res, next) => {
   try {
     const entries = Array.isArray(req.body) ? req.body : [req.body];
+    if (entries.length > MAX_VALUES_PER_REQUEST) {
+      res.status(400).json({ error: `Max ${MAX_VALUES_PER_REQUEST} values per request` });
+      return;
+    }
     const taskCheck = await pool.query(
       'SELECT id FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
       [req.params.taskId, req.workspace.id],
     );
     if (taskCheck.rows.length === 0) { res.status(404).json({ error: 'Task not found' }); return; }
 
-    const results = [];
+    const parsedEntries: z.infer<typeof valueSchema>[] = [];
     for (const entry of entries) {
       const parsed = valueSchema.safeParse(entry);
       if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-      const { field_def_id, value_text, value_number, value_date } = parsed.data;
-
-      // Verify field_def belongs to this workspace
-      const defCheck = await pool.query(
-        'SELECT id FROM custom_field_defs WHERE id = $1 AND workspace_id = $2',
-        [field_def_id, req.workspace.id],
-      );
-      if (defCheck.rows.length === 0) { res.status(404).json({ error: `Field ${field_def_id} not found` }); return; }
-
-      const { rows } = await pool.query(
-        `INSERT INTO custom_field_values (field_def_id, task_id, workspace_id, value_text, value_number, value_date)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (field_def_id, task_id) DO UPDATE
-           SET value_text = EXCLUDED.value_text,
-               value_number = EXCLUDED.value_number,
-               value_date = EXCLUDED.value_date,
-               updated_at = now()
-         RETURNING *`,
-        [field_def_id, req.params.taskId, req.workspace.id,
-         value_text ?? null, value_number ?? null, value_date ?? null],
-      );
-      results.push(rows[0]);
+      parsedEntries.push(parsed.data);
     }
-    res.json(results);
+    if (parsedEntries.length === 0) { res.json([]); return; }
+
+    // One query for all field_def_ids instead of one existence-check per entry.
+    const fieldDefIds = [...new Set(parsedEntries.map((e) => e.field_def_id))];
+    const defResult = await pool.query<{ id: string }>(
+      'SELECT id FROM custom_field_defs WHERE id = ANY($1::uuid[]) AND workspace_id = $2',
+      [fieldDefIds, req.workspace.id],
+    );
+    const validDefIds = new Set(defResult.rows.map((r) => r.id));
+    const missing = fieldDefIds.find((id) => !validDefIds.has(id));
+    if (missing) { res.status(404).json({ error: `Field ${missing} not found` }); return; }
+
+    // One multi-row upsert instead of one round-trip per entry.
+    const columnsPerRow = 6;
+    const valueRows = parsedEntries.map((e) => [
+      e.field_def_id, req.params.taskId, req.workspace.id,
+      e.value_text ?? null, e.value_number ?? null, e.value_date ?? null,
+    ]);
+    const placeholders = valueRows
+      .map((_, r) => `(${Array.from({ length: columnsPerRow }, (_, c) => `$${r * columnsPerRow + c + 1}`).join(',')})`)
+      .join(', ');
+
+    const { rows } = await pool.query(
+      `INSERT INTO custom_field_values (field_def_id, task_id, workspace_id, value_text, value_number, value_date)
+       VALUES ${placeholders}
+       ON CONFLICT (field_def_id, task_id) DO UPDATE
+         SET value_text = EXCLUDED.value_text,
+             value_number = EXCLUDED.value_number,
+             value_date = EXCLUDED.value_date,
+             updated_at = now()
+       RETURNING *`,
+      valueRows.flat(),
+    );
+    res.json(rows);
   } catch (err) { next(err); }
 });
 

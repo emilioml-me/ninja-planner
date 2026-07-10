@@ -145,6 +145,10 @@ router.post('/:id/entries', async (req, res, next) => {
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
     const { description, amount, category, entry_date } = parsed.data;
+    // The UI now always sends entry_date computed in the user's local timezone (see
+    // client/src/lib/utils.ts todayLocal()) rather than relying on this fallback, which the
+    // server has no way to make timezone-correct — it can only default to server-UTC "today"
+    // for callers (e.g. a direct API integration) that omit the field entirely.
     const result = await pool.query(
       `INSERT INTO budget_entries (budget_id, workspace_id, description, amount, category, entry_date, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7)

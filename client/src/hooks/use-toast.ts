@@ -85,6 +85,8 @@ export function useToast() {
   React.useEffect(() => {
     listeners.push(setState);
     return () => { const i = listeners.indexOf(setState); if (i > -1) listeners.splice(i, 1); };
-  }, [state]);
+    // Subscribe once per mount, not on every state change — `state` is deliberately excluded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return { ...state, toast, dismiss: (toastId?: string) => dispatch({ type: 'DISMISS_TOAST', toastId }) };
 }

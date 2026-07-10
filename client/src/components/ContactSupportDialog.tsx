@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { HelpCircle, ExternalLink, CheckCircle } from 'lucide-react';
 import {
@@ -44,10 +44,14 @@ export function ContactSupportDialog({ trigger }: Props) {
     onSuccess: (data) => setResult(data),
   });
 
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
+
   function handleClose(isOpen: boolean) {
     setOpen(isOpen);
     if (!isOpen) {
-      setTimeout(() => {
+      clearTimeout(resetTimer.current);
+      resetTimer.current = setTimeout(() => {
         setSubject('');
         setDescription('');
         setPriority('medium');

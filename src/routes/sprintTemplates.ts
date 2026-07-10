@@ -14,6 +14,11 @@ const schema = z.object({
   duration_days: z.number().int().min(1).max(90).default(14),
 });
 
+const useTemplateSchema = z.object({
+  start_date: z.string().date().optional(),
+  name:       z.string().min(1).max(255).optional(),
+});
+
 // GET /api/sprint-templates
 router.get('/', async (req, res, next) => {
   try {
@@ -56,6 +61,9 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
 // POST /api/sprint-templates/:id/use  — create a sprint from the template
 router.post('/:id/use', requireAdmin, async (req, res, next) => {
   try {
+    const parsed = useTemplateSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+
     const { rows: tpl } = await pool.query(
       'SELECT * FROM sprint_templates WHERE id = $1 AND workspace_id = $2',
       [req.params.id, req.workspace.id],
@@ -63,12 +71,12 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
     if (tpl.length === 0) { res.status(404).json({ error: 'Template not found' }); return; }
     const t = tpl[0];
 
-    const startDate = req.body.start_date ?? new Date().toISOString().split('T')[0];
+    const startDate = parsed.data.start_date ?? new Date().toISOString().split('T')[0];
     const end = new Date(startDate);
     end.setDate(end.getDate() + t.duration_days - 1);
     const endDate = end.toISOString().split('T')[0];
 
-    const name = req.body.name ?? t.name;
+    const name = parsed.data.name ?? t.name;
 
     const { rows } = await pool.query(
       `INSERT INTO sprints (workspace_id, name, goal, status, start_date, end_date, created_by)

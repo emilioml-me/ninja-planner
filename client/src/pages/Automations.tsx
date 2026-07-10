@@ -78,7 +78,16 @@ function RuleForm({ onSave, onCancel, loading }: {
     }
   }
 
-  const valid = name.trim() && triggerType && actionType;
+  // Client-side check only — real SSRF protection (blocking internal/link-local addresses)
+  // lives server-side in automationService.ts's post_webhook action, which reuses the same
+  // isSafeWebhookUrl/resolvedIpIsSafe guard as user-created webhook endpoints. This is just
+  // fail-fast UX so a malformed or non-http(s) URL isn't silently saved.
+  const isValidHttpUrl = (v: string) => {
+    try { return ['http:', 'https:'].includes(new URL(v).protocol); } catch { return false; }
+  };
+  const webhookUrlValid = actionType !== 'post_webhook' || isValidHttpUrl(actionUrl);
+
+  const valid = name.trim() && triggerType && actionType && webhookUrlValid;
 
   return (
     <div className="space-y-4">
@@ -161,6 +170,9 @@ function RuleForm({ onSave, onCancel, loading }: {
           <label className="text-sm font-medium">Webhook URL</label>
           <Input value={actionUrl} onChange={(e) => setActionUrl(e.target.value)}
             placeholder="https://…" className="mt-1" />
+          {actionUrl && !webhookUrlValid && (
+            <p className="text-xs text-red-600 mt-1">Must be a valid http(s) URL</p>
+          )}
         </div>
       )}
 

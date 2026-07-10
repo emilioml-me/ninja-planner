@@ -28,6 +28,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useApiClient } from '@/lib/api';
+import { toast } from '@/hooks/use-toast';
 import { type WorkspaceMember } from '@/hooks/use-members';
 import { useTaskComments, useAddComment, useDeleteComment } from '@/hooks/use-notifications';
 import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft, Clock, Eye, EyeOff, Timer, Paperclip, FileText, Download, Image as ImageIcon } from 'lucide-react';
@@ -81,7 +82,7 @@ export interface Task {
   checklist?: ChecklistItem[];
 }
 
-interface DependencyTask { id: string; title: string; status: string; priority: string; }
+interface DependencyTask { id: string; dependency_id: string; title: string; status: string; priority: string; }
 interface TaskDependencies { blocked_by: DependencyTask[]; blocks: DependencyTask[]; }
 interface Epic { id: string; title: string; color: string; status: string; }
 interface Sprint { id: string; name: string; status: string; }
@@ -97,7 +98,14 @@ const taskFormSchema = z.object({
   recurrence_rule: z.enum(['daily', 'weekly', 'biweekly', 'monthly', '']).optional(),
   epic_id: z.string().optional(),
   sprint_id: z.string().optional(),
-  story_points: z.string().optional(), // stored as string in form, converted to int on submit
+  // Stored as string in the form, converted to int on submit. Previously any non-numeric string
+  // ("abc") passed this schema unchecked and was silently coerced to null in handleSubmit's
+  // parseInt/isNaN check — the user's typo vanished with no error shown. Validate it here so
+  // FormMessage actually surfaces the problem instead.
+  story_points: z.string().optional().refine(
+    (v) => !v || (/^\d+$/.test(v) && Number(v) <= 144),
+    { message: 'Must be a whole number from 0 to 144' },
+  ),
   start_date: z.string().optional(),
 });
 
@@ -369,18 +377,9 @@ function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
   });
 
   const removeMutation = useMutation({
-    mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${task.id}/dependencies/${id}`),
+    mutationFn: (dependencyId: string) => apiRequest('DELETE', `/api/tasks/${task.id}/dependencies/${dependencyId}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'dependencies'] }),
-  });
-
-  // Re-fetch full deps with IDs so we can remove
-  const { data: fullDeps } = useQuery<{ id: string; blocking_task_id: string; blocked_task_id: string }[]>({
-    queryKey: ['/api/tasks', task.id, 'dependencies', 'full'],
-    queryFn: async () => {
-      const d = await apiRequest<TaskDependencies>('GET', `/api/tasks/${task.id}/dependencies`);
-      return []; // We'll derive IDs differently
-    },
-    enabled: false,
+    onError: () => toast({ title: 'Failed to remove dependency', variant: 'destructive' }),
   });
 
   const blockedByIds  = new Set((deps?.blocked_by ?? []).map((t) => t.id));
@@ -402,7 +401,7 @@ function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
       <Button
         type="button" variant="ghost" size="icon"
         className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
-        onClick={() => removeMutation.mutate(t.id)}
+        onClick={() => removeMutation.mutate(t.dependency_id)}
         disabled={removeMutation.isPending}
       >
         <Trash2 className="h-3 w-3 text-muted-foreground" />
@@ -535,9 +534,13 @@ function AttachmentsTab({ task }: { task: Task }) {
   });
 
   const handleDownload = async (att: Attachment) => {
-    const { url } = await apiRequest<{ url: string }>('GET', `/api/tasks/${task.id}/attachments/${att.id}/download`);
-    const a = document.createElement('a');
-    a.href = url; a.download = att.file_name; a.click();
+    try {
+      const { url } = await apiRequest<{ url: string }>('GET', `/api/tasks/${task.id}/attachments/${att.id}/download`);
+      const a = document.createElement('a');
+      a.href = url; a.download = att.file_name; a.click();
+    } catch {
+      toast({ title: 'Failed to download attachment', variant: 'destructive' });
+    }
   };
 
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -687,8 +690,10 @@ function TimeTab({ task }: { task: Task }) {
   };
 
   const handleLog = () => {
-    const h = parseInt(hours || '0', 10);
-    const m = parseInt(mins  || '0', 10);
+    // The Input `min`/`max` attributes are advisory only — they don't block a typed or pasted
+    // out-of-range value in a React-controlled input — so clamp explicitly before submitting.
+    const h = Math.min(240, Math.max(0, parseInt(hours || '0', 10) || 0));
+    const m = Math.min(59, Math.max(0, parseInt(mins || '0', 10) || 0));
     const total = h * 60 + m;
     if (total < 1) return;
     addMut.mutate({ minutes: total, note: note.trim() || undefined });
