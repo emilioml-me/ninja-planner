@@ -7,6 +7,9 @@ export interface TimeLog {
   user_clerk_id: string;
   minutes: number;
   note: string | null;
+  billable: boolean;
+  hourly_rate: number | null;
+  budget_entry_id: string | null;
   logged_at: string;
   created_at: string;
 }
@@ -37,14 +40,42 @@ export async function addTimeLog(
   userClerkId: string,
   minutes: number,
   note?: string,
+  billable?: boolean,
+  hourlyRate?: number | null,
 ): Promise<TimeLog> {
   const result = await pool.query<TimeLog>(
-    `INSERT INTO time_logs (task_id, workspace_id, user_clerk_id, minutes, note)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO time_logs (task_id, workspace_id, user_clerk_id, minutes, note, billable, hourly_rate)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
-    [taskId, workspaceId, userClerkId, minutes, note ?? null],
+    [taskId, workspaceId, userClerkId, minutes, note ?? null, billable ?? false, hourlyRate ?? null],
   );
   return result.rows[0];
+}
+
+// Assigns (or clears, when budgetEntryId is null) which budget entry this time log counts
+// toward. Verifies the entry belongs to the same workspace so a log can't be linked cross-tenant.
+// Only the log's own author or a workspace admin may do this — otherwise any member could
+// repoint someone else's billable time onto an arbitrary budget entry, corrupting its rollup.
+export async function setTimeLogBudgetEntry(
+  id: string,
+  workspaceId: string,
+  userClerkId: string,
+  isAdmin: boolean,
+  budgetEntryId: string | null,
+): Promise<TimeLog | null> {
+  if (budgetEntryId) {
+    const check = await pool.query(
+      'SELECT 1 FROM budget_entries WHERE id = $1 AND workspace_id = $2',
+      [budgetEntryId, workspaceId],
+    );
+    if (check.rows.length === 0) return null;
+  }
+  const query = isAdmin
+    ? `UPDATE time_logs SET budget_entry_id = $1 WHERE id = $2 AND workspace_id = $3 RETURNING *`
+    : `UPDATE time_logs SET budget_entry_id = $1 WHERE id = $2 AND workspace_id = $3 AND user_clerk_id = $4 RETURNING *`;
+  const params = isAdmin ? [budgetEntryId, id, workspaceId] : [budgetEntryId, id, workspaceId, userClerkId];
+  const result = await pool.query<TimeLog>(query, params);
+  return result.rows[0] ?? null;
 }
 
 export async function deleteTimeLog(

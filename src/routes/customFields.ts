@@ -9,10 +9,11 @@ const router = Router();
 router.use(requireWorkspace);
 
 const defSchema = z.object({
-  name:       z.string().min(1).max(100),
-  field_type: z.enum(['text', 'number', 'url', 'date', 'select']),
-  options:    z.array(z.string().max(100)).max(50).optional(),
-  position:   z.number().int().min(0).optional(),
+  name:        z.string().min(1).max(100),
+  field_type:  z.enum(['text', 'number', 'url', 'date', 'select']),
+  entity_type: z.enum(['task', 'client']).default('task'),
+  options:     z.array(z.string().max(100)).max(50).optional(),
+  position:    z.number().int().min(0).optional(),
 });
 
 const valueSchema = z.object({
@@ -24,12 +25,17 @@ const valueSchema = z.object({
 
 // ── Field definitions ─────────────────────────────────────────────────────────
 
-// GET /api/custom-fields
+// GET /api/custom-fields?entity_type=task|client
 router.get('/', async (req, res, next) => {
   try {
+    const entityType = typeof req.query.entity_type === 'string' ? req.query.entity_type : undefined;
+    const conditions = ['workspace_id = $1'];
+    const values: unknown[] = [req.workspace.id];
+    if (entityType) { conditions.push(`entity_type = $${values.length + 1}`); values.push(entityType); }
+
     const { rows } = await pool.query(
-      'SELECT * FROM custom_field_defs WHERE workspace_id = $1 ORDER BY position, created_at',
-      [req.workspace.id],
+      `SELECT * FROM custom_field_defs WHERE ${conditions.join(' AND ')} ORDER BY position, created_at`,
+      values,
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -40,12 +46,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const parsed = defSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-    const { name, field_type, options, position } = parsed.data;
+    const { name, field_type, entity_type, options, position } = parsed.data;
 
     const { rows } = await pool.query(
-      `INSERT INTO custom_field_defs (workspace_id, name, field_type, options, position, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [req.workspace.id, name, field_type, options ?? null, position ?? 0, req.auth.userId],
+      `INSERT INTO custom_field_defs (workspace_id, name, field_type, entity_type, options, position, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [req.workspace.id, name, field_type, entity_type, options ?? null, position ?? 0, req.auth.userId],
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -54,6 +60,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // Explicit allowlist rather than relying on defSchema.partial() silently stripping unknown
 // keys — every sibling route in this codebase uses an explicit Set for this; relying purely on
 // Zod's implicit key-stripping is fragile if the schema is ever loosened (e.g. .passthrough()).
+// entity_type is deliberately excluded — changing which entity a definition applies to after
+// values have already been recorded against it would orphan those values' semantics.
 const DEF_UPDATABLE = new Set(['name', 'field_type', 'options', 'position']);
 
 // PATCH /api/custom-fields/:id  [admin]
@@ -164,6 +172,85 @@ router.put('/values/:taskId', async (req, res, next) => {
       `INSERT INTO custom_field_values (field_def_id, task_id, workspace_id, value_text, value_number, value_date)
        VALUES ${placeholders}
        ON CONFLICT (field_def_id, task_id) DO UPDATE
+         SET value_text = EXCLUDED.value_text,
+             value_number = EXCLUDED.value_number,
+             value_date = EXCLUDED.value_date,
+             updated_at = now()
+       RETURNING *`,
+      valueRows.flat(),
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// ── Field values (per client) ───────────────────────────────────────────────────
+// Mirrors the task routes above exactly; clients are the first non-task entity to get
+// custom fields, using the client_id column added alongside task_id in migration 041.
+
+// GET /api/custom-fields/values/client/:clientId
+router.get('/values/client/:clientId', async (req, res, next) => {
+  try {
+    const clientCheck = await pool.query(
+      'SELECT id FROM clients WHERE id = $1 AND workspace_id = $2',
+      [req.params.clientId, req.workspace.id],
+    );
+    if (clientCheck.rows.length === 0) { res.status(404).json({ error: 'Client not found' }); return; }
+
+    const { rows } = await pool.query(
+      `SELECT cfv.*, cfd.name, cfd.field_type, cfd.options
+       FROM custom_field_values cfv
+       JOIN custom_field_defs cfd ON cfd.id = cfv.field_def_id
+       WHERE cfv.client_id = $1 AND cfv.workspace_id = $2`,
+      [req.params.clientId, req.workspace.id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// PUT /api/custom-fields/values/client/:clientId  — upsert one or more values
+router.put('/values/client/:clientId', async (req, res, next) => {
+  try {
+    const entries = Array.isArray(req.body) ? req.body : [req.body];
+    if (entries.length > MAX_VALUES_PER_REQUEST) {
+      res.status(400).json({ error: `Max ${MAX_VALUES_PER_REQUEST} values per request` });
+      return;
+    }
+    const clientCheck = await pool.query(
+      'SELECT id FROM clients WHERE id = $1 AND workspace_id = $2',
+      [req.params.clientId, req.workspace.id],
+    );
+    if (clientCheck.rows.length === 0) { res.status(404).json({ error: 'Client not found' }); return; }
+
+    const parsedEntries: z.infer<typeof valueSchema>[] = [];
+    for (const entry of entries) {
+      const parsed = valueSchema.safeParse(entry);
+      if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+      parsedEntries.push(parsed.data);
+    }
+    if (parsedEntries.length === 0) { res.json([]); return; }
+
+    const fieldDefIds = [...new Set(parsedEntries.map((e) => e.field_def_id))];
+    const defResult = await pool.query<{ id: string }>(
+      `SELECT id FROM custom_field_defs WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND entity_type = 'client'`,
+      [fieldDefIds, req.workspace.id],
+    );
+    const validDefIds = new Set(defResult.rows.map((r) => r.id));
+    const missing = fieldDefIds.find((id) => !validDefIds.has(id));
+    if (missing) { res.status(404).json({ error: `Field ${missing} not found` }); return; }
+
+    const columnsPerRow = 6;
+    const valueRows = parsedEntries.map((e) => [
+      e.field_def_id, req.params.clientId, req.workspace.id,
+      e.value_text ?? null, e.value_number ?? null, e.value_date ?? null,
+    ]);
+    const placeholders = valueRows
+      .map((_, r) => `(${Array.from({ length: columnsPerRow }, (_, c) => `$${r * columnsPerRow + c + 1}`).join(',')})`)
+      .join(', ');
+
+    const { rows } = await pool.query(
+      `INSERT INTO custom_field_values (field_def_id, client_id, workspace_id, value_text, value_number, value_date)
+       VALUES ${placeholders}
+       ON CONFLICT (field_def_id, client_id) WHERE client_id IS NOT NULL DO UPDATE
          SET value_text = EXCLUDED.value_text,
              value_number = EXCLUDED.value_number,
              value_date = EXCLUDED.value_date,

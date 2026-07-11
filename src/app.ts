@@ -11,6 +11,7 @@ import { logger }      from './config/logger.js';
 import { requireAuth } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { createNinjaTaskWebhookRouter } from './routes/ninjataskWebhook.js';
+import { createCrmWebhookRouter } from './routes/crmWebhook.js';
 import { pool } from './config/db.js';
 
 import healthRouter     from './routes/health.js';
@@ -32,6 +33,7 @@ import { workspaceInvitesRouter, publicInvitesRouter } from './routes/invites.js
 import keyResultsRouter       from './routes/keyResults.js';
 import taskTemplatesRouter    from './routes/taskTemplates.js';
 import epicsRouter            from './routes/epics.js';
+import epicCommentsRouter     from './routes/epicComments.js';
 import taskDepsRouter         from './routes/taskDependencies.js';
 import timeLogsRouter         from './routes/timeLogs.js';
 import taskWatchersRouter     from './routes/taskWatchers.js';
@@ -39,6 +41,7 @@ import attachmentsRouter      from './routes/attachments.js';
 import budgetsRouter          from './routes/budgets.js';
 import changelogRouter        from './routes/changelog.js';
 import aiSummaryRouter        from './routes/aiSummary.js';
+import epicAiSummaryRouter    from './routes/epicAiSummary.js';
 import timelineRouter         from './routes/timeline.js';
 import supportRouter          from './routes/support.js';
 import ninjaStackRouter       from './routes/ninjaStack.js';
@@ -46,6 +49,7 @@ import docsRouter             from './routes/docs.js';
 import analyticsRouter        from './routes/analytics.js';
 import meetingNotesRouter     from './routes/meetingNotes.js';
 import sprintTemplatesRouter  from './routes/sprintTemplates.js';
+import epicTemplatesRouter    from './routes/epicTemplates.js';
 import projectSharesRouter    from './routes/projectShares.js';
 import guestViewRouter        from './routes/guestView.js';
 import apiKeysRouter          from './routes/apiKeys.js';
@@ -53,6 +57,7 @@ import customFieldsRouter     from './routes/customFields.js';
 import automationsRouter      from './routes/automations.js';
 import csvImportRouter        from './routes/csvImport.js';
 import externalRouter         from './routes/external.js';
+import clientsRouter          from './routes/clients.js';
 
 export function createApp() {
   const app = express();
@@ -105,13 +110,21 @@ export function createApp() {
 
   app.use('/health', healthRouter);
   app.use('/webhooks', express.raw({ type: 'application/json' }), webhooksRouter);
+
+  // Inbound webhooks from external ninja services — registered BEFORE requireAuth (and before
+  // the global express.json() below) so they can be called by server-to-server requests without
+  // a Clerk browser session. Mounted with express.raw() rather than express.json(), matching the
+  // /webhooks pattern above: HMAC verification must run over the exact bytes the sender signed —
+  // re-serializing an already-parsed JSON body can diverge in number formatting, whitespace, or
+  // key order and reject a legitimately-signed request.
+  app.use('/api/integrations/ninja-task/webhook', express.raw({ type: 'application/json' }));
+  app.use('/api/integrations/crm/webhook', express.raw({ type: 'application/json' }));
+  app.use('/api/integrations', createNinjaTaskWebhookRouter(pool));
+  app.use('/api/integrations', createCrmWebhookRouter(pool));
+
   app.use(express.json());
   app.use('/public', shareRouter);
   app.use('/public/g', guestViewRouter);
-
-  // Inbound webhooks from external ninja services — registered BEFORE requireAuth
-  // so they can be called by server-to-server requests without a Clerk browser session.
-  app.use('/api/integrations', createNinjaTaskWebhookRouter(pool));
 
   // External REST API — uses API key auth instead of Clerk; must be before requireAuth
   app.use('/api/external', externalRouter);
@@ -136,19 +149,23 @@ export function createApp() {
   app.use('/api/workspaces',     workspaceInvitesRouter);  // H1: admin invite management
   app.use('/api/invites',        publicInvitesRouter);     // H1: public token lookup + accept
   app.use('/api/epics',          epicsRouter);
+  app.use('/api/epics/:epicId/comments', epicCommentsRouter);
   app.use('/api/tasks/:taskId/dependencies',      taskDepsRouter);
   app.use('/api/tasks/:taskId/time-logs',         timeLogsRouter);
   app.use('/api/tasks/:taskId/watchers',          taskWatchersRouter);
   app.use('/api/tasks/:taskId/attachments',       attachmentsRouter);
+  app.use('/api/clients',        clientsRouter);
   app.use('/api/budgets',        budgetsRouter);
   app.use('/api/changelog',      changelogRouter);
   app.use('/api/timeline',       timelineRouter);
   app.use('/api/sprints/:sprintId/ai-summary',    aiSummaryRouter);
+  app.use('/api/epics/:epicId/ai-summary',        epicAiSummaryRouter);
   app.use('/api/support',        supportRouter);
   app.use('/api/ninja-stack',    ninjaStackRouter);
   app.use('/api/analytics',      analyticsRouter);
   app.use('/api/meeting-notes',  meetingNotesRouter);
   app.use('/api/sprint-templates', sprintTemplatesRouter);
+  app.use('/api/epic-templates', epicTemplatesRouter);
   app.use('/api/project-shares', projectSharesRouter);
   app.use('/api/api-keys',       apiKeysRouter);
   app.use('/api/custom-fields',  customFieldsRouter);

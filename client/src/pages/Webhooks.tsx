@@ -55,6 +55,11 @@ const ALL_EVENTS = [
   'task.completed',
   'task.deleted',
   'review.submitted',
+  'epic.created',
+  'epic.updated',
+  'epic.deleted',
+  'sprint.completed',
+  'goal.completed',
 ] as const;
 
 const createSchema = z.object({

@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Plus, Trash2, Zap, Play } from 'lucide-react';
+import { Plus, Trash2, Zap, Play, Pencil } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface Template {
@@ -80,10 +80,22 @@ export default function SprintTemplates() {
   const { toast } = useToast();
 
   const [creating,  setCreating]  = useState(false);
+  const [editing,   setEditing]   = useState<Template | null>(null);
   const [using,     setUsing]     = useState<Template | null>(null);
   const [newName,   setNewName]   = useState('');
   const [newGoal,   setNewGoal]   = useState('');
   const [newDays,   setNewDays]   = useState(14);
+
+  const dialogOpen = creating || !!editing;
+  const openCreate = () => { setEditing(null); setNewName(''); setNewGoal(''); setNewDays(14); setCreating(true); };
+  const openEdit = (t: Template) => {
+    setCreating(false);
+    setNewName(t.name);
+    setNewGoal(t.goal ?? '');
+    setNewDays(t.duration_days);
+    setEditing(t);
+  };
+  const closeDialog = () => { setCreating(false); setEditing(null); };
 
   const { data: templates = [], isLoading } = useQuery<Template[]>({
     queryKey: ['sprint-templates'],
@@ -106,6 +118,17 @@ export default function SprintTemplates() {
     onError: () => toast({ title: 'Failed to create template', variant: 'destructive' }),
   });
 
+  const updateMutation = useMutation({
+    mutationFn: (data: { name: string; goal?: string; duration_days: number }) =>
+      apiRequest('PATCH', `/api/sprint-templates/${editing!.id}`, data),
+    onSuccess: () => {
+      invalidate();
+      closeDialog();
+      toast({ title: 'Template updated' });
+    },
+    onError: () => toast({ title: 'Failed to update template', variant: 'destructive' }),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/sprint-templates/${id}`),
     onSuccess: () => { invalidate(); toast({ title: 'Template deleted' }); },
@@ -120,15 +143,15 @@ export default function SprintTemplates() {
           <p className="text-muted-foreground text-sm mt-1">Reusable blueprints to create sprints faster</p>
         </div>
         {isAdmin && (
-          <Button onClick={() => setCreating(true)} className="gap-2">
+          <Button onClick={openCreate} className="gap-2">
             <Plus className="h-4 w-4" /> New Template
           </Button>
         )}
       </div>
 
-      <Dialog open={creating} onOpenChange={setCreating}>
+      <Dialog open={dialogOpen} onOpenChange={(v) => { if (!v) closeDialog(); }}>
         <DialogContent>
-          <DialogHeader><DialogTitle>New Sprint Template</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{editing ? 'Edit Sprint Template' : 'New Sprint Template'}</DialogTitle></DialogHeader>
           <div className="space-y-4">
             <div>
               <label className="text-sm font-medium">Template name</label>
@@ -146,13 +169,16 @@ export default function SprintTemplates() {
                 onChange={(e) => setNewDays(parseInt(e.target.value) || 14)} className="mt-1 w-28" />
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
-              <Button onClick={() => createMutation.mutate({
-                name: newName,
-                ...(newGoal.trim() ? { goal: newGoal } : {}),
-                duration_days: newDays,
-              })} disabled={!newName.trim() || createMutation.isPending}>
-                Save Template
+              <Button variant="outline" onClick={closeDialog}>Cancel</Button>
+              <Button onClick={() => {
+                const data = {
+                  name: newName,
+                  ...(newGoal.trim() ? { goal: newGoal } : {}),
+                  duration_days: newDays,
+                };
+                editing ? updateMutation.mutate(data) : createMutation.mutate(data);
+              }} disabled={!newName.trim() || createMutation.isPending || updateMutation.isPending}>
+                {editing ? 'Update Template' : 'Save Template'}
               </Button>
             </div>
           </div>
@@ -195,12 +221,17 @@ export default function SprintTemplates() {
                     <Play className="h-3.5 w-3.5" /> Use Template
                   </Button>
                   {isAdmin && (
-                    <Button size="sm" variant="ghost"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => deleteMutation.mutate(t.id)}
-                      disabled={deleteMutation.isPending}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    <>
+                      <Button size="sm" variant="ghost" onClick={() => openEdit(t)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button size="sm" variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => deleteMutation.mutate(t.id)}
+                        disabled={deleteMutation.isPending}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </>
                   )}
                 </div>
               </CardContent>

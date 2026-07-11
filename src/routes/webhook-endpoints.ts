@@ -20,6 +20,7 @@ const safeUrl = z.string().url().max(2048).refine(isSafeWebhookUrl, {
 
 const VALID_EVENTS = [
   'task.created', 'task.updated', 'task.completed', 'task.deleted', 'review.submitted',
+  'epic.created', 'epic.updated', 'epic.deleted', 'sprint.completed', 'goal.completed',
 ] as const;
 
 const createSchema = z.object({

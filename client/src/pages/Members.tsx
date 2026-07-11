@@ -19,7 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Loader2, Trash2, Users, Crown, Shield, User, CheckCircle2, Clock, Zap, MessageSquare, TrendingUp, AlertTriangle, Link2, Copy, RefreshCw, X } from 'lucide-react';
+import { Loader2, Trash2, Users, Crown, Shield, User, CheckCircle2, Clock, Zap, MessageSquare, TrendingUp, AlertTriangle, Link2, Copy, RefreshCw, X, Eye, UserX } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 
@@ -39,7 +39,13 @@ const ROLE_META: Record<string, { label: string; icon: React.ElementType; varian
   owner:  { label: 'Owner',  icon: Crown,  variant: 'default'   },
   admin:  { label: 'Admin',  icon: Shield, variant: 'secondary' },
   member: { label: 'Member', icon: User,   variant: 'outline'   },
+  viewer: { label: 'Viewer', icon: Eye,    variant: 'outline'   },
+  guest:  { label: 'Guest',  icon: UserX,  variant: 'outline'   },
 };
+
+// DB role values are Clerk-style ('org:member', 'org:admin', 'org:owner') plus this app's own
+// 'viewer'/'guest' values — normalize before looking up display metadata.
+const roleKey = (role: string) => role.replace(/^org:/, '');
 
 export default function Members() {
   const { userId, orgRole } = useAuth();
@@ -68,6 +74,16 @@ export default function Members() {
   });
 
   const confirmTarget = members.find((m) => m.id === confirmRemoveId);
+
+  const roleMutation = useMutation({
+    mutationFn: ({ clerkUserId, role }: { clerkUserId: string; role: 'org:member' | 'viewer' }) =>
+      apiRequest('PATCH', `/api/workspaces/me/members/${clerkUserId}/role`, { role }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/workspaces/me/members'] });
+      toast({ title: 'Role updated' });
+    },
+    onError: () => toast({ title: 'Failed to update role', variant: 'destructive' }),
+  });
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
@@ -105,10 +121,12 @@ export default function Members() {
           ) : (
             <ul className="divide-y">
               {members.map((member) => {
-                const roleMeta = ROLE_META[member.role] ?? ROLE_META.member;
+                const rKey = roleKey(member.role);
+                const roleMeta = ROLE_META[rKey] ?? ROLE_META.member;
                 const RoleIcon = roleMeta.icon;
                 const isSelf = member.clerk_user_id === userId;
                 const abbr = initials(member.clerk_user_id);
+                const isOwnerOrAdmin = rKey === 'owner' || rKey === 'admin';
 
                 return (
                   <li
@@ -137,7 +155,22 @@ export default function Members() {
                       {roleMeta.label}
                     </Badge>
 
-                    {isAdmin && !isSelf && member.role !== 'owner' && (
+                    {isAdmin && !isSelf && !isOwnerOrAdmin && rKey !== 'guest' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs shrink-0 gap-1"
+                        disabled={roleMutation.isPending}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          roleMutation.mutate({ clerkUserId: member.clerk_user_id, role: rKey === 'viewer' ? 'org:member' : 'viewer' });
+                        }}
+                      >
+                        <Eye className="h-3 w-3" /> {rKey === 'viewer' ? 'Make member' : 'Make viewer'}
+                      </Button>
+                    )}
+
+                    {isAdmin && !isSelf && rKey !== 'owner' && (
                       <Button
                         variant="ghost"
                         size="icon"

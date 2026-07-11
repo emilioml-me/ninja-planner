@@ -10,8 +10,21 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Clock, Calendar, CheckCircle2, AlertCircle, Inbox, Plus } from 'lucide-react';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from '@/components/ui/dialog';
+import { Clock, Calendar, CheckCircle2, AlertCircle, Inbox, Plus, FileText } from 'lucide-react';
 import { cn, localDateOnly, safeFormat } from '@/lib/utils';
+
+interface TaskTemplate {
+  id: string;
+  name: string;
+  title: string;
+  description: string | null;
+  priority: Task['priority'];
+  tags: string[];
+  checklist: { id: string; text: string; done: boolean }[];
+}
 
 const STATUS_LABEL: Record<string, string> = {
   todo: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked',
@@ -119,10 +132,16 @@ export default function MyTasks() {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
 
   const { data: tasks = [], isLoading } = useQuery<Task[]>({
     queryKey: ['/api/tasks'],
     queryFn: () => apiRequest<Task[]>('GET', '/api/tasks'),
+  });
+
+  const { data: templates = [] } = useQuery<TaskTemplate[]>({
+    queryKey: ['/api/task-templates'],
+    queryFn: () => apiRequest<TaskTemplate[]>('GET', '/api/task-templates'),
   });
 
   const updateMutation = useMutation({
@@ -150,6 +169,30 @@ export default function MyTasks() {
 
   const openTask = (task: Task) => {
     setEditingTask(task);
+    setDialogOpen(true);
+  };
+
+  const handleSelectTemplate = (tpl: TaskTemplate) => {
+    setTemplatePickerOpen(false);
+    setEditingTask({
+      id: '',
+      title: tpl.title,
+      description: tpl.description,
+      status: 'todo',
+      priority: tpl.priority,
+      tags: tpl.tags,
+      checklist: tpl.checklist.map((item) => ({ ...item, done: false })),
+      assignee_clerk_id: userId ?? null,
+      due_date: null,
+      position: 0,
+      created_by: '',
+      workspace_id: '',
+      sprint_id: null,
+      recurrence_rule: null,
+      created_at: '',
+      updated_at: '',
+      deleted_at: null,
+    } as Task);
     setDialogOpen(true);
   };
 
@@ -187,7 +230,9 @@ export default function MyTasks() {
   ];
 
   const handleSubmit = (data: Partial<Task> & { title: string }) => {
-    if (editingTask) {
+    // editingTask?.id (not just editingTask) — the template picker sets editingTask to a
+    // draft object with id: '' to pre-fill the create form, which must still create, not update.
+    if (editingTask?.id) {
       updateMutation.mutate({ ...data, id: editingTask.id });
     } else {
       createMutation.mutate({ ...data, assignee_clerk_id: userId ?? null });
@@ -209,14 +254,27 @@ export default function MyTasks() {
             )}
           </p>
         </div>
-        <Button
-          size="sm"
-          className="gap-2"
-          onClick={() => { setEditingTask(null); setDialogOpen(true); }}
-        >
-          <Plus className="h-4 w-4" />
-          New Task
-        </Button>
+        <div className="flex items-center gap-2">
+          {templates.length > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-2"
+              onClick={() => setTemplatePickerOpen(true)}
+            >
+              <FileText className="h-4 w-4" />
+              <span className="hidden sm:inline">From Template</span>
+            </Button>
+          )}
+          <Button
+            size="sm"
+            className="gap-2"
+            onClick={() => { setEditingTask(null); setDialogOpen(true); }}
+          >
+            <Plus className="h-4 w-4" />
+            New Task
+          </Button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
@@ -272,6 +330,37 @@ export default function MyTasks() {
         isPending={createMutation.isPending || updateMutation.isPending}
         members={members}
       />
+
+      {/* Template picker */}
+      <Dialog open={templatePickerOpen} onOpenChange={setTemplatePickerOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileText className="h-4 w-4" /> Choose a Template
+            </DialogTitle>
+            <DialogDescription>Select a template to pre-fill the task form.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {templates.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4">No templates yet.</p>
+            ) : templates.map((tpl) => (
+              <button
+                key={tpl.id}
+                className="w-full text-left rounded-lg border p-3 hover:bg-muted/50 transition-colors space-y-1"
+                onClick={() => handleSelectTemplate(tpl)}
+              >
+                <p className="text-sm font-medium">{tpl.name}</p>
+                <p className="text-xs text-muted-foreground truncate">{tpl.title}</p>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="capitalize">{tpl.priority}</span>
+                  {tpl.tags.length > 0 && <span>· {tpl.tags.slice(0,3).map((t) => `#${t}`).join(' ')}</span>}
+                  {tpl.checklist.length > 0 && <span>· {tpl.checklist.length} checklist item{tpl.checklist.length !== 1 ? 's' : ''}</span>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

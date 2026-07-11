@@ -9,17 +9,49 @@ import { dispatchAutomations } from '../services/automationService.js';
 const router = Router();
 router.use(requireWorkspace);
 
-export const TRIGGER_TYPES = ['task.status_changed', 'task.assigned', 'task.due_date_passed', 'task.created'] as const;
+export const TRIGGER_TYPES = [
+  'task.status_changed', 'task.assigned', 'task.due_date_passed', 'task.created',
+  'sprint.completed', 'epic.completed', 'goal.completed',
+] as const;
 export const ACTION_TYPES  = ['notify_assignee', 'reassign_task', 'set_status', 'post_webhook'] as const;
 
-const ruleSchema = z.object({
+// trigger_config/action_config were previously unshaped z.record(unknown()) — a malformed value
+// (wrong key name, wrong type) wasn't rejected at creation time, it just silently no-op'd at
+// dispatch (automationService.ts's executeAction/triggerMatches guard every field access with
+// `if (!x) break`/`if (cfg.x && ...)`). Validating the actual shape each action/trigger type
+// expects here means bad config fails fast instead of quietly never firing.
+const triggerConfigSchema = z.object({
+  from_status:       z.string().max(50).optional(),
+  to_status:         z.string().max(50).optional(),
+  assignee_clerk_id: z.string().optional(),
+}).strict();
+
+const actionConfigSchemas: Record<typeof ACTION_TYPES[number], z.ZodTypeAny> = {
+  set_status:      z.object({ status: z.string().min(1).max(50) }).strict(),
+  reassign_task:   z.object({ assignee_clerk_id: z.string().min(1) }).strict(),
+  notify_assignee: z.object({ title: z.string().max(200).optional(), message: z.string().max(1000).optional() }).strict(),
+  post_webhook:    z.object({ endpoint_id: z.string().uuid() }).strict(),
+};
+
+function validateActionConfig(actionType: string, actionConfig: unknown): string | null {
+  const schema = actionConfigSchemas[actionType as typeof ACTION_TYPES[number]];
+  if (!schema) return 'Unknown action_type';
+  const result = schema.safeParse(actionConfig);
+  return result.success ? null : `Invalid action_config for ${actionType}: ${result.error.message}`;
+}
+
+const ruleSchemaBase = z.object({
   name:           z.string().min(1).max(200),
   trigger_type:   z.enum(TRIGGER_TYPES),
-  trigger_config: z.record(z.unknown()).default({}),
+  trigger_config: triggerConfigSchema.default({}),
   action_type:    z.enum(ACTION_TYPES),
   action_config:  z.record(z.unknown()).default({}),
   active:         z.boolean().default(true),
 });
+const ruleSchema = ruleSchemaBase.refine(
+  (d) => validateActionConfig(d.action_type, d.action_config) === null,
+  (d) => ({ message: validateActionConfig(d.action_type, d.action_config) ?? 'Invalid action_config', path: ['action_config'] }),
+);
 
 // GET /api/automations
 router.get('/', requireAdmin, async (req, res, next) => {
@@ -72,8 +104,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PATCH /api/automations/:id  [admin]
 router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const parsed = ruleSchema.partial().safeParse(req.body);
+    const parsed = ruleSchemaBase.partial().safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+
+    if (parsed.data.action_type !== undefined || parsed.data.action_config !== undefined) {
+      const current = await pool.query<{ action_type: string; action_config: Record<string, unknown> }>(
+        'SELECT action_type, action_config FROM automation_rules WHERE id = $1 AND workspace_id = $2',
+        [req.params.id, req.workspace.id],
+      );
+      if (current.rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
+      const effectiveActionType   = parsed.data.action_type   ?? current.rows[0].action_type;
+      const effectiveActionConfig = parsed.data.action_config ?? current.rows[0].action_config;
+      const error = validateActionConfig(effectiveActionType, effectiveActionConfig);
+      if (error) { res.status(400).json({ error }); return; }
+    }
 
     const fields: string[] = [];
     const values: unknown[] = [];

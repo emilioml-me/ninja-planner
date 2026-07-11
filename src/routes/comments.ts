@@ -44,7 +44,26 @@ router.post('/', async (req, res, next) => {
       return;
     }
 
-    const comment = await createComment((req.params as Record<string, string>).taskId, req.auth.userId, parsed.data.body);
+    // Validate mentions against workspace membership BEFORE persisting — only real, current
+    // members should ever end up in the stored (queryable) mentions list, not whatever the
+    // client submitted.
+    let validMentions = new Set<string>();
+    if (parsed.data.mentions?.length) {
+      const memberCheck = await pool.query<{ clerk_user_id: string }>(
+        `SELECT clerk_user_id FROM workspace_members
+         WHERE workspace_id = $1 AND clerk_user_id = ANY($2)`,
+        [req.workspace.id, parsed.data.mentions],
+      );
+      validMentions = new Set(memberCheck.rows.map((r) => r.clerk_user_id));
+      validMentions.delete(req.auth.userId); // don't notify/store self-mentions
+    }
+
+    const comment = await createComment(
+      (req.params as Record<string, string>).taskId,
+      req.auth.userId,
+      parsed.data.body,
+      [...validMentions],
+    );
 
     // Notify task owner + assignee (not the commenter themselves)
     const task = taskResult.rows[0];
@@ -89,18 +108,8 @@ router.post('/', async (req, res, next) => {
       }
     });
 
-    // @mention notifications — validate mentions are workspace members, then notify
-    if (parsed.data.mentions?.length) {
-      const mentionIds = parsed.data.mentions;
-      // Validate all mentioned IDs are actually workspace members
-      const memberCheck = await pool.query<{ clerk_user_id: string }>(
-        `SELECT clerk_user_id FROM workspace_members
-         WHERE workspace_id = $1 AND clerk_user_id = ANY($2)`,
-        [req.workspace.id, mentionIds],
-      );
-      const validMentions = new Set(memberCheck.rows.map((r) => r.clerk_user_id));
-      validMentions.delete(req.auth.userId); // don't notify self
-
+    // @mention notifications — mentions were already validated against workspace membership above
+    if (validMentions.size > 0) {
       for (const mentionedId of validMentions) {
         if (recipients.has(mentionedId)) continue; // already notified above
         createNotification({

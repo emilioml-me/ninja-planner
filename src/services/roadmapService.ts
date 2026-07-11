@@ -14,6 +14,10 @@ export interface RoadmapItem {
   // Computed from roadmap_task_links
   linked_tasks: number;
   linked_done: number;
+  // Computed from roadmap_votes — previously only surfaced on the public roadmap
+  // (shareService.getPublicRoadmap), leaving admins with no visibility into which
+  // items got public traction without opening the separate share link.
+  vote_count: number;
 }
 
 export async function getRoadmap(
@@ -30,12 +34,18 @@ export async function getRoadmap(
   const result = await pool.query<RoadmapItem>(
     `SELECT ri.*,
             COALESCE(COUNT(rtl.task_id) FILTER (WHERE t.deleted_at IS NULL), 0)::int             AS linked_tasks,
-            COALESCE(COUNT(rtl.task_id) FILTER (WHERE t.status = 'done' AND t.deleted_at IS NULL), 0)::int AS linked_done
+            COALESCE(COUNT(rtl.task_id) FILTER (WHERE t.status = 'done' AND t.deleted_at IS NULL), 0)::int AS linked_done,
+            COALESCE(v.cnt, 0)::int AS vote_count
      FROM roadmap_items ri
      LEFT JOIN roadmap_task_links rtl ON rtl.roadmap_item_id = ri.id
      LEFT JOIN tasks t ON t.id = rtl.task_id AND t.workspace_id = $1
+     LEFT JOIN (
+       SELECT roadmap_item_id, COUNT(*) AS cnt
+       FROM roadmap_votes
+       GROUP BY roadmap_item_id
+     ) v ON v.roadmap_item_id = ri.id
      WHERE ${conditions.join(' AND ')}
-     GROUP BY ri.id
+     GROUP BY ri.id, v.cnt
      ORDER BY ri.priority, ri.created_at`,
     values,
   );

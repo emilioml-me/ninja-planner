@@ -7,6 +7,7 @@ export interface Epic {
   description: string | null;
   status: string;
   color: string;
+  external_ref: string | null;
   created_by: string;
   created_at: Date;
   updated_at: Date;
@@ -19,7 +20,11 @@ export interface EpicWithStats extends Epic {
   done_points: number;
 }
 
-export async function getEpics(workspaceId: string): Promise<EpicWithStats[]> {
+export async function getEpics(workspaceId: string, status?: string): Promise<EpicWithStats[]> {
+  const conditions = ['e.workspace_id = $1'];
+  const values: unknown[] = [workspaceId];
+  if (status) { conditions.push(`e.status = $${values.length + 1}`); values.push(status); }
+
   const result = await pool.query<EpicWithStats>(
     `SELECT
        e.*,
@@ -29,12 +34,12 @@ export async function getEpics(workspaceId: string): Promise<EpicWithStats[]> {
        COALESCE(SUM(t.story_points) FILTER (WHERE t.status = 'done'), 0)::int AS done_points
      FROM epics e
      LEFT JOIN tasks t ON t.epic_id = e.id AND t.deleted_at IS NULL
-     WHERE e.workspace_id = $1
+     WHERE ${conditions.join(' AND ')}
      GROUP BY e.id
      ORDER BY
        CASE e.status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
        e.created_at DESC`,
-    [workspaceId],
+    values,
   );
   return result.rows;
 }
@@ -49,12 +54,13 @@ export async function getEpicById(id: string, workspaceId: string): Promise<Epic
 
 export async function createEpic(
   workspaceId: string,
-  data: { title: string; description?: string; status?: string; color?: string },
+  data: { title: string; description?: string; status?: string; color?: string; external_ref?: string | null },
   createdBy: string,
+  db: Pick<import('pg').PoolClient, 'query'> = pool,
 ): Promise<Epic> {
-  const result = await pool.query<Epic>(
-    `INSERT INTO epics (workspace_id, title, description, status, color, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
+  const result = await db.query<Epic>(
+    `INSERT INTO epics (workspace_id, title, description, status, color, external_ref, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
     [
       workspaceId,
@@ -62,18 +68,19 @@ export async function createEpic(
       data.description ?? null,
       data.status ?? 'active',
       data.color ?? '#6366f1',
+      data.external_ref ?? null,
       createdBy,
     ],
   );
   return result.rows[0];
 }
 
-const EPIC_UPDATABLE = new Set(['title', 'description', 'status', 'color']);
+const EPIC_UPDATABLE = new Set(['title', 'description', 'status', 'color', 'external_ref']);
 
 export async function updateEpic(
   id: string,
   workspaceId: string,
-  data: Partial<Pick<Epic, 'title' | 'description' | 'status' | 'color'>>,
+  data: Partial<Pick<Epic, 'title' | 'description' | 'status' | 'color' | 'external_ref'>>,
 ): Promise<Epic | null> {
   const fields: string[] = ['updated_at = now()'];
   const values: unknown[] = [];

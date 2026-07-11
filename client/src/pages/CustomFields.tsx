@@ -16,6 +16,7 @@ interface FieldDef {
   id: string;
   name: string;
   field_type: 'text' | 'number' | 'url' | 'date' | 'select';
+  entity_type: 'task' | 'client';
   options: string[] | null;
   position: number;
   created_at: string;
@@ -23,6 +24,10 @@ interface FieldDef {
 
 const TYPE_LABELS: Record<string, string> = {
   text: 'Text', number: 'Number', url: 'URL', date: 'Date', select: 'Select',
+};
+
+const ENTITY_LABELS: Record<string, string> = {
+  task: 'Tasks', client: 'Clients',
 };
 
 export default function CustomFields() {
@@ -34,6 +39,7 @@ export default function CustomFields() {
   const [creating,     setCreating]     = useState(false);
   const [newName,      setNewName]      = useState('');
   const [newType,      setNewType]      = useState<FieldDef['field_type']>('text');
+  const [newEntity,    setNewEntity]    = useState<FieldDef['entity_type']>('task');
   const [newOptions,   setNewOptions]   = useState('');
 
   const { data: fields = [], isLoading } = useQuery<FieldDef[]>({
@@ -44,13 +50,14 @@ export default function CustomFields() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['custom-fields'] });
 
   const createMutation = useMutation({
-    mutationFn: (data: { name: string; field_type: string; options?: string[] }) =>
+    mutationFn: (data: { name: string; field_type: string; entity_type: string; options?: string[] }) =>
       apiRequest('POST', '/api/custom-fields', data),
     onSuccess: () => {
       invalidate();
       setCreating(false);
       setNewName('');
       setNewType('text');
+      setNewEntity('task');
       setNewOptions('');
       toast({ title: 'Field created' });
     },
@@ -67,7 +74,7 @@ export default function CustomFields() {
     const options = newType === 'select'
       ? newOptions.split(',').map((o) => o.trim()).filter(Boolean)
       : undefined;
-    createMutation.mutate({ name: newName, field_type: newType, options });
+    createMutation.mutate({ name: newName, field_type: newType, entity_type: newEntity, options });
   }
 
   if (!isAdmin) {
@@ -100,16 +107,29 @@ export default function CustomFields() {
               <Input value={newName} onChange={(e) => setNewName(e.target.value)}
                 placeholder="e.g. Story Points, Client Name, Review URL" className="mt-1" />
             </div>
-            <div>
-              <label className="text-sm font-medium">Type</label>
-              <Select value={newType} onValueChange={(v) => setNewType(v as FieldDef['field_type'])}>
-                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {Object.entries(TYPE_LABELS).map(([v, l]) => (
-                    <SelectItem key={v} value={v}>{l}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm font-medium">Applies to</label>
+                <Select value={newEntity} onValueChange={(v) => setNewEntity(v as FieldDef['entity_type'])}>
+                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(ENTITY_LABELS).map(([v, l]) => (
+                      <SelectItem key={v} value={v}>{l}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-sm font-medium">Type</label>
+                <Select value={newType} onValueChange={(v) => setNewType(v as FieldDef['field_type'])}>
+                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(TYPE_LABELS).map(([v, l]) => (
+                      <SelectItem key={v} value={v}>{l}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             {newType === 'select' && (
               <div>
@@ -151,6 +171,7 @@ export default function CustomFields() {
                       </span>
                     )}
                   </div>
+                  <Badge variant="outline" className="text-xs">{ENTITY_LABELS[f.entity_type]}</Badge>
                   <Badge variant="secondary" className="text-xs">{TYPE_LABELS[f.field_type]}</Badge>
                   <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive hover:text-destructive"
                     onClick={() => deleteMutation.mutate(f.id)}
@@ -165,7 +186,7 @@ export default function CustomFields() {
       )}
 
       <p className="text-xs text-muted-foreground">
-        Custom field values appear in the task form under "Custom Fields". Values are stored per-task and visible to all workspace members.
+        Task fields appear in the task edit dialog; client fields appear in the client edit dialog. Values are visible to all workspace members.
       </p>
     </div>
   );

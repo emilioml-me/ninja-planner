@@ -5,6 +5,7 @@ export interface TaskComment {
   task_id: string;
   author_clerk_id: string;
   body: string;
+  mentions: string[];
   created_at: Date;
   updated_at: Date;
 }
@@ -25,12 +26,13 @@ export async function createComment(
   taskId: string,
   authorId: string,
   body: string,
+  mentions: string[] = [],
 ): Promise<TaskComment> {
   const result = await pool.query<TaskComment>(
-    `INSERT INTO task_comments (task_id, author_clerk_id, body)
-     VALUES ($1, $2, $3)
+    `INSERT INTO task_comments (task_id, author_clerk_id, body, mentions)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [taskId, authorId, body.trim()],
+    [taskId, authorId, body.trim(), mentions],
   );
   return result.rows[0];
 }
@@ -48,6 +50,58 @@ export async function deleteComment(
        AND tc.author_clerk_id = $2
        AND tc.task_id = t.id
        AND t.workspace_id = $3`,
+    [commentId, authorId, workspaceId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export interface EpicComment {
+  id: string;
+  epic_id: string;
+  author_clerk_id: string;
+  body: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export async function getEpicComments(epicId: string, workspaceId: string): Promise<EpicComment[]> {
+  const result = await pool.query<EpicComment>(
+    `SELECT ec.*
+     FROM epic_comments ec
+     JOIN epics e ON e.id = ec.epic_id
+     WHERE ec.epic_id = $1 AND e.workspace_id = $2
+     ORDER BY ec.created_at`,
+    [epicId, workspaceId],
+  );
+  return result.rows;
+}
+
+export async function createEpicComment(
+  epicId: string,
+  authorId: string,
+  body: string,
+): Promise<EpicComment> {
+  const result = await pool.query<EpicComment>(
+    `INSERT INTO epic_comments (epic_id, author_clerk_id, body)
+     VALUES ($1, $2, $3)
+     RETURNING *`,
+    [epicId, authorId, body.trim()],
+  );
+  return result.rows[0];
+}
+
+export async function deleteEpicComment(
+  commentId: string,
+  authorId: string,
+  workspaceId: string,
+): Promise<boolean> {
+  const result = await pool.query(
+    `DELETE FROM epic_comments ec
+     USING epics e
+     WHERE ec.id = $1
+       AND ec.author_clerk_id = $2
+       AND ec.epic_id = e.id
+       AND e.workspace_id = $3`,
     [commentId, authorId, workspaceId],
   );
   return (result.rowCount ?? 0) > 0;

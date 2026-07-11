@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -37,11 +37,14 @@ interface Budget {
   description: string | null;
   target_amount: string;
   actual_amount: string;
+  time_cost: string;
   currency: string;
   period_start: string | null;
   period_end: string | null;
   status: string;
   entry_count: number;
+  epic_id: string | null;
+  sprint_id: string | null;
 }
 
 interface BudgetEntry {
@@ -54,6 +57,8 @@ interface BudgetEntry {
   display_name: string | null;
 }
 
+const NONE = '__none__';
+
 const budgetSchema = z.object({
   name:          z.string().min(1, 'Required').max(255),
   description:   z.string().optional(),
@@ -62,6 +67,8 @@ const budgetSchema = z.object({
   period_start:  z.string().optional(),
   period_end:    z.string().optional(),
   status:        z.enum(['active', 'closed']).default('active'),
+  epic_id:       z.string().default(NONE),
+  sprint_id:     z.string().default(NONE),
 });
 type BudgetForm = z.infer<typeof budgetSchema>;
 
@@ -83,6 +90,7 @@ function BudgetFormDialog({
   open: boolean; onOpenChange: (v: boolean) => void;
   budget?: Budget | null; onSave: (d: BudgetForm) => void; isPending?: boolean;
 }) {
+  const { apiRequest } = useApiClient();
   const form = useForm<BudgetForm>({
     resolver: zodResolver(budgetSchema),
     defaultValues: {
@@ -93,8 +101,40 @@ function BudgetFormDialog({
       period_start: budget?.period_start?.slice(0, 10) ?? '',
       period_end: budget?.period_end?.slice(0, 10) ?? '',
       status: (budget?.status ?? 'active') as 'active' | 'closed',
+      epic_id: budget?.epic_id ?? NONE,
+      sprint_id: budget?.sprint_id ?? NONE,
     },
   });
+
+  const { data: epics = [] } = useQuery<{ id: string; title: string }[]>({
+    queryKey: ['/api/epics'],
+    queryFn: () => apiRequest('GET', '/api/epics'),
+    enabled: open,
+  });
+  const { data: sprints = [] } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ['/api/sprints'],
+    queryFn: () => apiRequest('GET', '/api/sprints'),
+    enabled: open,
+  });
+
+  // Both create and edit dialogs stay mounted (only `open` toggles), and react-hook-form only
+  // applies `defaultValues` on initial mount — without this, editing any budget after the dialog
+  // has mounted once shows stale/blank data instead of that budget's actual values.
+  useEffect(() => {
+    if (!open) return;
+    form.reset({
+      name: budget?.name ?? '',
+      description: budget?.description ?? '',
+      target_amount: budget ? Number(budget.target_amount) : 0,
+      currency: budget?.currency ?? 'USD',
+      period_start: budget?.period_start?.slice(0, 10) ?? '',
+      period_end: budget?.period_end?.slice(0, 10) ?? '',
+      status: (budget?.status ?? 'active') as 'active' | 'closed',
+      epic_id: budget?.epic_id ?? NONE,
+      sprint_id: budget?.sprint_id ?? NONE,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, budget]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -149,6 +189,33 @@ function BudgetFormDialog({
                 </FormItem>
               )} />
             </div>
+            <div className="grid grid-cols-2 gap-4">
+              <FormField control={form.control} name="epic_id" render={({ field }) => (
+                <FormItem><FormLabel>Linked Epic</FormLabel>
+                  <Select onValueChange={(v) => { field.onChange(v); if (v !== NONE) form.setValue('sprint_id', NONE); }} value={field.value}>
+                    <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                    <SelectContent>
+                      <SelectItem value={NONE}>None</SelectItem>
+                      {epics.map((e) => <SelectItem key={e.id} value={e.id}>{e.title}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </FormItem>
+              )} />
+              <FormField control={form.control} name="sprint_id" render={({ field }) => (
+                <FormItem><FormLabel>Linked Sprint</FormLabel>
+                  <Select onValueChange={(v) => { field.onChange(v); if (v !== NONE) form.setValue('epic_id', NONE); }} value={field.value}>
+                    <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                    <SelectContent>
+                      <SelectItem value={NONE}>None</SelectItem>
+                      {sprints.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </FormItem>
+              )} />
+            </div>
+            <p className="text-xs text-muted-foreground -mt-2">
+              Linking an epic or sprint rolls up billable logged time as estimated spend.
+            </p>
             <FormField control={form.control} name="status" render={({ field }) => (
               <FormItem><FormLabel>Status</FormLabel>
                 <Select onValueChange={field.onChange} value={field.value}>
@@ -212,6 +279,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
 
   const target = Number(budget.target_amount);
   const actual = Number(budget.actual_amount);
+  const timeCost = Number(budget.time_cost ?? 0);
   const pct = target > 0 ? Math.min(Math.round((actual / target) * 100), 100) : 0;
   const over = actual > target;
 
@@ -241,6 +309,11 @@ function BudgetDetail({ budget }: { budget: Budget }) {
             value={pct}
             className={cn('h-1.5', over && '[&>div]:bg-destructive')}
           />
+          {timeCost > 0 && (
+            <p className="text-[10px] text-muted-foreground">
+              + {fmt(timeCost, budget.currency)} in billable logged time (not counted above)
+            </p>
+          )}
         </div>
       </button>
 
@@ -363,11 +436,13 @@ export default function Budgets() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/budgets'] });
 
-  // Strip empty period strings — backend z.string().date() rejects ""
+  // Strip empty period strings — backend z.string().date() rejects "". NONE sentinel maps to null.
   const sanitize = (d: BudgetForm) => ({
     ...d,
     period_start: d.period_start || undefined,
     period_end:   d.period_end   || undefined,
+    epic_id:      d.epic_id === NONE ? null : d.epic_id,
+    sprint_id:    d.sprint_id === NONE ? null : d.sprint_id,
   });
 
   const createMut = useMutation({

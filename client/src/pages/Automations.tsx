@@ -32,6 +32,9 @@ const TRIGGERS = [
   { value: 'task.assigned',        label: 'Task assigned' },
   { value: 'task.created',         label: 'Task created' },
   { value: 'task.due_date_passed', label: 'Task past due date' },
+  { value: 'sprint.completed',     label: 'Sprint completed' },
+  { value: 'epic.completed',       label: 'Epic completed' },
+  { value: 'goal.completed',       label: 'Goal completed' },
 ];
 
 const ACTIONS = [
@@ -55,8 +58,14 @@ function RuleForm({ onSave, onCancel, loading }: {
   const [actionType,    setActionType]    = useState('notify_assignee');
   const [actionTitle,   setActionTitle]   = useState('');
   const [actionStatus,  setActionStatus]  = useState('done');
-  const [actionUrl,     setActionUrl]     = useState('');
+  const [actionEndpointId, setActionEndpointId] = useState('');
   const [actionAssignee,setActionAssignee]= useState('');
+
+  const { apiRequest } = useApiClient();
+  const { data: endpoints = [] } = useQuery<{ id: string; url: string; active: boolean }[]>({
+    queryKey: ['/api/webhooks'],
+    queryFn: () => apiRequest('GET', '/api/webhooks'),
+  });
 
   function buildTriggerConfig(): Record<string, string> {
     if (triggerType === 'task.status_changed') {
@@ -73,21 +82,18 @@ function RuleForm({ onSave, onCancel, loading }: {
       case 'notify_assignee': return actionTitle ? { title: actionTitle } : {};
       case 'set_status':      return { status: actionStatus };
       case 'reassign_task':   return { assignee_clerk_id: actionAssignee };
-      case 'post_webhook':    return { url: actionUrl };
+      case 'post_webhook':    return { endpoint_id: actionEndpointId };
       default:                return {};
     }
   }
 
-  // Client-side check only — real SSRF protection (blocking internal/link-local addresses)
-  // lives server-side in automationService.ts's post_webhook action, which reuses the same
-  // isSafeWebhookUrl/resolvedIpIsSafe guard as user-created webhook endpoints. This is just
-  // fail-fast UX so a malformed or non-http(s) URL isn't silently saved.
-  const isValidHttpUrl = (v: string) => {
-    try { return ['http:', 'https:'].includes(new URL(v).protocol); } catch { return false; }
-  };
-  const webhookUrlValid = actionType !== 'post_webhook' || isValidHttpUrl(actionUrl);
+  // Posting now targets a registered Webhook endpoint (Webhooks page) instead of a raw typed
+  // URL — the server delivers through that endpoint's existing signed/retried/logged pipeline
+  // instead of a bare unsigned fetch, and reuses the SSRF guard already applied when the
+  // endpoint itself was created.
+  const webhookSelectionValid = actionType !== 'post_webhook' || !!actionEndpointId;
 
-  const valid = name.trim() && triggerType && actionType && webhookUrlValid;
+  const valid = name.trim() && triggerType && actionType && webhookSelectionValid;
 
   return (
     <div className="space-y-4">
@@ -167,11 +173,20 @@ function RuleForm({ onSave, onCancel, loading }: {
       )}
       {actionType === 'post_webhook' && (
         <div>
-          <label className="text-sm font-medium">Webhook URL</label>
-          <Input value={actionUrl} onChange={(e) => setActionUrl(e.target.value)}
-            placeholder="https://…" className="mt-1" />
-          {actionUrl && !webhookUrlValid && (
-            <p className="text-xs text-red-600 mt-1">Must be a valid http(s) URL</p>
+          <label className="text-sm font-medium">Webhook endpoint</label>
+          {endpoints.length === 0 ? (
+            <p className="text-xs text-muted-foreground mt-1">
+              No webhook endpoints registered yet — add one on the Webhooks page first.
+            </p>
+          ) : (
+            <Select value={actionEndpointId} onValueChange={setActionEndpointId}>
+              <SelectTrigger className="mt-1"><SelectValue placeholder="Choose an endpoint" /></SelectTrigger>
+              <SelectContent>
+                {endpoints.map((e) => (
+                  <SelectItem key={e.id} value={e.id}>{e.url}{!e.active ? ' (disabled)' : ''}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
         </div>
       )}

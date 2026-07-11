@@ -8,7 +8,7 @@ import { pool } from '../config/db.js';
 const router = Router();
 router.use(requireWorkspace);
 
-const VALID_SCOPES = new Set(['tasks:read', 'roadmap:read', 'goals:read', 'sprints:read']);
+const VALID_SCOPES = new Set(['tasks:read', 'roadmap:read', 'goals:read', 'sprints:read', 'epics:read', 'changelog:read', 'budgets:read']);
 
 const createSchema = z.object({
   label:      z.string().min(1).max(100).default('Guest Link'),

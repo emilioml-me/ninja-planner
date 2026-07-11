@@ -313,6 +313,15 @@ export default function Revenue() {
     onError: (e: Error) => toast({ title: 'Sync failed', description: e.message, variant: 'destructive' }),
   });
 
+  const syncPaymentsMut = useMutation({
+    mutationFn: () => apiRequest<{ synced: number }>('POST', '/api/integrations/sync-revenue-payments'),
+    onSuccess: (d) => {
+      qc.invalidateQueries({ queryKey: ['/api/revenue'] });
+      toast({ title: `Payments sync complete`, description: `${d.synced} period${d.synced !== 1 ? 's' : ''} updated` });
+    },
+    onError: (e: Error) => toast({ title: 'Sync failed', description: e.message, variant: 'destructive' }),
+  });
+
   const totalTarget = targets.reduce((s, t) => s + Number(t.target_amount), 0);
   const totalActual = targets.reduce((s, t) => s + Number(t.actual_amount), 0);
   const avgPct = targets.length ? Math.round(targets.reduce((s, t) => s + pct(t.actual_amount, t.target_amount), 0) / targets.length) : 0;
@@ -353,6 +362,17 @@ export default function Revenue() {
           >
             <RefreshCw className={cn('h-4 w-4', syncCrmMut.isPending && 'animate-spin')} />
             <span className="hidden sm:inline">Sync CRM</span>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-2"
+            onClick={() => syncPaymentsMut.mutate()}
+            disabled={syncPaymentsMut.isPending}
+            title="Pull current/last month totals from Payments and update actual revenue"
+          >
+            <RefreshCw className={cn('h-4 w-4', syncPaymentsMut.isPending && 'animate-spin')} />
+            <span className="hidden sm:inline">Sync Payments</span>
           </Button>
           <Button size="sm" className="gap-2" onClick={openCreate}>
             <Plus className="h-4 w-4" /> Add Target

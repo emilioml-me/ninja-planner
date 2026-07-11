@@ -3,10 +3,11 @@ import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
-  getSprints, createSprint, updateSprint, deleteSprint, getSprintTasks,
+  getSprints, getSprintById, createSprint, updateSprint, deleteSprint, getSprintTasks,
 } from '../services/sprintService.js';
 import { pool } from '../config/db.js';
 import { createNotification } from '../services/notificationService.js';
+import { dispatchAutomations } from '../services/automationService.js';
 import { logger } from '../config/logger.js';
 
 const router = Router();
@@ -53,7 +54,10 @@ router.get('/', async (req, res, next) => {
     const sprints = await getSprints(req.workspace.id);
     res.json(sprints);
 
-    // Fire-and-forget: check for sprints ending soon (≤ 2 days) and notify all admins
+    // Fire-and-forget: check for sprints ending soon (≤ 2 days) and notify all admins.
+    // Unlike /api/tasks/alert-check (which needs an external scheduler to ever run), this piggy-
+    // backs on normal traffic — it only fires when someone in the workspace loads sprints, so a
+    // sprint ending while nobody visits the app for days won't alert until someone next loads it.
     checkSprintEndAlerts(req.workspace.id, sprints).catch((err) => {
       logger.warn({ err, workspaceId: req.workspace.id }, '[sprints] checkSprintEndAlerts failed');
     });
@@ -99,6 +103,10 @@ async function checkSprintEndAlerts(
              AND type = 'sprint_ending'
              AND body = $4
              AND created_at > NOW() - INTERVAL '20 hours'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM notification_preferences
+           WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'sprint_ending' AND enabled = false
          )`,
         [workspaceId, adminId, title, sprint.id],
       ).catch((err) => {
@@ -114,6 +122,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     res.status(201).json(await createSprint(req.workspace.id, parsed.data, req.auth.userId));
+  } catch (err) { next(err); }
+});
+
+// GET /api/sprints/:id
+router.get('/:id', async (req, res, next) => {
+  try {
+    const sprint = await getSprintById(req.params.id, req.workspace.id);
+    if (!sprint) { res.status(404).json({ error: 'Sprint not found' }); return; }
+    res.json(sprint);
   } catch (err) { next(err); }
 });
 
@@ -136,11 +153,22 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
         const { createQuestInNinjaTask } = await import("../integrations/ninjatask.js");
         for (const member of membersResult.rows) {
           try {
-            await createQuestInNinjaTask({
+            const quest = await createQuestInNinjaTask({
               title: sprint.name,
               description: sprint.goal ?? null,
               clerkId: member.clerk_user_id,
             });
+            // One quest is created per member, so it can't be represented by the single
+            // sprints.ninja_task_quest_id column — this table tracks all of them, which is what
+            // the quest_complete webhook needs to map an incoming questId back to a member.
+            if (quest?.id) {
+              await pool.query(
+                `INSERT INTO sprint_quests (sprint_id, workspace_id, clerk_user_id, ninja_task_quest_id)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (ninja_task_quest_id) DO NOTHING`,
+                [sprint.id, req.workspace.id, member.clerk_user_id, quest.id],
+              );
+            }
           } catch (err) {
             console.error("[ninja-task] quest create failed for member:", member.clerk_user_id, err);
           }
@@ -150,6 +178,13 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
 
     // When completing a sprint, include the count of still-incomplete tasks
     if (parsed.data.status === 'completed') {
+      dispatchAutomations({
+        type: 'sprint.completed',
+        workspaceId: req.workspace.id,
+        sprintId: sprint.id,
+        title: sprint.name,
+      }).catch(() => {});
+
       const incompleteResult = await pool.query<{ count: number }>(
         `SELECT COUNT(*)::int AS count FROM tasks
          WHERE sprint_id = $1 AND workspace_id = $2 AND status <> 'done' AND deleted_at IS NULL`,

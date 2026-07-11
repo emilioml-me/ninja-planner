@@ -28,6 +28,8 @@ import {
   Settings2,
   Link2,
   Copy,
+  Building2,
+  Bell,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -43,6 +45,7 @@ const NAV = [
   { href: '/goals',        label: 'Goals',         icon: Target    },
   { href: '/sprints',      label: 'Sprints',       icon: Zap       },
   { href: '/epics',        label: 'Epics',         icon: Layers    },
+  { href: '/clients',      label: 'Clients',       icon: Building2 },
   { href: '/budgets',      label: 'Budgets',       icon: Wallet    },
   { href: '/changelog',    label: 'Changelog',     icon: History      },
   { href: '/timeline',     label: 'Timeline',      icon: CalendarDays },
@@ -55,9 +58,11 @@ const NAV = [
   { href: '/integrations',  label: 'Integrations',  icon: Plug },
   { href: '/webhooks',      label: 'Webhooks',       icon: Webhook },
   { href: '/sprint-templates',        label: 'Sprint Templates', icon: Copy },
+  { href: '/epic-templates',          label: 'Epic Templates',   icon: Layers },
   { href: '/settings/api-keys',       label: 'API Keys',         icon: Key },
   { href: '/settings/custom-fields',  label: 'Custom Fields',    icon: Settings2 },
   { href: '/settings/guest-links',    label: 'Guest Links',      icon: Link2 },
+  { href: '/settings/notifications',  label: 'Notifications',    icon: Bell },
   { href: '/settings/billing',        label: 'Billing',          icon: CreditCard },
 ];
 

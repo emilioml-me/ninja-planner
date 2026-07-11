@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
-import { requireAdmin } from '../middleware/requireAdmin.js';
+import { requireAdmin, ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { getMembersForWorkspace, removeMember } from '../services/workspaceService.js';
 import { clerkClient } from '../config/clerk.js';
 import { logger } from '../config/logger.js';
@@ -121,6 +122,34 @@ router.get('/me/members/:clerkUserId/stats', requireWorkspace, async (req, res, 
   } catch (err) {
     next(err);
   }
+});
+
+// PATCH /api/workspaces/me/members/:memberId/role  [admin only]
+// Toggles between 'org:member' and 'viewer' (read-only). Clerk-managed admin/owner roles are
+// not settable here — those come from the org's own role sync, not this app.
+router.patch('/me/members/:memberId/role', requireWorkspace, requireAdmin, async (req, res, next) => {
+  try {
+    const parsed = z.object({ role: z.enum(['org:member', 'viewer']) }).safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+
+    const target = await pool.query<{ role: string }>(
+      'SELECT role FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+      [req.workspace.id, req.params.memberId],
+    );
+    if (target.rows.length === 0) { res.status(404).json({ error: 'Member not found' }); return; }
+    if (ADMIN_ROLES.has(target.rows[0].role) || target.rows[0].role === 'guest') {
+      res.status(400).json({ error: 'Cannot change role for an admin/owner or guest member here' });
+      return;
+    }
+
+    const result = await pool.query(
+      `UPDATE workspace_members SET role = $1
+       WHERE workspace_id = $2 AND clerk_user_id = $3
+       RETURNING clerk_user_id, role`,
+      [parsed.data.role, req.workspace.id, req.params.memberId],
+    );
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
 });
 
 // DELETE /api/workspaces/me/members/:memberId

@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Plus, MoreVertical, Pencil, Trash2, Users } from 'lucide-react';
+import { CustomFieldsSection } from '@/components/CustomFieldsSection';
 
 interface Client {
   id: string;
@@ -37,6 +38,7 @@ interface Client {
   stage: string;
   mrr: string;
   notes: string | null;
+  external_crm_id: string | null;
 }
 
 const STAGES = ['prospect', 'proposal', 'active', 'churned'] as const;
@@ -184,7 +186,12 @@ export default function Clients() {
                 <TableBody>
                   {filtered.map((c) => (
                     <TableRow key={c.id}>
-                      <TableCell className="font-medium">{c.name}</TableCell>
+                      <TableCell className="font-medium">
+                        {c.name}
+                        {c.external_crm_id && (
+                          <Badge variant="outline" className="ml-2 text-[9px] px-1 align-middle">CRM</Badge>
+                        )}
+                      </TableCell>
                       <TableCell className="text-muted-foreground text-sm">
                         <div>{c.contact_name}</div>
                         {c.contact_email && (
@@ -295,6 +302,9 @@ export default function Clients() {
               </DialogFooter>
             </form>
           </Form>
+
+          {/* Custom fields only make sense once the client exists */}
+          {editing && <CustomFieldsSection entityType="client" entityId={editing.id} />}
         </DialogContent>
       </Dialog>
     </div>

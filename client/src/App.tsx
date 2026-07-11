@@ -35,6 +35,9 @@ import GuestView from './pages/GuestView';
 import CustomFields from './pages/CustomFields';
 import GuestLinks from './pages/GuestLinks';
 import SprintTemplates from './pages/SprintTemplates';
+import Clients from './pages/Clients';
+import NotificationPreferences from './pages/NotificationPreferences';
+import EpicTemplates from './pages/EpicTemplates';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -78,7 +81,10 @@ function AuthenticatedApp() {
             <Route path="/settings/api-keys"      component={ApiKeys} />
             <Route path="/settings/custom-fields" component={CustomFields} />
             <Route path="/settings/guest-links"   component={GuestLinks} />
+            <Route path="/settings/notifications" component={NotificationPreferences} />
+            <Route path="/epic-templates"         component={EpicTemplates} />
             <Route path="/sprint-templates"        component={SprintTemplates} />
+            <Route path="/clients"                 component={Clients} />
             <Route component={() => <Redirect to="/dashboard" />} />
           </Switch>
         </ErrorBoundary>
@@ -98,7 +104,11 @@ export default function App() {
         </Route>
         {/* Guest view pages — no auth required */}
         <Route path="/g/:token">
-          {(params) => <GuestView token={params.token} />}
+          {(params) => (
+            <ErrorBoundary>
+              <GuestView token={params.token} />
+            </ErrorBoundary>
+          )}
         </Route>
         {/* Workspace invite accept page */}
         <Route path="/invite/:token">

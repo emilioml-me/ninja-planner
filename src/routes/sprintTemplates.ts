@@ -46,6 +46,34 @@ router.post('/', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PATCH /api/sprint-templates/:id  [admin]
+router.patch('/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const parsed = schema.partial().safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+    if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    let i = 1;
+    const UPDATABLE = new Set(['name', 'goal', 'duration_days']);
+    for (const [k, v] of Object.entries(parsed.data)) {
+      if (!UPDATABLE.has(k)) continue;
+      fields.push(`${k} = $${i++}`);
+      values.push(v ?? null);
+    }
+    if (fields.length === 0) { res.status(400).json({ error: 'Nothing to update' }); return; }
+    values.push(req.params.id, req.workspace.id);
+
+    const { rows } = await pool.query(
+      `UPDATE sprint_templates SET ${fields.join(', ')} WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
+      values,
+    );
+    if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
 // DELETE /api/sprint-templates/:id  [admin]
 router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {

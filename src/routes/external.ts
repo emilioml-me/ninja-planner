@@ -84,4 +84,46 @@ router.patch('/tasks/:id', requireScope('tasks:write'), async (req, res, next) =
   } catch (err) { next(err); }
 });
 
+// GET /api/external/roadmap  [roadmap:read]
+// Previously roadmap:read/goals:read/sprints:read were issuable API-key scopes with no endpoint
+// anywhere to actually use them — a workspace admin could create a completely non-functional
+// API key. These three routes fill that in with the same read-only shape guestView.ts exposes.
+router.get('/roadmap', requireScope('roadmap:read'), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, title, description, phase, status, priority, external_ref, created_at, updated_at
+       FROM roadmap_items WHERE workspace_id = $1 ORDER BY priority, created_at
+       LIMIT 200`,
+      [req.workspace.id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// GET /api/external/goals  [goals:read]
+router.get('/goals', requireScope('goals:read'), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, title, description, status, due_date, created_at, updated_at
+       FROM goals WHERE workspace_id = $1 ORDER BY created_at DESC
+       LIMIT 200`,
+      [req.workspace.id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// GET /api/external/sprints  [sprints:read]
+router.get('/sprints', requireScope('sprints:read'), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, name, goal, status, start_date, end_date, created_at, updated_at
+       FROM sprints WHERE workspace_id = $1 ORDER BY created_at DESC
+       LIMIT 200`,
+      [req.workspace.id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
 export default router;

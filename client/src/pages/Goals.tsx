@@ -23,7 +23,8 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Target, Plus, MoreVertical, Pencil, Trash2, CheckCircle2, Circle, XCircle, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { Target, Plus, MoreVertical, Pencil, Trash2, CheckCircle2, Circle, XCircle, ChevronDown, ChevronRight, Loader2, Download } from 'lucide-react';
+import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 
@@ -136,7 +137,22 @@ export default function Goals() {
             <p className="text-sm text-muted-foreground">Track objectives and link tasks to measure progress.</p>
           </div>
         </div>
-        <Button onClick={openCreate} className="gap-2"><Plus className="h-4 w-4" />New Goal</Button>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm" variant="outline" className="gap-2"
+            onClick={() => downloadCsv('goals.csv', goals.map((g) => ({
+              title: g.title,
+              status: g.status,
+              due_date: g.due_date ?? '',
+              total_tasks: g.total_tasks,
+              done_tasks: g.done_tasks,
+            })))}
+          >
+            <Download className="h-4 w-4" />
+            <span className="hidden sm:inline">Export</span>
+          </Button>
+          <Button onClick={openCreate} className="gap-2"><Plus className="h-4 w-4" />New Goal</Button>
+        </div>
       </div>
 
       {isLoading ? (

@@ -46,7 +46,7 @@ const checklistItemSchema = z.object({
 
 const createSchema = z.object({
   title:              z.string().min(1).max(500),
-  description:        z.string().optional(),
+  description:        z.string().max(10000).optional(),
   status:             z.enum(TASK_STATUSES).optional(),
   priority:           z.enum(TASK_PRIORITIES).optional(),
   assignee_clerk_id:  z.string().nullable().optional(),   // null = unassigned
@@ -82,6 +82,11 @@ const positionSchema = z.object({
 
 // POST /api/tasks/alert-check  — send Slack alert for overdue tasks  [admin only]
 // Deduped: skips if an overdue_alert notification was sent for this workspace in last 20h
+//
+// SCHEDULER DEPENDENCY: this codebase has no in-process cron (no node-cron, no setInterval-based
+// job runner) — this route only runs when something calls it. It must be invoked periodically by
+// an external scheduler (e.g. a cron job, a serverless scheduled function, or an uptime-style
+// pinger) hitting this endpoint for every workspace, or overdue tasks will silently never alert.
 router.post('/alert-check', requireAdmin, async (req, res, next) => {
   try {
     // Dedup check — skip if already alerted in the last 20 hours
@@ -155,10 +160,27 @@ router.get('/workload', async (req, res, next) => {
   }
 });
 
-// GET /api/tasks/capacity  — story points assigned per member in active sprint + configured capacity
+// GET /api/tasks/capacity?sprint_id=...  — story points assigned per member in a sprint
+// (defaults to the active sprint) + configured capacity, preferring a per-sprint override
+// over the member's workspace-wide default.
 router.get('/capacity', async (req, res, next) => {
   try {
-    // Points assigned per member across active sprint tasks
+    const requestedSprintId = typeof req.query.sprint_id === 'string' ? req.query.sprint_id : undefined;
+
+    // Resolve the effective sprint ONCE — previously the points query resolved a missing
+    // sprint_id to the active sprint via COALESCE, but the capacity query filtered on the raw
+    // (possibly NULL) sprint_id directly, so a per-sprint override on the active sprint was
+    // silently ignored whenever the caller omitted sprint_id (the documented default path).
+    let sprintId = requestedSprintId ?? null;
+    if (!sprintId) {
+      const activeSprint = await pool.query<{ id: string }>(
+        "SELECT id FROM sprints WHERE workspace_id = $1 AND status = 'active' LIMIT 1",
+        [req.workspace.id],
+      );
+      sprintId = activeSprint.rows[0]?.id ?? null;
+    }
+
+    // Points assigned per member across the target sprint's tasks
     // M2: JOIN workspace_members to exclude tasks assigned to departed members
     const pointsResult = await pool.query<{ user_clerk_id: string; assigned_points: number; task_count: number }>(
       `SELECT
@@ -166,27 +188,32 @@ router.get('/capacity', async (req, res, next) => {
          COALESCE(SUM(t.story_points), 0)::int AS assigned_points,
          COUNT(t.id)::int                      AS task_count
        FROM tasks t
-       JOIN sprints s ON s.id = t.sprint_id AND s.workspace_id = t.workspace_id AND s.status = 'active'
+       JOIN sprints s ON s.id = t.sprint_id AND s.workspace_id = t.workspace_id AND s.id = $2
        JOIN workspace_members wm ON wm.clerk_user_id = t.assignee_clerk_id AND wm.workspace_id = t.workspace_id
        WHERE t.workspace_id = $1
          AND t.assignee_clerk_id IS NOT NULL
          AND t.deleted_at IS NULL
          AND t.status <> 'done'
        GROUP BY t.assignee_clerk_id`,
-      [req.workspace.id],
+      [req.workspace.id, sprintId],
     );
 
-    // Configured capacity per member
-    const capacityResult = await pool.query<{ user_clerk_id: string; capacity_points: number }>(
-      `SELECT user_clerk_id, capacity_points
+    // Configured capacity per member: per-sprint override first, workspace default otherwise
+    const capacityResult = await pool.query<{ user_clerk_id: string; capacity_points: number; sprint_id: string | null }>(
+      `SELECT user_clerk_id, capacity_points, sprint_id
        FROM member_capacity
-       WHERE workspace_id = $1`,
-      [req.workspace.id],
+       WHERE workspace_id = $1 AND (sprint_id IS NULL OR sprint_id = $2)`,
+      [req.workspace.id, sprintId],
     );
 
+    // Defaults first, then per-sprint overrides — order guarantees an override always wins
+    // regardless of row order returned by the query.
     const capacityMap: Record<string, number> = {};
     for (const row of capacityResult.rows) {
-      capacityMap[row.user_clerk_id] = row.capacity_points;
+      if (row.sprint_id === null) capacityMap[row.user_clerk_id] = row.capacity_points;
+    }
+    for (const row of capacityResult.rows) {
+      if (row.sprint_id !== null) capacityMap[row.user_clerk_id] = row.capacity_points;
     }
 
     const rows = pointsResult.rows.map((r) => ({
@@ -199,11 +226,16 @@ router.get('/capacity', async (req, res, next) => {
 });
 
 // PUT /api/tasks/capacity/:memberId  — set capacity for a member (admin only)
+// Body may include sprint_id to set a one-sprint override instead of the workspace-wide default.
 router.put('/capacity/:memberId', requireAdmin, async (req, res, next) => {
   try {
-    const schema = z.object({ capacity_points: z.number().int().min(0).max(500) });
+    const schema = z.object({
+      capacity_points: z.number().int().min(0).max(500),
+      sprint_id: z.string().uuid().nullable().optional(),
+    });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+    const sprintId = parsed.data.sprint_id ?? null;
 
     // Verify the target user is actually a member of this workspace before writing.
     const memberCheck = await pool.query(
@@ -214,14 +246,32 @@ router.put('/capacity/:memberId', requireAdmin, async (req, res, next) => {
       res.status(404).json({ error: 'Member not found in this workspace' }); return;
     }
 
-    await pool.query(
-      `INSERT INTO member_capacity (workspace_id, user_clerk_id, capacity_points)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (workspace_id, user_clerk_id) DO UPDATE SET
-         capacity_points = EXCLUDED.capacity_points,
-         updated_at = now()`,
-      [req.workspace.id, req.params.memberId, parsed.data.capacity_points],
-    );
+    if (sprintId) {
+      const sprintCheck = await pool.query(
+        'SELECT 1 FROM sprints WHERE id = $1 AND workspace_id = $2',
+        [sprintId, req.workspace.id],
+      );
+      if (sprintCheck.rows.length === 0) {
+        res.status(404).json({ error: 'Sprint not found in this workspace' }); return;
+      }
+      await pool.query(
+        `INSERT INTO member_capacity (workspace_id, user_clerk_id, sprint_id, capacity_points)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (workspace_id, user_clerk_id, sprint_id) WHERE sprint_id IS NOT NULL DO UPDATE SET
+           capacity_points = EXCLUDED.capacity_points,
+           updated_at = now()`,
+        [req.workspace.id, req.params.memberId, sprintId, parsed.data.capacity_points],
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO member_capacity (workspace_id, user_clerk_id, sprint_id, capacity_points)
+         VALUES ($1, $2, NULL, $3)
+         ON CONFLICT (workspace_id, user_clerk_id) WHERE sprint_id IS NULL DO UPDATE SET
+           capacity_points = EXCLUDED.capacity_points,
+           updated_at = now()`,
+        [req.workspace.id, req.params.memberId, parsed.data.capacity_points],
+      );
+    }
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

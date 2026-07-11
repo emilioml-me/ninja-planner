@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { fetchAllSummaries, getIntegrationsStatus } from '../integrations/index.js';
 import { fetchCrmDeals } from '../integrations/crm.js';
+import { fetchPaymentsSummary } from '../integrations/payments.js';
 import { getNinjaTaskProfile } from '../integrations/ninjatask.js';
 import { upsertActualRevenue } from '../services/revenueService.js';
 import { pool } from '../config/db.js';
@@ -49,7 +50,8 @@ router.get('/status', requireWorkspace, (_req, res) => {
 /**
  * GET /api/integrations/summary
  * Returns live data from all configured integrations.
- * Cached per workspace for 5 minutes.
+ * Cached globally for 5 minutes (not per workspace) — see the cache section above: credentials
+ * are shared deployment-wide env vars, so every workspace's request hits the same cache entry.
  *
  * Query param: ?refresh=1 to bypass cache.
  */
@@ -113,6 +115,48 @@ router.post('/sync-revenue', requireWorkspace, async (req, res, next) => {
     );
 
     res.json({ synced: byMonth.size, periods: Object.fromEntries(byMonth) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/integrations/sync-revenue-payments
+ * Pulls current-month revenue from payment-ninja and upserts it as actual_amount for the
+ * current month. Unlike CRM sync (itemized deals grouped by close date across many months),
+ * payment-ninja's summary only exposes an aggregate current/last-month total — this endpoint
+ * syncs whichever of those two periods have already passed or are in progress.
+ */
+router.post('/sync-revenue-payments', requireWorkspace, async (req, res, next) => {
+  try {
+    const syncedAt = new Date();
+    const result = await fetchPaymentsSummary();
+    if (!result.configured) {
+      res.status(503).json({ error: 'Payments integration is not configured' });
+      return;
+    }
+    if (!result.data) {
+      res.status(502).json({ error: result.error ?? 'Payments fetch failed' });
+      return;
+    }
+
+    const now = new Date();
+    const currentPeriodStart = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
+    const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const lastPeriodStart = `${lastMonthDate.getUTCFullYear()}-${String(lastMonthDate.getUTCMonth() + 1).padStart(2, '0')}-01`;
+
+    await Promise.all([
+      upsertActualRevenue(req.workspace.id, currentPeriodStart, result.data.currentMonthRevenue, syncedAt),
+      upsertActualRevenue(req.workspace.id, lastPeriodStart, result.data.lastMonthRevenue, syncedAt),
+    ]);
+
+    res.json({
+      synced: 2,
+      periods: {
+        [currentPeriodStart]: result.data.currentMonthRevenue,
+        [lastPeriodStart]: result.data.lastMonthRevenue,
+      },
+    });
   } catch (err) {
     next(err);
   }

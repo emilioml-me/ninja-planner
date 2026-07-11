@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Progress } from '@/components/ui/progress';
 import { AlertTriangle, Briefcase } from 'lucide-react';
 
 interface GuestData {
@@ -13,6 +14,9 @@ interface GuestData {
   roadmap?: { id: string; title: string; phase: string | null; status: string }[];
   goals?: { id: string; title: string; status: string; due_date: string | null }[];
   sprints?: { id: string; name: string; status: string; start_date: string | null; end_date: string | null }[];
+  epics?: { id: string; title: string; description: string | null; status: string; color: string; total_tasks: number; done_tasks: number }[];
+  changelog?: { id: string; title: string; priority: string; completed_at: string; sprint_name: string | null; epic_title: string | null }[];
+  budgets?: { id: string; name: string; target_amount: string; currency: string; period_start: string | null; period_end: string | null; status: string; actual_amount: string }[];
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -76,7 +80,7 @@ export default function GuestView({ token }: GuestViewProps) {
   }
 
   const tabs = data.scopes
-    .filter((s) => ['tasks:read','roadmap:read','goals:read','sprints:read'].includes(s))
+    .filter((s) => ['tasks:read','roadmap:read','goals:read','sprints:read','epics:read','changelog:read','budgets:read'].includes(s))
     .map((s) => s.replace(':read',''));
 
   return (
@@ -195,6 +199,98 @@ export default function GuestView({ token }: GuestViewProps) {
                       </CardContent>
                     </Card>
                   ))}
+              </div>
+            </TabsContent>
+          )}
+          {/* Epics */}
+          {data.epics && (
+            <TabsContent value="epics" className="mt-6">
+              <div className="space-y-2">
+                {data.epics.length === 0
+                  ? <p className="text-muted-foreground">No epics.</p>
+                  : data.epics.map((e) => {
+                    const pct = e.total_tasks > 0 ? Math.round((e.done_tasks / e.total_tasks) * 100) : 0;
+                    return (
+                      <Card key={e.id}>
+                        <CardContent className="py-3 px-4 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium flex items-center gap-1.5">
+                              <span className="h-2 w-2 rounded-full inline-block" style={{ backgroundColor: e.color }} />
+                              {e.title}
+                            </span>
+                            <Badge className={`text-xs ${STATUS_COLORS[e.status] ?? ''} hover:opacity-90`}>
+                              {e.status}
+                            </Badge>
+                          </div>
+                          {e.total_tasks > 0 && (
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                                <span>{e.done_tasks}/{e.total_tasks} tasks</span>
+                                <span>{pct}%</span>
+                              </div>
+                              <Progress value={pct} className="h-1" />
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+              </div>
+            </TabsContent>
+          )}
+          {/* Changelog */}
+          {data.changelog && (
+            <TabsContent value="changelog" className="mt-6">
+              <div className="space-y-2">
+                {data.changelog.length === 0
+                  ? <p className="text-muted-foreground">No completed tasks in the last 30 days.</p>
+                  : data.changelog.map((c) => (
+                    <Card key={c.id}>
+                      <CardContent className="py-3 px-4 flex items-center justify-between">
+                        <div>
+                          <span className="text-sm font-medium">{c.title}</span>
+                          {(c.sprint_name || c.epic_title) && (
+                            <span className="text-xs text-muted-foreground ml-2">
+                              {c.sprint_name ?? c.epic_title}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(c.completed_at).toLocaleDateString()}
+                        </span>
+                      </CardContent>
+                    </Card>
+                  ))}
+              </div>
+            </TabsContent>
+          )}
+          {/* Budgets */}
+          {data.budgets && (
+            <TabsContent value="budgets" className="mt-6">
+              <div className="space-y-2">
+                {data.budgets.length === 0
+                  ? <p className="text-muted-foreground">No budgets.</p>
+                  : data.budgets.map((b) => {
+                    // Postgres numeric columns come back as strings over JSON (no pg type-parser
+                    // override in this app), so these must be coerced before .toLocaleString() —
+                    // string values have no such method and would throw.
+                    const actual = Number(b.actual_amount);
+                    const target = Number(b.target_amount);
+                    const pct = target > 0 ? Math.round((actual / target) * 100) : 0;
+                    return (
+                      <Card key={b.id}>
+                        <CardContent className="py-3 px-4 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium">{b.name}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {actual.toLocaleString()} / {target.toLocaleString()} {b.currency}
+                            </span>
+                          </div>
+                          <Progress value={Math.min(pct, 100)} className="h-1" />
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
               </div>
             </TabsContent>
           )}

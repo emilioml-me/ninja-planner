@@ -28,11 +28,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useApiClient } from '@/lib/api';
+import { useIsAdmin } from '@/hooks/use-is-admin';
 import { toast } from '@/hooks/use-toast';
 import { type WorkspaceMember } from '@/hooks/use-members';
 import { useTaskComments, useAddComment, useDeleteComment } from '@/hooks/use-notifications';
 import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft, Clock, Eye, EyeOff, Timer, Paperclip, FileText, Download, Image as ImageIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { CustomFieldsSection } from '@/components/CustomFieldsSection';
 
 interface TaskActivity {
   id: string;
@@ -651,16 +653,31 @@ interface TimeLog {
   display_name: string | null;
   minutes: number;
   note: string | null;
+  billable: boolean;
+  hourly_rate: number | null;
+  budget_entry_id: string | null;
   logged_at: string;
 }
 
+interface BudgetEntryOption {
+  id: string;
+  description: string;
+  budget_id: string;
+  budget_name: string;
+}
+
+const NO_BUDGET_ENTRY = '__none__';
+
 function TimeTab({ task }: { task: Task }) {
   const { userId } = useAuth();
+  const isAdmin = useIsAdmin();
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const [hours, setHours]     = useState('');
   const [mins,  setMins]      = useState('');
   const [note,  setNote]      = useState('');
+  const [billable, setBillable] = useState(false);
+  const [rate, setRate]       = useState('');
 
   const { data: logs = [] } = useQuery<TimeLog[]>({
     queryKey: ['/api/tasks', task.id, 'time-logs'],
@@ -668,11 +685,11 @@ function TimeTab({ task }: { task: Task }) {
   });
 
   const addMut = useMutation({
-    mutationFn: (body: { minutes: number; note?: string }) =>
+    mutationFn: (body: { minutes: number; note?: string; billable?: boolean; hourly_rate?: number | null }) =>
       apiRequest('POST', `/api/tasks/${task.id}/time-logs`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] });
-      setHours(''); setMins(''); setNote('');
+      setHours(''); setMins(''); setNote(''); setBillable(false); setRate('');
     },
     onError: () => toast({ title: 'Failed to log time', variant: 'destructive' }),
   });
@@ -680,6 +697,18 @@ function TimeTab({ task }: { task: Task }) {
   const deleteMut = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${task.id}/time-logs/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] }),
+  });
+
+  const { data: budgetEntries = [] } = useQuery<BudgetEntryOption[]>({
+    queryKey: ['/api/budgets/entries'],
+    queryFn: () => apiRequest('GET', '/api/budgets/entries'),
+  });
+
+  const linkBudgetMut = useMutation({
+    mutationFn: ({ logId, budgetEntryId }: { logId: string; budgetEntryId: string | null }) =>
+      apiRequest('PATCH', `/api/tasks/${task.id}/time-logs/${logId}/budget-entry`, { budget_entry_id: budgetEntryId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] }),
+    onError: () => toast({ title: 'Failed to link budget entry', variant: 'destructive' }),
   });
 
   const totalMins = logs.reduce((s, l) => s + l.minutes, 0);
@@ -696,7 +725,13 @@ function TimeTab({ task }: { task: Task }) {
     const m = Math.min(59, Math.max(0, parseInt(mins || '0', 10) || 0));
     const total = h * 60 + m;
     if (total < 1) return;
-    addMut.mutate({ minutes: total, note: note.trim() || undefined });
+    const parsedRate = rate ? Math.max(0, Number(rate)) : null;
+    addMut.mutate({
+      minutes: total,
+      note: note.trim() || undefined,
+      billable,
+      hourly_rate: billable ? parsedRate : null,
+    });
   };
 
   return (
@@ -740,6 +775,23 @@ function TimeTab({ task }: { task: Task }) {
             <Plus className="h-3.5 w-3.5 mr-1" /> Log
           </Button>
         </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox" checked={billable}
+              onChange={(e) => setBillable(e.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+            Billable
+          </label>
+          {billable && (
+            <Input
+              type="number" min={0} max={10000} step="0.01" placeholder="Hourly rate ($)"
+              value={rate} onChange={(e) => setRate(e.target.value)}
+              className="w-32 h-7 text-xs"
+            />
+          )}
+        </div>
       </div>
 
       <Separator />
@@ -759,7 +811,28 @@ function TimeTab({ task }: { task: Task }) {
                 <span className="flex-1 text-xs text-muted-foreground truncate">
                   {log.note || <span className="italic">no note</span>}
                   {' '}· {isOwn ? 'you' : name}
+                  {log.billable && (
+                    <span className="text-green-600 ml-1">
+                      · billable{log.hourly_rate ? ` $${log.hourly_rate}/h` : ''}
+                    </span>
+                  )}
                 </span>
+                {log.billable && (isOwn || isAdmin) && (
+                  <Select
+                    value={log.budget_entry_id ?? NO_BUDGET_ENTRY}
+                    onValueChange={(v) => linkBudgetMut.mutate({ logId: log.id, budgetEntryId: v === NO_BUDGET_ENTRY ? null : v })}
+                  >
+                    <SelectTrigger className="h-6 w-32 text-[11px] shrink-0">
+                      <SelectValue placeholder="No budget" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_BUDGET_ENTRY}>No budget entry</SelectItem>
+                      {budgetEntries.map((be) => (
+                        <SelectItem key={be.id} value={be.id}>{be.budget_name}: {be.description}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
                 {isOwn && (
                   <Button
                     type="button" variant="ghost" size="icon"
@@ -1143,6 +1216,8 @@ export function TaskFormDialog({
 
                 </form>
               </Form>
+
+              <CustomFieldsSection entityType="task" entityId={task.id} />
             </TabsContent>
 
             {/* ── Checklist tab ────────────────────────────────────────────── */}
@@ -1265,6 +1340,14 @@ export function TaskFormDialog({
             </div>
 
             <div className="grid grid-cols-2 gap-4">
+              <FormField control={form.control} name="start_date" render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Start Date</FormLabel>
+                  <FormControl><Input type="date" {...field} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+
               <FormField control={form.control} name="due_date" render={({ field }) => (
                 <FormItem>
                   <FormLabel>Due Date</FormLabel>
@@ -1272,11 +1355,23 @@ export function TaskFormDialog({
                   <FormMessage />
                 </FormItem>
               )} />
+            </div>
 
+            <div className="grid grid-cols-2 gap-4">
               <FormField control={form.control} name="tags" render={({ field }) => (
                 <FormItem>
                   <FormLabel>Tags</FormLabel>
                   <FormControl><Input placeholder="work, design (comma-sep)" {...field} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+
+              <FormField control={form.control} name="story_points" render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Story Points</FormLabel>
+                  <FormControl>
+                    <Input type="number" min={0} max={144} placeholder="–" {...field} />
+                  </FormControl>
                   <FormMessage />
                 </FormItem>
               )} />
@@ -1319,22 +1414,50 @@ export function TaskFormDialog({
               </FormItem>
             )} />
 
-            {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 && (
-              <FormField control={form.control} name="sprint_id" render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Sprint</FormLabel>
-                  <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
-                    <FormControl><SelectTrigger><SelectValue placeholder="No sprint" /></SelectTrigger></FormControl>
-                    <SelectContent>
-                      <SelectItem value="__none__">No sprint</SelectItem>
-                      {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').map((s) => (
-                        <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )} />
+            {(sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 ||
+              epics.filter((e) => e.status !== 'archived').length > 0) && (
+              <div className="grid grid-cols-2 gap-4">
+                {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').length > 0 && (
+                  <FormField control={form.control} name="sprint_id" render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Sprint</FormLabel>
+                      <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
+                        <FormControl><SelectTrigger><SelectValue placeholder="No sprint" /></SelectTrigger></FormControl>
+                        <SelectContent>
+                          <SelectItem value="__none__">No sprint</SelectItem>
+                          {sprints.filter((s) => s.status !== 'completed' && s.status !== 'cancelled').map((s) => (
+                            <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )} />
+                )}
+
+                {epics.filter((e) => e.status !== 'archived').length > 0 && (
+                  <FormField control={form.control} name="epic_id" render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Epic</FormLabel>
+                      <Select onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)} value={(field.value ?? '') || '__none__'}>
+                        <FormControl><SelectTrigger><SelectValue placeholder="None" /></SelectTrigger></FormControl>
+                        <SelectContent>
+                          <SelectItem value="__none__">No epic</SelectItem>
+                          {epics.filter((e) => e.status !== 'archived').map((e) => (
+                            <SelectItem key={e.id} value={e.id}>
+                              <span className="flex items-center gap-1.5">
+                                <span className="h-2 w-2 rounded-full inline-block" style={{ backgroundColor: e.color }} />
+                                {e.title}
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )} />
+                )}
+              </div>
             )}
 
             <DialogFooter>

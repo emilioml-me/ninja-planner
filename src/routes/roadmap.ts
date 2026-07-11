@@ -252,4 +252,39 @@ router.delete('/:id/tasks/:taskId', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/roadmap/:id/check-github-status  [admin only]
+// Checks the linked GitHub issue's open/closed state and moves the item to 'live' if the issue
+// was closed. No-op (and 400) if external_ref isn't a github.com/.../issues/N URL.
+//
+// SCHEDULER DEPENDENCY: like /api/tasks/alert-check, nothing in this codebase calls this
+// automatically — an external scheduler must poll it per linked item, or GitHub status changes
+// will never be reflected here until someone manually triggers the check.
+router.post('/:id/check-github-status', requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query<{ id: string; external_ref: string | null; status: string }>(
+      'SELECT id, external_ref, status FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
+      [req.params.id, req.workspace.id],
+    );
+    if (rows.length === 0) { res.status(404).json({ error: 'Roadmap item not found' }); return; }
+    const item = rows[0];
+    if (!item.external_ref) { res.status(400).json({ error: 'No external_ref set on this item' }); return; }
+
+    const { fetchGithubIssueStatus, parseGithubIssueUrl } = await import('../integrations/github.js');
+    if (!parseGithubIssueUrl(item.external_ref)) {
+      res.status(400).json({ error: 'external_ref is not a GitHub issue URL' });
+      return;
+    }
+
+    const issue = await fetchGithubIssueStatus(item.external_ref);
+    if (!issue) { res.status(502).json({ error: 'Could not fetch GitHub issue status' }); return; }
+
+    let updated = null;
+    if (issue.state === 'closed' && item.status !== 'live' && item.status !== 'archived') {
+      updated = await updateRoadmapItem(req.params.id, req.workspace.id, { status: 'live' });
+    }
+
+    res.json({ github_state: issue.state, item: updated ?? item });
+  } catch (err) { next(err); }
+});
+
 export default router;

@@ -73,3 +73,17 @@ export function safeFromNow(
     return '';
   }
 }
+
+/** Recognizes common issue-tracker hosts in an external_ref URL for a friendlier link label. */
+export function externalRefLabel(url: string): string {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    if (host.includes('github.com')) return 'GitHub';
+    if (host.includes('linear.app')) return 'Linear';
+    if (host.includes('jira')) return 'Jira';
+    if (host.includes('notion.so')) return 'Notion';
+    return host;
+  } catch {
+    return url;
+  }
+}

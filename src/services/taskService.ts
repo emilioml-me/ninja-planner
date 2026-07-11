@@ -121,12 +121,13 @@ export async function createTask(
     spawned_from_id?: string | null;
   },
   createdBy: string,
+  db: Queryable = pool,
 ): Promise<Task> {
   // Tenant-isolation guard: a sprint/epic ID from another workspace must never be linkable.
-  await assertLinkableToWorkspace('sprints', data.sprint_id, workspaceId);
-  await assertLinkableToWorkspace('epics', data.epic_id, workspaceId);
+  await assertLinkableToWorkspace('sprints', data.sprint_id, workspaceId, db);
+  await assertLinkableToWorkspace('epics', data.epic_id, workspaceId, db);
 
-  const result = await pool.query<Task>(
+  const result = await db.query<Task>(
     `INSERT INTO tasks
        (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, sprint_id, epic_id, recurrence_rule, story_points, checklist, spawned_from_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)

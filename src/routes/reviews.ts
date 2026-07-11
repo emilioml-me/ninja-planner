@@ -13,6 +13,8 @@ import {
 const REVIEW_ADMIN_ROLES = new Set(['org:admin', 'org:owner']);
 import { sendSlackMessage } from '../lib/slack.js';
 import { fireWebhooks } from '../services/webhookService.js';
+import { createNotification } from '../services/notificationService.js';
+import { pool } from '../config/db.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -56,6 +58,25 @@ router.post('/', async (req, res, next) => {
     );
 
     fireWebhooks(req.workspace.id, 'review.submitted', { review });
+
+    // In-app notification for admins — the migration comment reserving 'review_submitted'
+    // as a notification type dates back to day one, but it was only ever wired up as a
+    // Slack message + webhook, never an actual in-app notification.
+    pool.query<{ clerk_user_id: string }>(
+      `SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role IN ('org:admin', 'org:owner')`,
+      [req.workspace.id],
+    ).then((adminResult) => {
+      for (const { clerk_user_id } of adminResult.rows) {
+        if (clerk_user_id === req.auth.userId) continue;
+        createNotification({
+          workspaceId: req.workspace.id,
+          recipientClerkId: clerk_user_id,
+          type: 'review_submitted',
+          title: `Weekly review submitted for week of ${review.week_start}`,
+          link: '/reviews',
+        }).catch(() => {});
+      }
+    }).catch(() => {});
 
     res.status(201).json(review);
   } catch (err) {

@@ -97,6 +97,8 @@ export async function getDeliveries(endpointId: string, workspaceId: string): Pr
 const ALL_EVENTS = [
   'task.created', 'task.updated', 'task.completed', 'task.deleted',
   'review.submitted',
+  'epic.created', 'epic.updated', 'epic.deleted',
+  'sprint.completed', 'goal.completed',
 ] as const;
 
 export type WebhookEventType = typeof ALL_EVENTS[number];
@@ -140,6 +142,31 @@ async function _deliver(
   await Promise.allSettled(
     result.rows.map((endpoint) => _deliverToEndpoint(endpoint, eventType, body, payload)),
   );
+}
+
+/**
+ * Deliver a one-off event to a specific, already-registered endpoint — used by automation
+ * rules' post_webhook action so it gets the same signing/retry/delivery-log pipeline as
+ * regular event-subscription webhooks, instead of a bare unsigned, non-retrying fetch to a
+ * raw URL typed into the rule. Returns false if the endpoint doesn't exist/isn't active/isn't
+ * in this workspace, so the caller can log that distinctly from a delivery failure.
+ */
+export async function deliverToEndpoint(
+  endpointId: string,
+  workspaceId: string,
+  eventType: string,
+  payload: Record<string, unknown>,
+): Promise<boolean> {
+  const result = await pool.query<WebhookEndpoint>(
+    `SELECT * FROM webhook_endpoints WHERE id = $1 AND workspace_id = $2 AND active = true`,
+    [endpointId, workspaceId],
+  );
+  const endpoint = result.rows[0];
+  if (!endpoint) return false;
+
+  const body = JSON.stringify({ event: eventType, timestamp: new Date().toISOString(), data: payload });
+  await _deliverToEndpoint(endpoint, eventType, body, payload);
+  return true;
 }
 
 /** Retry delays: immediate → 10 s → 60 s */

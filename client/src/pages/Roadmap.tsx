@@ -40,8 +40,8 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink, Search, X, Link, CheckSquare } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink, Search, X, Link, CheckSquare, ThumbsUp } from 'lucide-react';
+import { cn, externalRefLabel } from '@/lib/utils';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 
 interface RoadmapItem {
@@ -54,6 +54,7 @@ interface RoadmapItem {
   external_ref: string | null;
   linked_tasks: number;
   linked_done: number;
+  vote_count: number;
 }
 
 interface LinkedTask {
@@ -84,18 +85,6 @@ const formSchema = z.object({
 });
 type FormData = z.infer<typeof formSchema>;
 
-function externalRefLabel(url: string): string {
-  try {
-    const host = new URL(url).hostname.replace(/^www\./, '');
-    if (host.includes('github.com')) return 'GitHub';
-    if (host.includes('linear.app')) return 'Linear';
-    if (host.includes('jira')) return 'Jira';
-    if (host.includes('notion.so')) return 'Notion';
-    return host;
-  } catch {
-    return url;
-  }
-}
 
 const statusConfig: Record<string, { label: string; color: string; badge: 'default' | 'secondary' | 'outline' | 'destructive' }> = {
   idea:     { label: 'Idea',     color: 'border-purple-200 bg-purple-50 dark:border-purple-900 dark:bg-purple-950/30', badge: 'outline' },
@@ -169,6 +158,15 @@ export default function Roadmap() {
     mutationFn: (id: string) => apiRequest('DELETE', `/api/roadmap/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/roadmap'] }); toast({ title: 'Item deleted' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
+  });
+
+  const checkGithubMut = useMutation({
+    mutationFn: (id: string) => apiRequest<{ github_state: string }>('POST', `/api/roadmap/${id}/check-github-status`),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['/api/roadmap'] });
+      toast({ title: `GitHub issue is ${data.github_state}` });
+    },
+    onError: (e: Error) => toast({ title: 'Could not check GitHub status', description: e.message, variant: 'destructive' }),
   });
 
   const reorderMut = useMutation({
@@ -379,6 +377,7 @@ export default function Roadmap() {
                             onEdit={isAdmin ? openEdit : undefined}
                             onDelete={isAdmin ? (id) => deleteMut.mutate(id) : undefined}
                             onLinkTasks={setLinkTaskItem}
+                            onCheckGithub={isAdmin ? (id) => checkGithubMut.mutate(id) : undefined}
                           />
                         ))}
                         {col.length === 0 && (
@@ -545,12 +544,14 @@ function SortableRoadmapCard({
   onEdit,
   onDelete,
   onLinkTasks,
+  onCheckGithub,
 }: {
   item: RoadmapItem;
   cfg: CardCfg;
-  onEdit: (item: RoadmapItem) => void;
-  onDelete: (id: string) => void;
+  onEdit?: (item: RoadmapItem) => void;
+  onDelete?: (id: string) => void;
   onLinkTasks: (item: RoadmapItem) => void;
+  onCheckGithub?: (id: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
   const style = {
@@ -568,10 +569,13 @@ function SortableRoadmapCard({
         onEdit={onEdit}
         onDelete={onDelete}
         onLinkTasks={onLinkTasks}
+        onCheckGithub={onCheckGithub}
       />
     </div>
   );
 }
+
+const GITHUB_ISSUE_URL_RE = /^https?:\/\/github\.com\/[^/]+\/[^/]+\/issues\/\d+\/?$/i;
 
 function RoadmapCardContent({
   item,
@@ -580,6 +584,7 @@ function RoadmapCardContent({
   onEdit,
   onDelete,
   onLinkTasks,
+  onCheckGithub,
   overlay,
 }: {
   item: RoadmapItem;
@@ -588,11 +593,13 @@ function RoadmapCardContent({
   onEdit?: (item: RoadmapItem) => void;
   onDelete?: (id: string) => void;
   onLinkTasks?: (item: RoadmapItem) => void;
+  onCheckGithub?: (id: string) => void;
   overlay?: boolean;
 }) {
   const taskPct = item.linked_tasks > 0
     ? Math.round((item.linked_done / item.linked_tasks) * 100)
     : null;
+  const isGithubIssue = !!item.external_ref && GITHUB_ISSUE_URL_RE.test(item.external_ref);
 
   return (
     <Card className={cn('group', cfg.color, overlay && 'shadow-lg rotate-1')}>
@@ -620,6 +627,11 @@ function RoadmapCardContent({
                     <Link className="h-4 w-4 mr-2" /> Link tasks
                   </DropdownMenuItem>
                 )}
+                {onCheckGithub && isGithubIssue && (
+                  <DropdownMenuItem onClick={() => onCheckGithub(item.id)}>
+                    <ExternalLink className="h-4 w-4 mr-2" /> Check GitHub status
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="text-destructive"
                   onClick={() => onDelete(item.id)}
@@ -638,6 +650,11 @@ function RoadmapCardContent({
         <div className="flex items-center gap-1.5 flex-wrap">
           {item.phase && (
             <Badge variant="outline" className="text-xs">{item.phase}</Badge>
+          )}
+          {item.vote_count > 0 && (
+            <Badge variant="secondary" className="text-xs gap-1">
+              <ThumbsUp className="h-3 w-3" /> {item.vote_count}
+            </Badge>
           )}
           {item.external_ref && (
             <a

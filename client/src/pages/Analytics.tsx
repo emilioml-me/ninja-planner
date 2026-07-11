@@ -1,11 +1,20 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
+import { useMembers } from '@/hooks/use-members';
+import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useToast } from '@/hooks/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Gauge, Pencil, Check, X } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -287,6 +296,182 @@ function OkrTab() {
   );
 }
 
+// ── Capacity tab (also lives on the Workload page — same query, consolidated here) ──────────
+
+interface CapacityRow {
+  user_clerk_id: string;
+  assigned_points: number;
+  task_count: number;
+  capacity_points: number;
+}
+
+function CapacityEditor({
+  current, onSave,
+}: { current: number; onSave: (pts: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(String(current));
+
+  if (!editing) {
+    return (
+      <button
+        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        onClick={() => { setVal(String(current)); setEditing(true); }}
+      >
+        <Pencil className="h-3 w-3" /> {current} pts capacity
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1">
+      <Input
+        type="number" min={0} max={500}
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        className="h-6 w-20 text-xs"
+        autoFocus
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { onSave(Math.max(0, parseInt(val) || 0)); setEditing(false); }
+          if (e.key === 'Escape') setEditing(false);
+        }}
+      />
+      <Button size="icon" variant="ghost" className="h-6 w-6"
+        onClick={() => { onSave(Math.max(0, parseInt(val) || 0)); setEditing(false); }}>
+        <Check className="h-3 w-3 text-green-600" />
+      </Button>
+      <Button size="icon" variant="ghost" className="h-6 w-6"
+        onClick={() => setEditing(false)}>
+        <X className="h-3 w-3 text-muted-foreground" />
+      </Button>
+    </div>
+  );
+}
+
+function CapacityTab() {
+  const { apiRequest } = useApiClient();
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const isAdmin = useIsAdmin();
+  const { members, isLoading: membersLoading } = useMembers();
+
+  const [sprintId, setSprintId] = useState<string>('');
+
+  const { data: sprints = [] } = useQuery<{ id: string; name: string; status: string }[]>({
+    queryKey: ['/api/sprints'],
+    queryFn: () => apiRequest('GET', '/api/sprints'),
+    staleTime: 60_000,
+  });
+
+  const capacityQueryKey = ['/api/tasks/capacity', sprintId || 'active'];
+  const { data: capacityRows = [], isLoading: capLoading } = useQuery<CapacityRow[]>({
+    queryKey: capacityQueryKey,
+    queryFn: () => apiRequest('GET', `/api/tasks/capacity${sprintId ? `?sprint_id=${sprintId}` : ''}`),
+    staleTime: 60_000,
+  });
+
+  const saveCapacity = useMutation({
+    mutationFn: ({ memberId, pts }: { memberId: string; pts: number }) =>
+      apiRequest('PUT', `/api/tasks/capacity/${memberId}`, {
+        capacity_points: pts,
+        ...(sprintId ? { sprint_id: sprintId } : {}),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/tasks/capacity'] });
+      toast({ title: sprintId ? 'Capacity override set for this sprint' : 'Default capacity updated' });
+    },
+  });
+
+  const memberMap = Object.fromEntries(members.map((m) => [m.clerk_user_id, m]));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4 gap-3">
+        <p className="text-xs text-muted-foreground flex-1">
+          Story points assigned {sprintId ? 'in the selected sprint' : 'in the active sprint'} vs each
+          member's configured capacity.
+          {isAdmin && ' Click the pencil to adjust a member\'s capacity.'}
+        </p>
+        {sprints.length > 0 && (
+          <Select value={sprintId || '__active__'} onValueChange={(v) => setSprintId(v === '__active__' ? '' : v)}>
+            <SelectTrigger className="h-8 w-48 text-xs shrink-0">
+              <SelectValue placeholder="Active sprint" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__active__">Active sprint</SelectItem>
+              {sprints.map((s) => (
+                <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+      {sprintId && (
+        <p className="text-[11px] text-muted-foreground -mt-2 mb-3">
+          Editing capacity here sets an override for this sprint only — it won't change the member's default.
+        </p>
+      )}
+      {capLoading || membersLoading ? (
+        <div className="space-y-4">
+          {[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full" />)}
+        </div>
+      ) : capacityRows.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <Gauge className="h-10 w-10 text-muted-foreground/30 mb-3" />
+          <p className="text-sm font-medium">No active sprint assignments</p>
+          <p className="text-xs text-muted-foreground mt-1">Assign tasks with story points to an active sprint to see capacity.</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {capacityRows.map((row) => {
+            const member = memberMap[row.user_clerk_id];
+            const displayName = member?.display_name ?? row.user_clerk_id.slice(-8);
+            const initials = displayName.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
+            const pct = row.capacity_points > 0
+              ? Math.min(Math.round((row.assigned_points / row.capacity_points) * 100), 100)
+              : 0;
+            const overloaded = row.assigned_points > row.capacity_points;
+
+            return (
+              <Card key={row.user_clerk_id} className={cn(overloaded && 'border-destructive/40')}>
+                <CardContent className="pt-4 pb-3 space-y-2">
+                  <div className="flex items-center gap-3">
+                    <Avatar className="h-7 w-7 shrink-0">
+                      <AvatarFallback className="text-[10px] bg-muted">{initials}</AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium truncate">{displayName}</span>
+                        <span className={cn('text-xs font-medium shrink-0', overloaded ? 'text-destructive' : 'text-muted-foreground')}>
+                          {row.assigned_points} / {row.capacity_points} pts
+                          {overloaded && ' ⚠️ over'}
+                        </span>
+                      </div>
+                      {isAdmin ? (
+                        <CapacityEditor
+                          current={row.capacity_points}
+                          onSave={(pts) => saveCapacity.mutate({ memberId: row.user_clerk_id, pts })}
+                        />
+                      ) : (
+                        <span className="text-xs text-muted-foreground">{row.capacity_points} pts capacity</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="h-2 rounded-full bg-muted overflow-hidden">
+                    <div
+                      className={cn('h-full rounded-full transition-all', overloaded ? 'bg-destructive' : 'bg-primary')}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{row.task_count} task{row.task_count !== 1 ? 's' : ''} in active sprint</p>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Analytics() {
@@ -302,10 +487,12 @@ export default function Analytics() {
           <TabsTrigger value="velocity">Sprint Velocity</TabsTrigger>
           <TabsTrigger value="time">Time Report</TabsTrigger>
           <TabsTrigger value="okr">OKR Dashboard</TabsTrigger>
+          <TabsTrigger value="capacity">Capacity</TabsTrigger>
         </TabsList>
         <TabsContent value="velocity" className="mt-6"><VelocityTab /></TabsContent>
         <TabsContent value="time"     className="mt-6"><TimeReportTab /></TabsContent>
         <TabsContent value="okr"      className="mt-6"><OkrTab /></TabsContent>
+        <TabsContent value="capacity" className="mt-6"><CapacityTab /></TabsContent>
       </Tabs>
     </div>
   );

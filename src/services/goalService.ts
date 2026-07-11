@@ -28,6 +28,16 @@ export interface GoalLink {
   created_at: Date;
 }
 
+// Counts both linked tasks (done = status='done') and linked roadmap_items (done = status='live')
+// toward progress. Previously only entity_type='task' links were counted — a goal linked solely
+// to roadmap_items (a valid link type accepted by POST /:id/links) silently showed 0/0 progress
+// forever and could never trigger the 50%/100% milestone emails.
+const PROGRESS_JOIN_AND_COUNTS = `
+       COUNT(t.id) FILTER (WHERE gl.entity_type = 'task' AND t.deleted_at IS NULL)::int
+         + COUNT(ri.id) FILTER (WHERE gl.entity_type = 'roadmap_item')::int                                     AS total_tasks,
+       COUNT(t.id) FILTER (WHERE gl.entity_type = 'task' AND t.status = 'done' AND t.deleted_at IS NULL)::int
+         + COUNT(ri.id) FILTER (WHERE gl.entity_type = 'roadmap_item' AND ri.status = 'live')::int              AS done_tasks`;
+
 export async function getGoals(workspaceId: string): Promise<GoalWithProgress[]> {
   // total_tasks must apply the same deleted_at filter as done_tasks — otherwise a soft-deleted
   // task keeps inflating the denominator (or, once its sibling done task is also deleted,
@@ -35,17 +45,33 @@ export async function getGoals(workspaceId: string): Promise<GoalWithProgress[]>
   const result = await pool.query<GoalWithProgress>(
     `SELECT
        g.*,
-       COUNT(t.id) FILTER (WHERE gl.entity_type = 'task' AND t.deleted_at IS NULL)::int                       AS total_tasks,
-       COUNT(t.id) FILTER (WHERE gl.entity_type = 'task' AND t.status = 'done' AND t.deleted_at IS NULL)::int AS done_tasks
+       ${PROGRESS_JOIN_AND_COUNTS}
      FROM goals g
      LEFT JOIN goal_links gl ON gl.goal_id = g.id
      LEFT JOIN tasks t ON t.id = gl.entity_id AND gl.entity_type = 'task'
+     LEFT JOIN roadmap_items ri ON ri.id = gl.entity_id AND gl.entity_type = 'roadmap_item'
      WHERE g.workspace_id = $1
      GROUP BY g.id
      ORDER BY g.created_at DESC`,
     [workspaceId],
   );
   return result.rows;
+}
+
+export async function getGoalById(id: string, workspaceId: string): Promise<GoalWithProgress | null> {
+  const result = await pool.query<GoalWithProgress>(
+    `SELECT
+       g.*,
+       ${PROGRESS_JOIN_AND_COUNTS}
+     FROM goals g
+     LEFT JOIN goal_links gl ON gl.goal_id = g.id
+     LEFT JOIN tasks t ON t.id = gl.entity_id AND gl.entity_type = 'task'
+     LEFT JOIN roadmap_items ri ON ri.id = gl.entity_id AND gl.entity_type = 'roadmap_item'
+     WHERE g.id = $1 AND g.workspace_id = $2
+     GROUP BY g.id`,
+    [id, workspaceId],
+  );
+  return result.rows[0] ?? null;
 }
 
 export async function createGoal(
@@ -145,17 +171,24 @@ export async function getGoalProgressForTask(
   taskId: string,
   workspaceId: string,
 ): Promise<{ id: string; title: string; created_by: string; total_tasks: number; done_tasks: number }[]> {
+  // Same "count tasks + roadmap_items toward progress" logic as getGoals/getGoalById — a goal
+  // with both task and roadmap_item links must use the same totals here as it displays
+  // elsewhere, or milestone thresholds would fire against a different percentage than the UI
+  // shows.
   const result = await pool.query<{
     id: string; title: string; created_by: string; total_tasks: number; done_tasks: number;
   }>(
     `SELECT
        g.id, g.title, g.created_by,
-       COUNT(t2.id) FILTER (WHERE gl2.entity_type = 'task' AND t2.deleted_at IS NULL)::int                       AS total_tasks,
-       COUNT(t2.id) FILTER (WHERE gl2.entity_type = 'task' AND t2.status = 'done' AND t2.deleted_at IS NULL)::int AS done_tasks
+       COUNT(t2.id) FILTER (WHERE gl2.entity_type = 'task' AND t2.deleted_at IS NULL)::int
+         + COUNT(ri2.id) FILTER (WHERE gl2.entity_type = 'roadmap_item')::int                                      AS total_tasks,
+       COUNT(t2.id) FILTER (WHERE gl2.entity_type = 'task' AND t2.status = 'done' AND t2.deleted_at IS NULL)::int
+         + COUNT(ri2.id) FILTER (WHERE gl2.entity_type = 'roadmap_item' AND ri2.status = 'live')::int             AS done_tasks
      FROM goal_links gl
      JOIN goals g ON g.id = gl.goal_id AND g.workspace_id = $2
      LEFT JOIN goal_links gl2 ON gl2.goal_id = g.id
-     LEFT JOIN tasks t2 ON t2.id = gl2.entity_id
+     LEFT JOIN tasks t2 ON t2.id = gl2.entity_id AND gl2.entity_type = 'task'
+     LEFT JOIN roadmap_items ri2 ON ri2.id = gl2.entity_id AND gl2.entity_type = 'roadmap_item'
      WHERE gl.entity_id = $1 AND gl.entity_type = 'task'
      GROUP BY g.id, g.title, g.created_by`,
     [taskId, workspaceId],
@@ -202,6 +235,10 @@ async function _notifyGoalMilestone(
        SELECT 1 FROM notifications
        WHERE workspace_id = $1 AND recipient_clerk_id = $2
          AND type = 'goal_milestone' AND body = $4
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM notification_preferences
+       WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'goal_milestone' AND enabled = false
      )`,
     [workspaceId, goal.created_by, title, dedupBody],
   );

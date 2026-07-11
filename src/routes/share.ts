@@ -31,12 +31,22 @@ const voteLimiter = rateLimit({
   message: { error: 'Too many votes, please try again later' },
 });
 
+// Same intent as voteLimiter: an unauthenticated, token-gated endpoint that can leak roadmap
+// data per successful token guess, previously relying solely on the app-wide 200/min limiter.
+const publicReadLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
 const voteBodySchema = z.object({
   visitor_id: z.string().min(1).max(128),
 });
 
 // GET /public/roadmap/:token
-router.get('/roadmap/:token', async (req, res, next) => {
+router.get('/roadmap/:token', publicReadLimiter, async (req, res, next) => {
   try {
     const data = await getPublicRoadmap(req.params.token);
     if (!data) {

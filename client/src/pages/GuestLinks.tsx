@@ -20,7 +20,7 @@ interface Share {
   created_at: string;
 }
 
-const ALL_SCOPES = ['tasks:read', 'roadmap:read', 'goals:read', 'sprints:read'];
+const ALL_SCOPES = ['tasks:read', 'roadmap:read', 'goals:read', 'sprints:read', 'epics:read', 'changelog:read', 'budgets:read'];
 
 export default function GuestLinks() {
   const { apiRequest } = useApiClient();

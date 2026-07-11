@@ -9,6 +9,7 @@ export interface Client {
   stage: string;
   mrr: string;
   notes: string | null;
+  external_crm_id: string | null;
   created_at: Date;
   updated_at: Date;
 }

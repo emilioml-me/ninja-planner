@@ -4,9 +4,11 @@ import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 import {
-  getGoals, createGoal, updateGoal, deleteGoal,
+  getGoals, getGoalById, createGoal, updateGoal, deleteGoal,
   getGoalLinks, addGoalLink, removeGoalLink,
 } from '../services/goalService.js';
+import { dispatchAutomations } from '../services/automationService.js';
+import { fireWebhooks } from '../services/webhookService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -45,6 +47,15 @@ router.post('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/goals/:id
+router.get('/:id', async (req, res, next) => {
+  try {
+    const goal = await getGoalById(req.params.id, req.workspace.id);
+    if (!goal) { res.status(404).json({ error: 'Goal not found' }); return; }
+    res.json(goal);
+  } catch (err) { next(err); }
+});
+
 // PATCH /api/goals/:id
 router.patch('/:id', async (req, res, next) => {
   try {
@@ -53,6 +64,15 @@ router.patch('/:id', async (req, res, next) => {
     if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
     const goal = await updateGoal(req.params.id, req.workspace.id, parsed.data);
     if (!goal) { res.status(404).json({ error: 'Goal not found' }); return; }
+    if (parsed.data.status === 'completed') {
+      fireWebhooks(req.workspace.id, 'goal.completed', { goal });
+      dispatchAutomations({
+        type: 'goal.completed',
+        workspaceId: req.workspace.id,
+        goalId: goal.id,
+        title: goal.title,
+      }).catch(() => {});
+    }
     res.json(goal);
   } catch (err) { next(err); }
 });

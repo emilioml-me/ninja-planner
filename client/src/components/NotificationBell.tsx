@@ -1,6 +1,6 @@
 import { useLocation } from 'wouter';
 import { safeFromNow } from '@/lib/utils';
-import { Bell, CheckCheck, MessageSquare, UserCheck, ClipboardList } from 'lucide-react';
+import { Bell, CheckCheck, MessageSquare, UserCheck, ClipboardList, AtSign, CalendarClock, Zap, Target, Clock, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -18,6 +18,13 @@ function NotifIcon({ type }: { type: string }) {
   if (type === 'task_assigned') return <UserCheck className="h-3.5 w-3.5 text-blue-500" />;
   if (type === 'comment_added') return <MessageSquare className="h-3.5 w-3.5 text-orange-500" />;
   if (type === 'review_submitted') return <ClipboardList className="h-3.5 w-3.5 text-purple-500" />;
+  if (type === 'mention') return <AtSign className="h-3.5 w-3.5 text-orange-500" />;
+  if (type === 'due_date_set') return <CalendarClock className="h-3.5 w-3.5 text-blue-500" />;
+  if (type === 'sprint_ending') return <Clock className="h-3.5 w-3.5 text-yellow-500" />;
+  if (type === 'goal_milestone') return <Target className="h-3.5 w-3.5 text-green-500" />;
+  if (type === 'automation') return <Zap className="h-3.5 w-3.5 text-primary" />;
+  if (type === 'overdue_alert') return <Clock className="h-3.5 w-3.5 text-destructive" />;
+  if (type === 'task_updated') return <RefreshCw className="h-3.5 w-3.5 text-blue-500" />;
   return <Bell className="h-3.5 w-3.5 text-muted-foreground" />;
 }
 

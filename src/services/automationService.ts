@@ -1,13 +1,16 @@
 // Automation event dispatcher — called from task route event points
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
-import { isSafeWebhookUrl, resolvedIpIsSafe } from '../lib/ssrf.js';
+import { deliverToEndpoint } from './webhookService.js';
 
 export type AutomationTrigger =
   | { type: 'task.status_changed'; workspaceId: string; taskId: string; oldStatus: string; newStatus: string; assigneeId?: string | null }
   | { type: 'task.assigned';       workspaceId: string; taskId: string; assigneeId: string; title: string }
   | { type: 'task.created';        workspaceId: string; taskId: string; assigneeId?: string | null; title: string }
-  | { type: 'task.due_date_passed'; workspaceId: string; taskId: string; assigneeId?: string | null; title: string };
+  | { type: 'task.due_date_passed'; workspaceId: string; taskId: string; assigneeId?: string | null; title: string }
+  | { type: 'sprint.completed';    workspaceId: string; sprintId: string; title: string }
+  | { type: 'epic.completed';      workspaceId: string; epicId: string; title: string }
+  | { type: 'goal.completed';      workspaceId: string; goalId: string; title: string };
 
 async function logRun(
   ruleId: string,
@@ -49,8 +52,16 @@ async function executeAction(
     case 'reassign_task': {
       const assigneeId = cfg.assignee_clerk_id as string;
       if (!taskId || !assigneeId) break;
+      // Every other assignment path in this codebase (routes/tasks.ts, routes/csvImport.ts)
+      // verifies the target is actually a workspace member before assigning — this one didn't,
+      // so a misconfigured automation rule could silently assign to an arbitrary external id.
       await pool.query(
-        `UPDATE tasks SET assignee_clerk_id = $1 WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL`,
+        `UPDATE tasks SET assignee_clerk_id = $1
+         WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM workspace_members
+             WHERE workspace_id = $3 AND clerk_user_id = $1
+           )`,
         [assigneeId, taskId, rule.workspace_id],
       );
       break;
@@ -63,23 +74,26 @@ async function executeAction(
       const link  = taskId ? `/tasks?highlight=${taskId}` : undefined;
       await pool.query(
         `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
-         VALUES ($1,$2,'automation',$3,$4,$5)`,
+         SELECT $1,$2,'automation',$3,$4,$5
+         WHERE NOT EXISTS (
+           SELECT 1 FROM notification_preferences
+           WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'automation' AND enabled = false
+         )`,
         [rule.workspace_id, assigneeId, title, body ?? null, link ?? null],
       );
       break;
     }
     case 'post_webhook': {
-      const url = cfg.url as string;
-      if (!url || !isSafeWebhookUrl(url)) break;
-      const { hostname } = new URL(url);
-      if (!(await resolvedIpIsSafe(hostname))) break;
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trigger, rule_id: rule.id }),
-        signal: AbortSignal.timeout(8_000),
-        redirect: 'error',
-      });
+      // Delivers through a registered Webhook endpoint (chosen by the rule) instead of a raw
+      // URL typed into the automation config — reuses the same HMAC signing, 3-attempt retry,
+      // and webhook_deliveries logging that regular event-subscription webhooks get, rather
+      // than a bare unsigned, non-retrying, unaudited fetch.
+      const endpointId = cfg.endpoint_id as string;
+      if (!endpointId) break;
+      const delivered = await deliverToEndpoint(endpointId, rule.workspace_id, trigger.type, { trigger, rule_id: rule.id });
+      if (!delivered) {
+        throw new Error(`post_webhook: endpoint ${endpointId} not found or inactive`);
+      }
       break;
     }
     default:
