@@ -5,6 +5,8 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import type { Pool } from 'pg';
 
+const REPLAY_WINDOW_MS = 5 * 60_000;
+
 export function createNinjaTaskWebhookRouter(pool: Pool) {
   const router = Router();
 
@@ -47,7 +49,14 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
     // express.json()) so the signature is verified over the exact bytes ninja-task signed — a
     // JSON.stringify(parsedBody) re-serialization can diverge in number formatting, whitespace,
     // or key order and reject a legitimately-signed request.
-    const rawBody = req.body as Buffer;
+    // A missing body or a non-matching Content-Type (express.raw only buffers the configured
+    // type) leaves req.body as undefined/{} instead of a Buffer; createHmac().update() would throw
+    // on that and surface as a 500.
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: 'Missing or invalid request body' });
+      return;
+    }
+    const rawBody = req.body;
     const expected = 'sha256=' + createHmac('sha256', secret).update(rawBody).digest('hex');
 
     // Constant-time comparison to prevent timing attacks — the previous `!==` string compare
@@ -61,11 +70,25 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
       return;
     }
 
-    let event: { event: string; payload?: { taskId?: string; questId?: string; [key: string]: unknown }; timestamp?: string };
+    let event: { event: string; payload?: { taskId?: string; questId?: string; [key: string]: unknown }; timestamp?: string | number };
     try {
       event = JSON.parse(rawBody.toString('utf8'));
     } catch {
       res.status(400).json({ error: 'Invalid JSON body' });
+      return;
+    }
+    if (!event || typeof event !== 'object' || typeof event.event !== 'string') {
+      res.status(400).json({ error: 'Invalid event payload' });
+      return;
+    }
+
+    // Replay protection: the signed body carries ninja-task's send time (ISO string). Without
+    // this check a captured, validly-signed request could be replayed indefinitely.
+    const sentAt = typeof event.timestamp === 'string' || typeof event.timestamp === 'number'
+      ? new Date(event.timestamp).getTime()
+      : NaN;
+    if (!Number.isFinite(sentAt) || Math.abs(Date.now() - sentAt) > REPLAY_WINDOW_MS) {
+      res.status(400).json({ error: 'Missing or stale timestamp' });
       return;
     }
 
@@ -79,12 +102,6 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
       // Map the completed quest back to (sprint, member) via sprint_quests, then let the member's
       // workspace admins know — there's no per-sprint "done" state to flip here since a quest
       // only represents one member's personal copy of the sprint, not the sprint itself.
-      // Matching on ninja_task_quest_id alone (no workspace_id in the payload) is safe here,
-      // unlike the cross-tenant bug fixed for external_ninja_task_id: that column has no
-      // uniqueness constraint, but sprint_quests_quest_id_unique (migration 047) makes
-      // ninja_task_quest_id globally unique, and each row's (workspace_id, sprint_id,
-      // clerk_user_id) is set once by our own code at quest-creation time — an incoming questId
-      // can therefore only ever resolve to the single workspace that created it.
       pool.query<{ sprint_id: string; workspace_id: string; clerk_user_id: string }>(
         `UPDATE sprint_quests SET completed_at = now()
          WHERE ninja_task_quest_id = $1 AND completed_at IS NULL
@@ -101,7 +118,7 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
 
         const { createNotification } = await import('../services/notificationService.js');
         const admins = await pool.query<{ clerk_user_id: string }>(
-          "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role IN ('owner','admin')",
+          "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role IN ('org:owner','org:admin')",
           [row.workspace_id],
         );
         for (const admin of admins.rows) {
@@ -145,48 +162,25 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
       const row = found.rows[0];
       if (!row || row.status === 'done') return;
 
-      // Previously did a raw UPDATE tasks SET status='done' here, which skipped every completion
-      // side effect PATCH /api/tasks/:id fires: no task.completed webhook, no automation
-      // dispatch, no goal-milestone check, no watcher notifications. Route through the same
-      // service PATCH uses instead so ninja-task-driven completions behave identically.
+      // Same update service + transition side effects as PATCH /api/tasks/:id (activity row,
+      // recurring spawn, task.completed webhook, automations, goal milestones, watchers).
       const { updateTaskWithPrevState } = await import('../services/taskService.js');
       const updateResult = await updateTaskWithPrevState(row.id, row.workspace_id, { status: 'done' });
       if (!updateResult) return;
       const { task, prevStatus } = updateResult;
 
-      const { fireWebhooks } = await import('../services/webhookService.js');
-      fireWebhooks(row.workspace_id, 'task.completed', { task });
-
-      const { dispatchAutomations } = await import('../services/automationService.js');
-      if (prevStatus && prevStatus !== task.status) {
-        dispatchAutomations({
-          type: 'task.status_changed',
-          workspaceId: row.workspace_id,
-          taskId: task.id,
-          oldStatus: prevStatus,
-          newStatus: task.status,
-          assigneeId: task.assignee_clerk_id,
-        }).catch(() => {});
-      }
-
-      const { checkAndNotifyGoalMilestones } = await import('../services/goalService.js');
-      checkAndNotifyGoalMilestones(task.id, row.workspace_id, process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com');
-
-      const { createNotification } = await import('../services/notificationService.js');
-      const watchers = await pool.query<{ user_clerk_id: string }>(
-        'SELECT user_clerk_id FROM task_watchers WHERE task_id = $1 AND workspace_id = $2',
-        [task.id, row.workspace_id],
-      );
-      for (const { user_clerk_id } of watchers.rows) {
-        createNotification({
-          workspaceId: row.workspace_id,
-          recipientClerkId: user_clerk_id,
-          type: 'task_updated',
-          title: `Task updated: "${task.title}"`,
-          body: `A task you're watching was updated.`,
-          link: '/tasks',
-        }).catch(() => {});
-      }
+      // A retried webhook can pass the `row.status === 'done'` pre-check before the first
+      // request commits, then serialize behind its row lock; runTaskStatusEffects is a no-op when
+      // prevStatus already equals the new status, so no duplicate side effects fire.
+      const { runTaskStatusEffects } = await import('../services/taskStatusEffects.js');
+      await runTaskStatusEffects({
+        workspaceId: row.workspace_id,
+        actorUserId: null,
+        task,
+        prevStatus,
+        newStatus: task.status,
+        source: 'ninjatask',
+      });
 
       console.info('[ninja-task-webhook] task_complete synced', { ninjaTaskId, taskId: task.id });
     })().catch((err: unknown) => {

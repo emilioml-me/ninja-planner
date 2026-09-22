@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Plus, Trash2, Zap, ChevronDown, ChevronUp, ToggleLeft, ToggleRight } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { useMembers } from '@/hooks/use-members';
 
 interface Rule {
   id: string;
@@ -46,6 +47,14 @@ const ACTIONS = [
 
 const STATUSES = ['todo', 'in_progress', 'done', 'blocked'];
 
+// Radix Select throws on `<SelectItem value="">`, so "Any" uses a sentinel mapped back to ''.
+const ANY_STATUS = '__any__';
+
+// Actions that operate on a task (or its assignee) are meaningless for sprint/epic/goal
+// triggers, whose payload carries no task, so only post_webhook is offered for those.
+const TASK_TRIGGERS = new Set(['task.status_changed', 'task.assigned', 'task.created', 'task.due_date_passed']);
+const TASK_ONLY_ACTIONS = new Set(['notify_assignee', 'set_status', 'reassign_task']);
+
 function RuleForm({ onSave, onCancel, loading }: {
   onSave: (data: Omit<Rule, 'id' | 'created_at'>) => void;
   onCancel: () => void;
@@ -62,6 +71,7 @@ function RuleForm({ onSave, onCancel, loading }: {
   const [actionAssignee,setActionAssignee]= useState('');
 
   const { apiRequest } = useApiClient();
+  const { members } = useMembers();
   const { data: endpoints = [] } = useQuery<{ id: string; url: string; active: boolean }[]>({
     queryKey: ['/api/webhooks'],
     queryFn: () => apiRequest('GET', '/api/webhooks'),
@@ -92,8 +102,17 @@ function RuleForm({ onSave, onCancel, loading }: {
   // instead of a bare unsigned fetch, and reuses the SSRF guard already applied when the
   // endpoint itself was created.
   const webhookSelectionValid = actionType !== 'post_webhook' || !!actionEndpointId;
+  const assigneeValid = actionType !== 'reassign_task' || !!actionAssignee;
+  const isTaskTrigger = TASK_TRIGGERS.has(triggerType);
+  const availableActions = isTaskTrigger ? ACTIONS : ACTIONS.filter((a) => !TASK_ONLY_ACTIONS.has(a.value));
+  const actionAllowed = isTaskTrigger || !TASK_ONLY_ACTIONS.has(actionType);
 
-  const valid = name.trim() && triggerType && actionType && webhookSelectionValid;
+  function handleTriggerChange(value: string) {
+    setTriggerType(value);
+    if (!TASK_TRIGGERS.has(value) && TASK_ONLY_ACTIONS.has(actionType)) setActionType('post_webhook');
+  }
+
+  const valid = name.trim() && triggerType && actionType && webhookSelectionValid && assigneeValid && actionAllowed;
 
   return (
     <div className="space-y-4">
@@ -104,7 +123,7 @@ function RuleForm({ onSave, onCancel, loading }: {
 
       <div>
         <label className="text-sm font-medium">Trigger</label>
-        <Select value={triggerType} onValueChange={setTriggerType}>
+        <Select value={triggerType} onValueChange={handleTriggerChange}>
           <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
           <SelectContent>
             {TRIGGERS.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
@@ -116,10 +135,10 @@ function RuleForm({ onSave, onCancel, loading }: {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-sm font-medium">From status (optional)</label>
-            <Select value={fromStatus} onValueChange={setFromStatus}>
+            <Select value={fromStatus || ANY_STATUS} onValueChange={(v) => setFromStatus(v === ANY_STATUS ? '' : v)}>
               <SelectTrigger className="mt-1"><SelectValue placeholder="Any" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Any</SelectItem>
+                <SelectItem value={ANY_STATUS}>Any</SelectItem>
                 {STATUSES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
               </SelectContent>
             </Select>
@@ -141,7 +160,7 @@ function RuleForm({ onSave, onCancel, loading }: {
         <Select value={actionType} onValueChange={setActionType}>
           <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
           <SelectContent>
-            {ACTIONS.map((a) => <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>)}
+            {availableActions.map((a) => <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
@@ -166,9 +185,15 @@ function RuleForm({ onSave, onCancel, loading }: {
       )}
       {actionType === 'reassign_task' && (
         <div>
-          <label className="text-sm font-medium">Assignee Clerk ID</label>
-          <Input value={actionAssignee} onChange={(e) => setActionAssignee(e.target.value)}
-            placeholder="user_..." className="mt-1" />
+          <label className="text-sm font-medium">Reassign to</label>
+          <Select value={actionAssignee} onValueChange={setActionAssignee}>
+            <SelectTrigger className="mt-1"><SelectValue placeholder="Choose a member" /></SelectTrigger>
+            <SelectContent>
+              {members.map((m) => (
+                <SelectItem key={m.clerk_user_id} value={m.clerk_user_id}>{m.display_name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       )}
       {actionType === 'post_webhook' && (
@@ -183,7 +208,8 @@ function RuleForm({ onSave, onCancel, loading }: {
               <SelectTrigger className="mt-1"><SelectValue placeholder="Choose an endpoint" /></SelectTrigger>
               <SelectContent>
                 {endpoints.map((e) => (
-                  <SelectItem key={e.id} value={e.id}>{e.url}{!e.active ? ' (disabled)' : ''}</SelectItem>
+                  // Disabled endpoints stay listed (so the list isn't confusingly short) but can't be picked.
+                  <SelectItem key={e.id} value={e.id} disabled={!e.active}>{e.url}{!e.active ? ' (disabled)' : ''}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -234,6 +260,7 @@ export default function Automations() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
+  const isAdminLoaded = useIsAdminLoaded();
   const { toast } = useToast();
 
   const [creating, setCreating] = useState(false);
@@ -242,6 +269,9 @@ export default function Automations() {
   const { data: rules = [], isLoading } = useQuery<Rule[]>({
     queryKey: ['automations'],
     queryFn: () => apiRequest('GET', '/api/automations'),
+    // Previously fired unconditionally, guaranteeing a 403 (this route is requireAdmin-gated
+    // server-side) plus react-query's default retry for any non-admin who reaches this page.
+    enabled: isAdmin,
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['automations'] });
@@ -263,9 +293,12 @@ export default function Automations() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/automations/${id}`),
     onSuccess: () => { invalidate(); toast({ title: 'Rule deleted' }); },
+    onError: (err: Error) => toast({ title: 'Failed to delete rule', description: err.message, variant: 'destructive' }),
   });
 
-  if (!isAdmin) {
+  // Wait for Clerk to resolve before rendering the admin-required block — see ApiKeys.tsx for
+  // the same fix and reasoning.
+  if (isAdminLoaded && !isAdmin) {
     return (
       <div className="p-6">
         <h1 className="text-2xl font-bold mb-2">Automations</h1>
@@ -334,7 +367,7 @@ export default function Automations() {
                       : <ChevronDown className="h-4 w-4" />}
                   </Button>
                   <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive hover:text-destructive"
-                    onClick={() => deleteMutation.mutate(rule.id)}
+                    onClick={() => { if (confirm(`Delete rule "${rule.name}"?`)) deleteMutation.mutate(rule.id); }}
                     disabled={deleteMutation.isPending}>
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>

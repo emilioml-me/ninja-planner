@@ -1,26 +1,24 @@
 import { Moon, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { applyTheme, getInitialTheme, saveTheme, type Theme } from '@/lib/theme';
 
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
-
-  useEffect(() => {
-    const saved = localStorage.getItem('theme') as 'light' | 'dark' | null;
-    const initial = saved || 'light';
-    setTheme(initial);
-    document.documentElement.classList.toggle('dark', initial === 'dark');
-  }, []);
+  // main.tsx already applied the initial theme before the first render (no light flash), so
+  // just read the same source of truth here.
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
 
   const toggle = () => {
-    const next = theme === 'light' ? 'dark' : 'light';
+    const next: Theme = theme === 'light' ? 'dark' : 'light';
     setTheme(next);
-    localStorage.setItem('theme', next);
-    document.documentElement.classList.toggle('dark', next === 'dark');
+    saveTheme(next);
+    applyTheme(next);
   };
 
+  const label = theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme';
+
   return (
-    <Button variant="ghost" size="icon" onClick={toggle}>
+    <Button variant="ghost" size="icon" onClick={toggle} aria-label={label} title={label}>
       {theme === 'light' ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
     </Button>
   );

@@ -5,9 +5,9 @@ Multi-tenant business planning SaaS — part of the Loki-IT ninja suite.
 | Key | Value |
 |-----|-------|
 | Port | 3206 |
-| Domain | plan-ninja.com |
+| Domain | ninja-planner.com (staging: ninja-planner.njn-stg.com) |
 | Host | ninja-prod201 (10.10.1.10) |
-| DB | plan_ninja_db via PgBouncer (plan_ninja_pool) at 10.10.1.60:25061 |
+| DB | via PgBouncer at 10.10.1.60:25061 (database/user names keep the legacy `plan_ninja*` naming) |
 
 ---
 
@@ -18,10 +18,19 @@ cp .env.example .env
 # fill in DATABASE_URL, CLERK_SECRET_KEY, CLERK_WEBHOOK_SECRET
 
 npm install
+npm run migrate   # applies any pending migrations/*.sql
 npm run dev
 ```
 
 The dev server starts on port 3206 with hot-reload via `tsx watch`.
+
+Checks (the same ones CI runs):
+
+```bash
+npm run typecheck    # server (tsconfig.json) + client (client/tsconfig.json)
+npm test             # server tests
+npm run test:client  # client tests
+```
 
 ---
 
@@ -56,12 +65,21 @@ Reload PgBouncer:
 sudo systemctl reload pgbouncer
 ```
 
-Run the migration from your local machine (or any host with psql access):
+### Migrations
 
-```bash
-psql "postgresql://plan_ninjausr:<password>@10.10.1.60:25061/plan_ninja_pool?sslmode=disable" \
-  -f migrations/001_init.sql
-```
+Do **not** apply `migrations/*.sql` by hand with `psql`. Migrations run automatically every time
+the container starts (`entrypoint.sh` runs `node dist/scripts/migrate.js` before the app), and
+locally via `npm run migrate`. The runner (`src/scripts/migrate.ts`):
+
+- applies every `migrations/*.sql` not yet listed in `schema_migrations`, in filename order;
+- runs each file plus its `schema_migrations` row in one transaction (a file's own
+  `BEGIN;`/`COMMIT;` wrapper is stripped so it can't commit the outer transaction early);
+- holds a Postgres advisory lock for the whole run, so containers starting at the same time
+  can't race each other.
+
+Applying a file manually leaves it unrecorded, so the runner will try it again on the next start
+and the container crash-loops on "already exists" errors. Never edit a migration that has already
+been applied anywhere; add a new numbered file instead.
 
 ---
 
@@ -78,11 +96,11 @@ docker save ninja-planner:$TAG | gzip > ninja-planner-$TAG.tar.gz
 Ship to production (ninja-prod201):
 
 ```bash
-scp ninja-planner-$TAG.tar.gz ubuntu@10.10.1.10:/srv/apps/plan-ninja/
+scp ninja-planner-$TAG.tar.gz ubuntu@10.10.1.10:/srv/apps/ninja-planner/
 ssh ubuntu@10.10.1.10
 
 # on the server:
-cd /srv/apps/plan-ninja
+cd /srv/apps/ninja-planner
 docker load < ninja-planner-$TAG.tar.gz
 sed -i "s|ninja-planner:.*|ninja-planner:$TAG|" docker-compose.prod.saas.yml
 sudo docker compose -f docker-compose.prod.saas.yml up -d
@@ -93,31 +111,38 @@ docker compose -f docker-compose.prod.saas.yml ps
 
 ```bash
 # App directory
-sudo mkdir -p /srv/apps/plan-ninja
-sudo chown ubuntu:ubuntu /srv/apps/plan-ninja
+sudo mkdir -p /srv/apps/ninja-planner
+sudo chown ubuntu:ubuntu /srv/apps/ninja-planner
 
-# Secrets file
+# Secrets file (path is fixed by env_file in docker-compose.prod.saas.yml;
+# see .env.example for the full list of variables)
 sudo mkdir -p /srv/secrets
-sudo tee /srv/secrets/plan-ninja.env << 'EOF'
+sudo tee /srv/secrets/ninja-planner.env << 'EOF'
 NODE_ENV=production
 PORT=3206
 DATABASE_URL=postgresql://plan_ninjausr:<password>@10.10.1.60:25061/plan_ninja_pool?sslmode=disable
 CLERK_SECRET_KEY=sk_live_...
 CLERK_WEBHOOK_SECRET=whsec_...
-ALLOWED_ORIGIN=https://plan-ninja.com
+ALLOWED_ORIGIN=https://ninja-planner.com
 EOF
-sudo chmod 600 /srv/secrets/plan-ninja.env
+sudo chmod 600 /srv/secrets/ninja-planner.env
 
 # Copy compose + nginx config
-scp docker-compose.prod.saas.yml ubuntu@10.10.1.10:/srv/apps/plan-ninja/
-scp nginx.conf ubuntu@10.10.1.10:/etc/nginx/sites-available/plan-ninja.conf
-ssh ubuntu@10.10.1.10 "sudo ln -sf /etc/nginx/sites-available/plan-ninja.conf /etc/nginx/sites-enabled/ && sudo nginx -t && sudo systemctl reload nginx"
+scp docker-compose.prod.saas.yml ubuntu@10.10.1.10:/srv/apps/ninja-planner/
+scp nginx/ninja-planner.com.conf ubuntu@10.10.1.10:/etc/nginx/sites-available/ninja-planner.com.conf
+ssh ubuntu@10.10.1.10 "sudo ln -sf /etc/nginx/sites-available/ninja-planner.com.conf /etc/nginx/sites-enabled/ && sudo nginx -t && sudo systemctl reload nginx"
 ```
+
+The container publishes only `127.0.0.1:3207 -> 3206` (see `docker-compose.prod.saas.yml`), so it
+is reachable only through the host's nginx (`upstream ... 127.0.0.1:3207`), never directly from
+HAProxy or the network. `nginx -t` fails until the Let's Encrypt certificate referenced by the
+443 block exists, so issue the certificate (next section) before enabling the site, or enable it
+with only the port-80 server block first.
 
 ### SSL certificate (on ninja-prod201)
 
 ```bash
-sudo certbot certonly --nginx -d plan-ninja.com
+sudo certbot certonly --webroot -w /var/www/html -d ninja-planner.com -d www.ninja-planner.com
 ```
 
 Cert-push to HAProxy2 (LXC 300) is handled automatically by the renewal hook at
@@ -131,15 +156,23 @@ sudo /etc/letsencrypt/renewal-hooks/post/cert-push.sh
 
 ### HAProxy2 backend (on LXC 300)
 
-Add to `/etc/haproxy/haproxy.cfg`:
+HAProxy routes to **nginx on ninja-prod201** (ports 80/443), which proxies to the container on
+`127.0.0.1:3207`. Do not point HAProxy at port 3206/3207: the app port is bound to loopback only.
+Add to `/etc/haproxy/haproxy.cfg` (same shape as the other ninja-prod backends):
 
 ```haproxy
-acl host_plan_ninja hdr(host) -i plan-ninja.com
-use_backend be_plan_ninja if host_plan_ninja
+acl host_ninja_planner hdr(host) -i ninja-planner.com www.ninja-planner.com
+use_backend ninja_planner_http  if host_ninja_planner   # http_in
+use_backend ninja_planner_https if host_ninja_planner   # https_in
 
-backend be_plan_ninja
-    option httpchk GET /health
-    server ninja-prod201 10.10.1.10:3206 check
+backend ninja_planner_http
+    balance roundrobin
+    option httpchk GET /
+    server ninja-prod201 10.10.1.10:80 check
+
+backend ninja_planner_https
+    balance roundrobin
+    server ninja-prod201 10.10.1.10:443 ssl verify none
 ```
 
 Reload HAProxy:
@@ -147,6 +180,22 @@ Reload HAProxy:
 ```bash
 sudo systemctl reload haproxy
 ```
+
+### Staging (ninja-planner.njn-stg.com)
+
+`docker-compose.stg.yml` runs with `network_mode: host` and `PORT=3208`, so the app listens on
+**all host interfaces on port 3208** (inside the container it has to bind 0.0.0.0). The host
+firewall on the staging VM must block 3208 from everything except loopback; only the host nginx
+(`nginx/ninja-planner.njn-stg.com.conf`, upstream `127.0.0.1:3208`) should reach it. Because the
+app trusts `X-Forwarded-*` headers from its proxy, a directly reachable 3208 would let clients spoof
+their IP (rate limits, audit logs). Example with ufw:
+
+```bash
+sudo ufw deny 3208/tcp
+```
+
+Deploy with `scripts/deploy-stg.sh` on the staging host (pulls, rebuilds, and fails non-zero if
+`/health` doesn't come up within 60s).
 
 ---
 

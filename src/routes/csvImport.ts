@@ -3,6 +3,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
+import type { Task } from '../services/taskService.js';
+import { fireWebhooks } from '../services/webhookService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -48,10 +50,27 @@ function tokenizeCsv(text: string): string[][] {
 }
 
 // Parses a CSV string (first row = headers) into an array of objects
+// Header matching is case/whitespace-insensitive ("Title", " Due Date " -> title, due_date) —
+// spreadsheet exports rarely keep lowercase snake_case headers, and previously any other casing
+// silently dropped the column (a "Title" header failed every row as missing title).
+function normalizeHeader(h: string): string {
+  return h.replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function normalizeRowKeys(row: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(row)) {
+    out[normalizeHeader(k)] = v === null || v === undefined ? '' : String(v).trim();
+  }
+  return out;
+}
+
 function parseCsv(text: string): Record<string, string>[] {
-  const rows = tokenizeCsv(text).filter((r) => r.some((v) => v.trim() !== ''));
+  // Strip a UTF-8 BOM (Excel and our own CSV export prepend one) so it doesn't end up glued to
+  // the first header name.
+  const rows = tokenizeCsv(text.replace(/^\uFEFF/, '')).filter((r) => r.some((v) => v.trim() !== ''));
   if (rows.length < 2) return [];
-  const headers = rows[0].map((h) => h.trim());
+  const headers = rows[0].map(normalizeHeader);
   return rows.slice(1).map((vals) =>
     Object.fromEntries(headers.map((h, i) => [h, (vals[i] ?? '').trim()])),
   );
@@ -65,7 +84,11 @@ router.post('/', async (req, res, next) => {
     if (typeof req.body.csv === 'string') {
       rawRows = parseCsv(req.body.csv);
     } else if (Array.isArray(req.body.rows)) {
-      rawRows = req.body.rows;
+      if (req.body.rows.some((r: unknown) => !r || typeof r !== 'object' || Array.isArray(r))) {
+        res.status(400).json({ error: 'rows must be an array of objects' });
+        return;
+      }
+      rawRows = (req.body.rows as Record<string, unknown>[]).map(normalizeRowKeys);
     } else {
       res.status(400).json({ error: 'Provide csv string or rows array' });
       return;
@@ -75,14 +98,40 @@ router.post('/', async (req, res, next) => {
     if (rawRows.length > 500)  { res.status(400).json({ error: 'Max 500 rows per import' }); return; }
 
     const errors: { row: number; error: string }[] = [];
+    // Distinct from `errors`: rows that DO get imported but with a caveat (e.g. an assignee
+    // that isn't a workspace member gets silently cleared to null). Previously these were
+    // pushed into the same `errors` array and counted toward the response's `skipped` total,
+    // even though the row was actually inserted — so `imported + skipped` could exceed the
+    // input row count, and "skipped" didn't mean what it implied to a caller building an
+    // import-summary UI from this response.
+    const warnings: { row: number; warning: string }[] = [];
     const toInsert: z.infer<typeof rowSchema>[] = [];
+    const sourceRowNumbers: number[] = []; // file row number (header = 1) for each toInsert entry
+
+    // parseCsv always produces '' (never undefined) for a column present in the header but
+    // blank on a given row — very common in real-world exports (spreadsheet templates keep
+    // every column even when only some are filled in). z.enum().default() and .regex() only
+    // fall back / apply their intended semantics on `undefined`, not on an empty-but-present
+    // string, so a blank due_date/status/priority cell was previously rejected outright instead
+    // of using the schema's default/null. Blank cells for optional fields are normalized to
+    // undefined before validation so they get the intended default/omitted behavior; `title`
+    // (required) is deliberately excluded so a blank required field still fails validation.
+    const OPTIONAL_FIELDS = ['description', 'status', 'priority', 'due_date', 'tags', 'assignee_clerk_id'] as const;
+    function normalizeBlankCells(row: Record<string, string>): Record<string, string | undefined> {
+      const out: Record<string, string | undefined> = { ...row };
+      for (const key of OPTIONAL_FIELDS) {
+        if (out[key] === '') out[key] = undefined;
+      }
+      return out;
+    }
 
     for (let i = 0; i < rawRows.length; i++) {
-      const parsed = rowSchema.safeParse(rawRows[i]);
+      const parsed = rowSchema.safeParse(normalizeBlankCells(rawRows[i]));
       if (!parsed.success) {
         errors.push({ row: i + 2, error: JSON.stringify(parsed.error.flatten().fieldErrors) });
       } else {
         toInsert.push(parsed.data);
+        sourceRowNumbers.push(i + 2);
       }
     }
 
@@ -115,7 +164,7 @@ router.post('/', async (req, res, next) => {
         ? row.assignee_clerk_id
         : null;
       if (row.assignee_clerk_id && !assigneeId) {
-        errors.push({ row: i + 2, error: 'assignee_clerk_id is not a member of this workspace — imported unassigned' });
+        warnings.push({ row: sourceRowNumbers[i], warning: 'assignee_clerk_id is not a member of this workspace — imported unassigned' });
       }
       valueRows.push([
         req.workspace.id, row.title, row.description ?? null, row.status, row.priority,
@@ -123,24 +172,43 @@ router.post('/', async (req, res, next) => {
       ]);
     }
 
-    const COLUMNS_PER_ROW = 9;
+    const COLUMNS_PER_ROW = 10;
     const placeholders = valueRows
       .map((_, r) => `(${Array.from({ length: COLUMNS_PER_ROW }, (_, c) => `$${r * COLUMNS_PER_ROW + c + 1}`).join(',')})`)
       .join(', ');
 
     const client = await pool.connect();
-    let imported: { id: string; title: string }[] = [];
+    let imported: Task[] = [];
     try {
       await client.query('BEGIN');
       if (valueRows.length > 0) {
-        const result = await client.query<{ id: string; title: string }>(
+        // Imported tasks are appended after the workspace's current highest position, in file
+        // order — previously every row got position 0, so the imported order was lost and the
+        // tasks interleaved arbitrarily with existing position-0 cards on the board.
+        const posResult = await client.query<{ next_pos: number }>(
+          'SELECT COALESCE(MAX(position), -1)::int + 1 AS next_pos FROM tasks WHERE workspace_id = $1 AND deleted_at IS NULL',
+          [req.workspace.id],
+        );
+        const basePosition = posResult.rows[0]?.next_pos ?? 0;
+        valueRows.forEach((row, idx) => row.push(basePosition + idx));
+
+        const result = await client.query<Task>(
           `INSERT INTO tasks
-             (workspace_id, title, description, status, priority, due_date, tags, created_by, assignee_clerk_id)
+             (workspace_id, title, description, status, priority, due_date, tags, created_by, assignee_clerk_id, position)
            VALUES ${placeholders}
-           RETURNING id, title`,
+           RETURNING *`,
           valueRows.flat(),
         );
         imported = result.rows;
+
+        // One 'created' activity row per task (with status, like POST /api/tasks) so imports
+        // show up in the changelog/burndown/activity feed.
+        await client.query(
+          `INSERT INTO task_activity (task_id, actor_clerk_id, action, payload)
+           SELECT t.id, $2, 'created', jsonb_build_object('status', t.status, 'source', 'csv')
+           FROM tasks t WHERE t.id = ANY($1::uuid[])`,
+          [imported.map((t) => t.id), req.auth.userId],
+        );
       }
       await client.query('COMMIT');
     } catch (err) {
@@ -150,11 +218,16 @@ router.post('/', async (req, res, next) => {
       client.release();
     }
 
+    for (const task of imported) {
+      fireWebhooks(req.workspace.id, 'task.created', { task });
+    }
+
     res.status(201).json({
       imported: imported.length,
       skipped: errors.length,
-      tasks: imported,
+      tasks: imported.map((t) => ({ id: t.id, title: t.title })),
       ...(errors.length > 0 ? { validation_errors: errors } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     });
   } catch (err) { next(err); }
 });

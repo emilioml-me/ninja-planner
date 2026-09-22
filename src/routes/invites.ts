@@ -6,7 +6,9 @@ import rateLimit from 'express-rate-limit';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
+import type { PoolClient } from 'pg';
 import { pool } from '../config/db.js';
+import { ensureClerkOrgMembership } from '../services/workspaceService.js';
 
 // Tight rate limit for public invite-lookup — prevents brute-force token scanning
 const inviteLookupLimiter = rateLimit({
@@ -22,26 +24,42 @@ const inviteLookupLimiter = rateLimit({
 export const workspaceInvitesRouter = Router();
 
 // POST /api/workspaces/me/invites
-workspaceInvitesRouter.post('/me/invites', requireAuth, requireWorkspace, requireAdmin, async (req, res, next) => {
+workspaceInvitesRouter.post('/me/invites', requireWorkspace, requireAdmin, async (req, res, next) => {
+  let client: PoolClient | undefined;
   try {
-    await pool.query(
+    client = await pool.connect();
+    await client.query('BEGIN');
+    // Serializes concurrent "revoke old, create new" calls for this workspace — without it, two
+    // near-simultaneous requests (two admins, or a double-click) could each run the revoke UPDATE
+    // before either INSERT commits, so both see "nothing to revoke yet" and both proceed,
+    // leaving two simultaneously-valid, unrevoked invite tokens instead of the intended single
+    // active invite. Released automatically on commit/rollback.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [req.workspace.id]);
+
+    await client.query(
       `UPDATE workspace_invites
          SET used_at = now(), used_by = 'revoked'
        WHERE workspace_id = $1 AND used_at IS NULL AND expires_at > now()`,
       [req.workspace.id],
     );
-    const result = await pool.query<{ token: string; expires_at: string }>(
+    const result = await client.query<{ token: string; expires_at: string }>(
       `INSERT INTO workspace_invites (workspace_id, created_by)
        VALUES ($1, $2)
        RETURNING token, expires_at`,
       [req.workspace.id, req.auth.userId],
     );
+    await client.query('COMMIT');
     res.status(201).json(result.rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client?.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client?.release();
+  }
 });
 
 // GET /api/workspaces/me/invites/active
-workspaceInvitesRouter.get('/me/invites/active', requireAuth, requireWorkspace, requireAdmin, async (req, res, next) => {
+workspaceInvitesRouter.get('/me/invites/active', requireWorkspace, requireAdmin, async (req, res, next) => {
   try {
     const result = await pool.query<{ token: string; expires_at: string }>(
       `SELECT token, expires_at
@@ -55,7 +73,7 @@ workspaceInvitesRouter.get('/me/invites/active', requireAuth, requireWorkspace, 
 });
 
 // DELETE /api/workspaces/me/invites
-workspaceInvitesRouter.delete('/me/invites', requireAuth, requireWorkspace, requireAdmin, async (req, res, next) => {
+workspaceInvitesRouter.delete('/me/invites', requireWorkspace, requireAdmin, async (req, res, next) => {
   try {
     await pool.query(
       `UPDATE workspace_invites
@@ -89,9 +107,12 @@ publicInvitesRouter.get('/token/:token', inviteLookupLimiter, async (req, res, n
 });
 
 // POST /api/invites/token/:token/accept — authenticated user accepts invite
+// publicInvitesRouter is mounted BEFORE the global requireAuth (so the lookup above stays
+// public), so this route needs its own requireAuth.
 publicInvitesRouter.post('/token/:token/accept', requireAuth, async (req, res, next) => {
-  const client = await pool.connect();
+  let client: PoolClient | undefined;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
 
     const inviteResult = await client.query<{ id: string; workspace_id: string; clerk_org_id: string }>(
@@ -99,7 +120,7 @@ publicInvitesRouter.post('/token/:token/accept', requireAuth, async (req, res, n
        FROM workspace_invites wi
        JOIN workspaces w ON w.id = wi.workspace_id
        WHERE wi.token = $1 AND wi.used_at IS NULL AND wi.expires_at > now()
-       FOR UPDATE`,
+       FOR UPDATE OF wi`,
       [req.params.token],
     );
     if (inviteResult.rows.length === 0) {
@@ -109,12 +130,19 @@ publicInvitesRouter.post('/token/:token/accept', requireAuth, async (req, res, n
 
     const { id: inviteId, workspace_id, clerk_org_id } = inviteResult.rows[0];
 
+    // C2b: requireWorkspace resolves the workspace from the Clerk org claim in the session token,
+    // so a local workspace_members row alone never grants access — the user must also be a
+    // member of the Clerk organization. Idempotent: "already a member" is treated as success.
+    // Done before COMMIT so a Clerk failure rolls back and leaves the invite unconsumed.
+    await ensureClerkOrgMembership(clerk_org_id, req.auth.userId);
+
     const existing = await client.query(
       `SELECT id FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2`,
       [workspace_id, req.auth.userId],
     );
     if (existing.rows.length > 0) {
-      await client.query(`UPDATE workspace_invites SET used_at = now(), used_by = $1 WHERE id = $2`, [req.auth.userId, inviteId]);
+      // C2c: existing members don't consume the (single-use) invite — it stays valid for the
+      // person it was actually meant for.
       await client.query('COMMIT');
       res.json({ ok: true, workspace_id, clerk_org_id, already_member: true }); return;
     }
@@ -130,10 +158,10 @@ publicInvitesRouter.post('/token/:token/accept', requireAuth, async (req, res, n
 
     res.json({ ok: true, workspace_id, clerk_org_id, already_member: false });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client?.query('ROLLBACK').catch(() => {});
     next(err);
   } finally {
-    client.release();
+    client?.release();
   }
 });
 

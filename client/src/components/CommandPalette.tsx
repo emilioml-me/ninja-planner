@@ -54,6 +54,10 @@ const NAV_ITEMS = [
   { href: '/settings/billing',       label: 'Billing',          icon: CreditCard },
 ];
 
+// Stable fallback: a fresh `?? []` on every render changed `items`' memo deps each render,
+// which re-ran the "reset active index" effect and made arrow-key navigation snap back to 0.
+const NO_TASKS: Task[] = [];
+
 interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -72,14 +76,15 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
     if (open) {
       setQuery('');
       setActiveIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 50);
+      const timer = setTimeout(() => inputRef.current?.focus(), 50);
+      return () => clearTimeout(timer);
     }
   }, [open]);
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
   // Pull tasks from cache — no extra fetch
-  const cachedTasks = queryClient.getQueryData<Task[]>(['/api/tasks']) ?? [];
+  const cachedTasks = queryClient.getQueryData<Task[]>(['/api/tasks']) ?? NO_TASKS;
 
   const items = useMemo<CommandItem[]>(() => {
     const q = query.toLowerCase().trim();
@@ -106,8 +111,8 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
         icon: CheckSquare,
         iconClass: 'text-primary',
         action: () => {
-          // Navigate to tasks with a hash so Tasks page can open this task
-          navigate(`/tasks#${t.id}`);
+          // Tasks.tsx opens the task named by the ?task= query param (then strips it).
+          navigate(`/tasks?task=${encodeURIComponent(t.id)}`);
           close();
         },
       }));

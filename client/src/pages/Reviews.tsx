@@ -3,10 +3,12 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { format } from 'date-fns';
+import { useAuth } from '@clerk/clerk-react';
 import { useApiClient } from '@/lib/api';
-import { safeFormat } from '@/lib/utils';
+import { safeFormat, todayLocal } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMembers } from '@/hooks/use-members';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -30,15 +32,21 @@ interface WeeklyReview {
   blockers: string | null;
   focus_next: string | null;
   health_score: number | null;
+  created_by: string;
   created_at: string;
 }
 
 const formSchema = z.object({
-  week_start: z.string().min(1, 'Required'),
+  week_start: z.string().min(1, 'Required').refine(
+    // Parsed as LOCAL midnight — the server keys reviews by the Monday starting the week.
+    (v) => new Date(v + 'T00:00:00').getDay() === 1,
+    { message: 'Week start must be a Monday' },
+  ),
   wins: z.string().optional(),
   blockers: z.string().optional(),
   focus_next: z.string().optional(),
-  health_score: z.coerce.number().int().min(1).max(5).optional(),
+  // null = not rated (an existing review without a score must not silently become 3 on edit).
+  health_score: z.number().int().min(1).max(5).nullable(),
 });
 type FormData = z.infer<typeof formSchema>;
 
@@ -72,20 +80,31 @@ function HealthDots({ score }: { score: number }) {
   );
 }
 
+// Monday of the week containing dateStr, as local YYYY-MM-DD (toISOString() would convert to
+// UTC and could shift the result by a day).
 function monday(dateStr: string) {
   const d = new Date(dateStr + 'T00:00:00');
   const day = d.getDay();
   const diff = d.getDate() - day + (day === 0 ? -6 : 1);
   d.setDate(diff);
-  return d.toISOString().substring(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
+
+const emptyToNull = (v: string | undefined) => (v && v.trim() ? v : null);
 
 export default function Reviews() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
+  const { userId } = useAuth();
+  const isAdmin = useIsAdmin();
+  const { displayName } = useMembers();
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<WeeklyReview | null>(null);
+
+  // Server rule: only the review's author or an admin may edit it.
+  const canEdit = (r: WeeklyReview) => isAdmin || r.created_by === userId;
+  const authorLabel = (r: WeeklyReview) => (r.created_by === userId ? 'You' : displayName(r.created_by));
 
   const { data: reviews = [], isLoading } = useQuery<WeeklyReview[]>({
     queryKey: ['/api/reviews'],
@@ -95,7 +114,7 @@ export default function Reviews() {
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
     defaultValues: {
-      week_start: monday(new Date().toISOString().substring(0, 10)),
+      week_start: monday(todayLocal()),
       wins: '',
       blockers: '',
       focus_next: '',
@@ -103,9 +122,13 @@ export default function Reviews() {
     },
   });
 
+  const closeDialog = () => { setOpen(false); setSelected(null); };
+
   const openCreate = () => {
+    // Must clear any previously edited review, or "Create" would PATCH that old review.
+    setSelected(null);
     form.reset({
-      week_start: monday(new Date().toISOString().substring(0, 10)),
+      week_start: monday(todayLocal()),
       wins: '',
       blockers: '',
       focus_next: '',
@@ -121,25 +144,34 @@ export default function Reviews() {
       wins: r.wins ?? '',
       blockers: r.blockers ?? '',
       focus_next: r.focus_next ?? '',
-      health_score: r.health_score ?? 3,
+      health_score: r.health_score ?? null,
     });
     setOpen(true);
   };
 
   const createMut = useMutation({
-    mutationFn: (d: FormData) => apiRequest('POST', '/api/reviews', d),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/reviews'] }); setOpen(false); toast({ title: 'Review created' }); },
+    mutationFn: (d: FormData) => apiRequest('POST', '/api/reviews', { ...d, health_score: d.health_score ?? undefined }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/reviews'] }); closeDialog(); toast({ title: 'Review created' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
   const updateMut = useMutation({
-    mutationFn: (d: FormData) => apiRequest('PATCH', `/api/reviews/${selected!.id}`, { ...d, week_start: undefined }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/reviews'] }); setOpen(false); setSelected(null); toast({ title: 'Review updated' }); },
+    // week_start is editable (must be a Monday); cleared text fields are sent as null so the
+    // clear actually persists (undefined = unchanged on PATCH).
+    mutationFn: ({ id, d }: { id: string; d: FormData }) => apiRequest('PATCH', `/api/reviews/${id}`, {
+      week_start:   d.week_start,
+      wins:         emptyToNull(d.wins),
+      blockers:     emptyToNull(d.blockers),
+      focus_next:   emptyToNull(d.focus_next),
+      health_score: d.health_score,
+    }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/reviews'] }); closeDialog(); toast({ title: 'Review updated' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
   const handleSubmit = (d: FormData) => {
-    selected ? updateMut.mutate(d) : createMut.mutate(d);
+    if (selected) updateMut.mutate({ id: selected.id, d });
+    else createMut.mutate(d);
   };
 
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -154,6 +186,7 @@ export default function Reviews() {
             <Button size="sm" variant="outline" className="gap-2" onClick={() => {
               const rows = reviews.map((r) => ({
                 week_start:   r.week_start.substring(0, 10),
+                author:       displayName(r.created_by),
                 health_score: r.health_score ?? '',
                 wins:         r.wins ?? '',
                 blockers:     r.blockers ?? '',
@@ -194,8 +227,9 @@ export default function Reviews() {
                   )}
                 >
                   <p className="text-sm font-medium">
-                    Week of {safeFormat(r.week_start, 'MMM d, yyyy')}
+                    Week of {safeFormat(r.week_start.substring(0, 10), 'MMM d, yyyy')}
                   </p>
+                  <p className="text-xs text-muted-foreground truncate">{authorLabel(r)}</p>
                   <div className="flex items-center gap-2 mt-1">
                     {r.health_score && <HealthDots score={r.health_score} />}
                     {r.health_score && (
@@ -216,8 +250,9 @@ export default function Reviews() {
                 <div className="flex items-center justify-between">
                   <div>
                     <h2 className="text-lg font-semibold">
-                      Week of {safeFormat(detail.week_start, 'MMMM d, yyyy')}
+                      Week of {safeFormat(detail.week_start.substring(0, 10), 'MMMM d, yyyy')}
                     </h2>
+                    <p className="text-xs text-muted-foreground">by {authorLabel(detail)}</p>
                     {detail.health_score && (
                       <div className="flex items-center gap-2 mt-1">
                         <HealthDots score={detail.health_score} />
@@ -227,7 +262,9 @@ export default function Reviews() {
                       </div>
                     )}
                   </div>
-                  <Button variant="outline" size="sm" onClick={() => openEdit(detail)}>Edit</Button>
+                  {canEdit(detail) && (
+                    <Button variant="outline" size="sm" onClick={() => openEdit(detail)}>Edit</Button>
+                  )}
                 </div>
 
                 <Separator />
@@ -279,7 +316,7 @@ export default function Reviews() {
       )}
 
       {/* Dialog */}
-      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setSelected(null); }}>
+      <Dialog open={open} onOpenChange={(v) => { if (v) setOpen(true); else closeDialog(); }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>{selected ? 'Edit Review' : 'New Weekly Review'}</DialogTitle>
@@ -349,7 +386,7 @@ export default function Reviews() {
               )} />
 
               <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+                <Button type="button" variant="outline" onClick={closeDialog}>Cancel</Button>
                 <Button type="submit" disabled={createMut.isPending || updateMut.isPending}>
                   {createMut.isPending || updateMut.isPending ? 'Saving…' : selected ? 'Update' : 'Create'}
                 </Button>

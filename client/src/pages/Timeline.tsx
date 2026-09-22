@@ -1,9 +1,9 @@
-import { useRef } from 'react';
+import { useRef, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useApiClient } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
-import { CalendarDays } from 'lucide-react';
+import { CalendarDays, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -101,6 +101,18 @@ function buildDateRange(tasks: TimelineTask[], sprints: TimelineSprint[]): { sta
 export default function Timeline() {
   const { apiRequest } = useApiClient();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const labelsRef = useRef<HTMLDivElement>(null);
+
+  // The label column and the chart are separate boxes; keep their vertical scroll in sync so
+  // task labels stay aligned with their bars (previously the labels never scrolled at all).
+  const syncLabels = useCallback(() => {
+    if (labelsRef.current && scrollRef.current) {
+      labelsRef.current.scrollTop = scrollRef.current.scrollTop;
+    }
+  }, []);
+  const forwardWheel = useCallback((e: React.WheelEvent) => {
+    if (scrollRef.current) scrollRef.current.scrollTop += e.deltaY;
+  }, []);
 
   const { data, isLoading } = useQuery<TimelineData>({
     queryKey: ['/api/timeline'],
@@ -233,6 +245,13 @@ export default function Timeline() {
         </div>
       </div>
 
+      {truncated && (
+        <div className="flex items-center gap-2 px-6 py-2 border-b bg-yellow-50 text-yellow-800 dark:bg-yellow-950/40 dark:text-yellow-300 text-xs shrink-0">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          Too many dated tasks to show at once; only part of the timeline is displayed.
+        </div>
+      )}
+
       {/* Gantt body */}
       <div className="flex flex-1 overflow-hidden">
         {/* Fixed label column */}
@@ -240,7 +259,7 @@ export default function Timeline() {
           {/* Header spacer */}
           <div style={{ height: HEADER_H }} className="border-b" />
           {/* Row labels */}
-          <div className="overflow-hidden flex-1">
+          <div ref={labelsRef} className="overflow-hidden flex-1" onWheel={forwardWheel}>
             {rows.map((row, i) => {
               if (row.type === 'epic-header') {
                 return (
@@ -271,11 +290,13 @@ export default function Timeline() {
                 </div>
               );
             })}
+            {/* Room for the chart's horizontal scrollbar so the last rows can align too */}
+            <div style={{ height: 24 }} />
           </div>
         </div>
 
         {/* Scrollable chart area */}
-        <div ref={scrollRef} className="flex-1 overflow-auto">
+        <div ref={scrollRef} className="flex-1 overflow-auto" onScroll={syncLabels}>
           <div style={{ width: chartW, position: 'relative' }}>
             {/* Date header */}
             <div

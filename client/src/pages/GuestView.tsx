@@ -6,17 +6,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { AlertTriangle, Briefcase } from 'lucide-react';
 
+// Mirrors the (deliberately minimal) guestView.ts payload — no internal ids, tags or free text.
 interface GuestData {
-  workspace_id: string;
   label: string;
   scopes: string[];
   tasks?: { id: string; title: string; status: string; priority: string; due_date: string | null }[];
   roadmap?: { id: string; title: string; phase: string | null; status: string }[];
   goals?: { id: string; title: string; status: string; due_date: string | null }[];
   sprints?: { id: string; name: string; status: string; start_date: string | null; end_date: string | null }[];
-  epics?: { id: string; title: string; description: string | null; status: string; color: string; total_tasks: number; done_tasks: number }[];
+  epics?: { id: string; title: string; status: string; color: string; total_tasks: number; done_tasks: number }[];
   changelog?: { id: string; title: string; priority: string; completed_at: string; sprint_name: string | null; epic_title: string | null }[];
-  budgets?: { id: string; name: string; target_amount: string; currency: string; period_start: string | null; period_end: string | null; status: string; actual_amount: string }[];
+  budgets?: { id: string; name: string; target_amount: string; currency: string; period_start: string | null; period_end: string | null; status: string; actual_amount: string; time_cost?: string | number | null }[];
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -276,6 +276,7 @@ export default function GuestView({ token }: GuestViewProps) {
                     // string values have no such method and would throw.
                     const actual = Number(b.actual_amount);
                     const target = Number(b.target_amount);
+                    const timeCost = Number(b.time_cost ?? 0);
                     const pct = target > 0 ? Math.round((actual / target) * 100) : 0;
                     return (
                       <Card key={b.id}>
@@ -287,6 +288,11 @@ export default function GuestView({ token }: GuestViewProps) {
                             </span>
                           </div>
                           <Progress value={Math.min(pct, 100)} className="h-1" />
+                          {timeCost > 0 && (
+                            <p className="text-[10px] text-muted-foreground">
+                              + {timeCost.toLocaleString()} {b.currency} in billable logged time (not counted above)
+                            </p>
+                          )}
                         </CardContent>
                       </Card>
                     );

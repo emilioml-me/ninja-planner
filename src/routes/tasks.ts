@@ -5,6 +5,7 @@ import { requireAdmin } from '../middleware/requireAdmin.js';
 import { sendSlackMessage } from '../lib/slack.js';
 import {
   getTasks,
+  countTasks,
   createTask,
   getTaskById,
   updateTaskWithPrevState,
@@ -12,16 +13,16 @@ import {
   softDeleteTask,
   logTaskActivity,
   reorderTaskInTransaction,
-  spawnRecurringTask,
+  assertLinkableToWorkspace,
   claimNinjaTaskSync,
   resolveNinjaTaskSync,
   releaseNinjaTaskSync,
 } from '../services/taskService.js';
+import { runTaskStatusEffects } from '../services/taskStatusEffects.js';
 import { getWorkload } from '../services/commentService.js';
 import { pool } from '../config/db.js';
 import { createNotification } from '../services/notificationService.js';
 import { fireWebhooks } from '../services/webhookService.js';
-import { checkAndNotifyGoalMilestones } from '../services/goalService.js';
 import {
   sendTaskAssignedEmail,
   sendDueDateReminderEmail,
@@ -80,71 +81,124 @@ const positionSchema = z.object({
   position: z.number().int().min(0),
 });
 
+const DEFAULT_CAPACITY_POINTS = 20;
+const WORKSPACE_URL = () => process.env.ALLOWED_ORIGIN ?? 'https://ninja-planner.com';
+
+// Recipient id of the dedup marker row written for each overdue alert run. Not a real Clerk id,
+// so it never shows up in anyone's notification list (every listing filters by recipient), but
+// it is written regardless of any admin's notification preferences. Previously the dedup relied
+// on the in-app notification row, which isn't inserted when the recipient muted overdue_alert,
+// so a muted admin triggered a fresh Slack alert on every call.
+const OVERDUE_ALERT_MARKER_RECIPIENT = '__system:overdue_alert__';
+
 // POST /api/tasks/alert-check  — send Slack alert for overdue tasks  [admin only]
-// Deduped: skips if an overdue_alert notification was sent for this workspace in last 20h
+// Deduped: skips if an overdue alert already ran for this workspace in the last 20h.
 //
-// SCHEDULER DEPENDENCY: this codebase has no in-process cron (no node-cron, no setInterval-based
-// job runner) — this route only runs when something calls it. It must be invoked periodically by
-// an external scheduler (e.g. a cron job, a serverless scheduled function, or an uptime-style
-// pinger) hitting this endpoint for every workspace, or overdue tasks will silently never alert.
+// SCHEDULER DEPENDENCY: this route only runs when something calls it (an external scheduler or
+// an admin). The due-date automation trigger has its own in-process scheduler
+// (services/automationService.ts startDueDateScheduler); this Slack digest does not.
 router.post('/alert-check', requireAdmin, async (req, res, next) => {
   try {
-    // Dedup check — skip if already alerted in the last 20 hours
-    const dedupCheck = await pool.query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM notifications
-       WHERE workspace_id = $1
-         AND type = 'overdue_alert'
-         AND created_at > now() - INTERVAL '20 hours'`,
-      [req.workspace.id],
-    );
-    if (parseInt(dedupCheck.rows[0].count, 10) > 0) {
-      res.json({ ok: true, skipped: true, reason: 'Already alerted in the last 20 hours' });
-      return;
+    const workspaceId = req.workspace.id;
+    const client = await pool.connect();
+    let tasks: { id: string; title: string; due_date: string; status: string }[] = [];
+    let totalOverdue = 0;
+    try {
+      await client.query('BEGIN');
+      // Serializes concurrent alert-checks for the same workspace (double click, several
+      // containers, overlapping scheduler runs) so only one of them can pass the dedup check.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('overdue_alert:' || $1::text))", [workspaceId]);
+
+      // Any overdue_alert row in the window (the marker below, or a legacy per-admin
+      // notification) counts as "already alerted".
+      const dedupCheck = await client.query(
+        `SELECT 1 FROM notifications
+         WHERE workspace_id = $1
+           AND type = 'overdue_alert'
+           AND created_at > now() - INTERVAL '20 hours'
+         LIMIT 1`,
+        [workspaceId],
+      );
+      if (dedupCheck.rows.length > 0) {
+        await client.query('COMMIT');
+        res.json({ ok: true, skipped: true, reason: 'Already alerted in the last 20 hours' });
+        return;
+      }
+
+      // LIMIT 50 caps the preview lines; the true count comes from a separate COUNT(*).
+      const overdueResult = await client.query<{ id: string; title: string; due_date: string; status: string }>(
+        `SELECT id, title, due_date, status
+         FROM tasks
+         WHERE workspace_id = $1
+           AND status <> 'done'
+           AND deleted_at IS NULL
+           AND due_date < CURRENT_DATE
+         ORDER BY due_date ASC
+         LIMIT 50`,
+        [workspaceId],
+      );
+      const countResult = await client.query<{ count: string }>(
+        `SELECT COUNT(*) AS count
+         FROM tasks
+         WHERE workspace_id = $1
+           AND status <> 'done'
+           AND deleted_at IS NULL
+           AND due_date < CURRENT_DATE`,
+        [workspaceId],
+      );
+      tasks = overdueResult.rows;
+      totalOverdue = parseInt(countResult.rows[0].count, 10);
+
+      if (totalOverdue > 0) {
+        await client.query(
+          `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title)
+           VALUES ($1, $2, 'overdue_alert', 'overdue alert dedup marker')`,
+          [workspaceId, OVERDUE_ALERT_MARKER_RECIPIENT],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
 
-    // Query overdue tasks
-    const overdueResult = await pool.query<{
-      id: string; title: string; due_date: string;
-      assignee_clerk_id: string | null; status: string;
-    }>(
-      `SELECT id, title, due_date, assignee_clerk_id, status
-       FROM tasks
-       WHERE workspace_id = $1
-         AND status <> 'done'
-         AND deleted_at IS NULL
-         AND due_date < CURRENT_DATE
-       ORDER BY due_date ASC
-       LIMIT 50`,
-      [req.workspace.id],
-    );
-
-    const tasks = overdueResult.rows;
-    if (tasks.length === 0) {
+    if (totalOverdue === 0) {
       res.json({ ok: true, overdue: 0, alerted: false });
       return;
     }
 
-    // Build Slack message
+    // Build Slack message (sendSlackMessage only posts for operator workspaces and escapes text)
     const lines = tasks.slice(0, 15).map((t) =>
-      `• *${t.title}* — due ${t.due_date} (${t.status.replace('_', ' ')})`,
+      `- *${t.title}* - due ${t.due_date} (${t.status.replace('_', ' ')})`,
     );
-    const more = tasks.length > 15 ? `\n_…and ${tasks.length - 15} more_` : '';
+    const more = totalOverdue > 15 ? `\n_...and ${totalOverdue - 15} more_` : '';
     const msg =
-      `:warning: *${tasks.length} overdue task${tasks.length === 1 ? '' : 's'}* in your workspace:\n` +
+      `:warning: *${totalOverdue} overdue task${totalOverdue === 1 ? '' : 's'}* in your workspace:\n` +
       lines.join('\n') + more;
 
-    sendSlackMessage(msg).catch((err: Error) => console.error('[alert-check] slack send failed:', err));
+    sendSlackMessage(msg, workspaceId).catch((err: Error) => console.error('[alert-check] slack send failed:', err));
 
-    // In-app notification for workspace admins (the requesting admin at minimum)
-    await createNotification({
-      workspaceId: req.workspace.id,
-      recipientClerkId: req.auth.userId,
-      type: 'overdue_alert',
-      title: `${tasks.length} overdue task${tasks.length === 1 ? '' : 's'} in this workspace`,
-      link: '/tasks?status=overdue',
-    });
+    // In-app notification for every workspace admin (each subject to their own preferences)
+    const admins = await pool.query<{ clerk_user_id: string }>(
+      `SELECT clerk_user_id FROM workspace_members
+       WHERE workspace_id = $1 AND role IN ('org:admin', 'org:owner')`,
+      [workspaceId],
+    );
+    const recipients = new Set(admins.rows.map((r) => r.clerk_user_id));
+    recipients.add(req.auth.userId);
+    for (const recipientClerkId of recipients) {
+      createNotification({
+        workspaceId,
+        recipientClerkId,
+        type: 'overdue_alert',
+        title: `${totalOverdue} overdue task${totalOverdue === 1 ? '' : 's'} in this workspace`,
+        link: '/tasks?status=overdue',
+      }).catch(() => {});
+    }
 
-    res.json({ ok: true, overdue: tasks.length, alerted: true });
+    res.json({ ok: true, overdue: totalOverdue, alerted: true });
   } catch (err) {
     next(err);
   }
@@ -163,14 +217,24 @@ router.get('/workload', async (req, res, next) => {
 // GET /api/tasks/capacity?sprint_id=...  — story points assigned per member in a sprint
 // (defaults to the active sprint) + configured capacity, preferring a per-sprint override
 // over the member's workspace-wide default.
+//
+// Response: one row per current workspace member (including members with no tasks, so their
+// capacity can still be configured):
+//   { user_clerk_id, assigned_points, task_count, capacity_points, default_capacity_points,
+//     is_override, sprint_id }
+// is_override=true means capacity_points comes from a per-sprint override for `sprint_id`, so an
+// edit of the displayed value should PUT with that sprint_id; otherwise edit the default.
+const capacityQuerySchema = z.object({
+  sprint_id: z.string().uuid().optional(),
+});
+
 router.get('/capacity', async (req, res, next) => {
   try {
-    const requestedSprintId = typeof req.query.sprint_id === 'string' ? req.query.sprint_id : undefined;
+    const parsedQuery = capacityQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) { res.status(400).json({ error: parsedQuery.error.flatten() }); return; }
+    const requestedSprintId = parsedQuery.data.sprint_id;
 
-    // Resolve the effective sprint ONCE — previously the points query resolved a missing
-    // sprint_id to the active sprint via COALESCE, but the capacity query filtered on the raw
-    // (possibly NULL) sprint_id directly, so a per-sprint override on the active sprint was
-    // silently ignored whenever the caller omitted sprint_id (the documented default path).
+    // Resolve the effective sprint ONCE so the points and capacity queries agree.
     let sprintId = requestedSprintId ?? null;
     if (!sprintId) {
       const activeSprint = await pool.query<{ id: string }>(
@@ -180,8 +244,12 @@ router.get('/capacity', async (req, res, next) => {
       sprintId = activeSprint.rows[0]?.id ?? null;
     }
 
+    const membersResult = await pool.query<{ clerk_user_id: string }>(
+      'SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 ORDER BY clerk_user_id',
+      [req.workspace.id],
+    );
+
     // Points assigned per member across the target sprint's tasks
-    // M2: JOIN workspace_members to exclude tasks assigned to departed members
     const pointsResult = await pool.query<{ user_clerk_id: string; assigned_points: number; task_count: number }>(
       `SELECT
          t.assignee_clerk_id AS user_clerk_id,
@@ -189,7 +257,6 @@ router.get('/capacity', async (req, res, next) => {
          COUNT(t.id)::int                      AS task_count
        FROM tasks t
        JOIN sprints s ON s.id = t.sprint_id AND s.workspace_id = t.workspace_id AND s.id = $2
-       JOIN workspace_members wm ON wm.clerk_user_id = t.assignee_clerk_id AND wm.workspace_id = t.workspace_id
        WHERE t.workspace_id = $1
          AND t.assignee_clerk_id IS NOT NULL
          AND t.deleted_at IS NULL
@@ -206,20 +273,29 @@ router.get('/capacity', async (req, res, next) => {
       [req.workspace.id, sprintId],
     );
 
-    // Defaults first, then per-sprint overrides — order guarantees an override always wins
-    // regardless of row order returned by the query.
-    const capacityMap: Record<string, number> = {};
+    const defaultMap: Record<string, number> = {};
+    const overrideMap: Record<string, number> = {};
     for (const row of capacityResult.rows) {
-      if (row.sprint_id === null) capacityMap[row.user_clerk_id] = row.capacity_points;
+      if (row.sprint_id === null) defaultMap[row.user_clerk_id] = row.capacity_points;
+      else overrideMap[row.user_clerk_id] = row.capacity_points;
     }
-    for (const row of capacityResult.rows) {
-      if (row.sprint_id !== null) capacityMap[row.user_clerk_id] = row.capacity_points;
-    }
+    const pointsMap = new Map(pointsResult.rows.map((r) => [r.user_clerk_id, r]));
 
-    const rows = pointsResult.rows.map((r) => ({
-      ...r,
-      capacity_points: capacityMap[r.user_clerk_id] ?? 20,
-    }));
+    // Departed members are excluded (only current workspace_members rows are listed).
+    const rows = membersResult.rows.map(({ clerk_user_id }) => {
+      const points = pointsMap.get(clerk_user_id);
+      const defaultCapacity = defaultMap[clerk_user_id] ?? DEFAULT_CAPACITY_POINTS;
+      const override = overrideMap[clerk_user_id];
+      return {
+        user_clerk_id: clerk_user_id,
+        assigned_points: points?.assigned_points ?? 0,
+        task_count: points?.task_count ?? 0,
+        capacity_points: override ?? defaultCapacity,
+        default_capacity_points: defaultCapacity,
+        is_override: override !== undefined,
+        sprint_id: sprintId,
+      };
+    });
 
     res.json(rows);
   } catch (err) { next(err); }
@@ -285,7 +361,15 @@ router.get('/', async (req, res, next) => {
       return;
     }
     const { limit, offset, ...filters } = parsed.data;
-    const tasks = await getTasks(req.workspace.id, filters, limit, offset);
+    const effectiveLimit = Math.min(limit ?? 500, 1000);
+    const effectiveOffset = offset ?? 0;
+    const tasks = await getTasks(req.workspace.id, filters, effectiveLimit, effectiveOffset);
+    // X-Total-Count lets the client detect truncation (default page size is 500). The extra
+    // COUNT(*) only runs when the page is full; otherwise the total is known from this page.
+    const total = tasks.length < effectiveLimit && (tasks.length > 0 || effectiveOffset === 0)
+      ? effectiveOffset + tasks.length
+      : await countTasks(req.workspace.id, filters);
+    res.setHeader('X-Total-Count', String(total));
     res.json(tasks);
   } catch (err) {
     next(err);
@@ -333,7 +417,7 @@ router.post('/', async (req, res, next) => {
           recipientName: user.name,
           taskTitle: task.title,
           assigner: req.auth.userId,
-          workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
+          workspaceUrl: WORKSPACE_URL(),
         });
       }).catch(() => {});
     }
@@ -401,24 +485,305 @@ router.post('/reorder', async (req, res, next) => {
     }
     const { taskId, newStatus, newPosition, resequence } = parsed.data;
 
-    const task = await reorderTaskInTransaction(
+    const result = await reorderTaskInTransaction(
       taskId,
       req.workspace.id,
       newStatus,
       newPosition,
       resequence,
     );
-    if (!task) {
+    if (!result) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
 
-    await logTaskActivity(taskId, req.auth.userId, 'moved', { status: newStatus, position: newPosition });
+    // A drag across columns is a status change like any other: logged as 'updated' (which
+    // burndown/changelog count) with the full set of transition side effects. A same-column
+    // drag is only a position change.
+    const statusChanged = await runTaskStatusEffects({
+      workspaceId: req.workspace.id,
+      actorUserId: req.auth.userId,
+      task: result.task,
+      prevStatus: result.prevStatus,
+      newStatus: result.task.status,
+      source: 'reorder',
+      activityPayload: { position: newPosition },
+    });
+    if (!statusChanged) {
+      await logTaskActivity(taskId, req.auth.userId, 'moved', { position: newPosition });
+    }
     res.json({ ok: true });
   } catch (err) {
     next(err);
   }
 });
+
+type TaskUpdateResult = NonNullable<Awaited<ReturnType<typeof updateTaskWithPrevState>>>;
+type TaskUpdateData = z.infer<typeof updateSchema>;
+
+/**
+ * Every side effect of a task update, shared by PATCH /api/tasks/:id and POST /api/tasks/bulk.
+ * Status transitions go through runTaskStatusEffects (activity, recurring spawn, webhooks,
+ * automations, goal milestones, watchers); non-status updates log one 'updated' activity row,
+ * fire task.updated and notify watchers. Assignee/due-date notifications only fire on an actual
+ * change, never on a value merely echoed in a full-object PATCH.
+ */
+async function runTaskUpdateSideEffects(opts: {
+  workspaceId: string;
+  actorUserId: string;
+  data: TaskUpdateData;
+  result: TaskUpdateResult;
+  source: 'patch' | 'bulk';
+  /** Bulk updates skip per-task emails (in-app notifications still fire) to avoid mail floods. */
+  sendEmails: boolean;
+}): Promise<void> {
+  const { workspaceId, actorUserId, data, result, source, sendEmails } = opts;
+  const { task, prevAssigneeClerkId, prevStatus, prevDueDate } = result;
+
+  const assigneeActuallyChanged =
+    data.assignee_clerk_id !== undefined && data.assignee_clerk_id !== prevAssigneeClerkId;
+  const statusActuallyChanged =
+    data.status !== undefined && data.status !== prevStatus;
+  const dueDateActuallyChanged =
+    data.due_date !== undefined && data.due_date !== prevDueDate;
+
+  if (statusActuallyChanged) {
+    await runTaskStatusEffects({
+      workspaceId,
+      actorUserId,
+      task,
+      prevStatus,
+      newStatus: task.status,
+      source,
+      activityPayload: data as Record<string, unknown>,
+    });
+  } else {
+    await logTaskActivity(task.id, actorUserId, 'updated', data as Record<string, unknown>);
+    fireWebhooks(workspaceId, 'task.updated', { task });
+
+    // Notify watchers (fire-and-forget, skip the user who made the update)
+    pool.query<{ user_clerk_id: string }>(
+      `SELECT user_clerk_id FROM task_watchers
+       WHERE task_id = $1 AND workspace_id = $2 AND user_clerk_id <> $3`,
+      [task.id, workspaceId, actorUserId],
+    ).then((watcherResult) => {
+      for (const { user_clerk_id } of watcherResult.rows) {
+        createNotification({
+          workspaceId,
+          recipientClerkId: user_clerk_id,
+          type: 'task_updated',
+          title: `Task updated: "${task.title}"`,
+          body: `A task you're watching was updated.`,
+          link: '/tasks',
+        }).catch(() => {});
+      }
+    }).catch(() => {});
+  }
+
+  if (assigneeActuallyChanged && data.assignee_clerk_id && data.assignee_clerk_id !== actorUserId) {
+    const assigneeId = data.assignee_clerk_id;
+    createNotification({
+      workspaceId,
+      recipientClerkId: assigneeId,
+      type: 'task_assigned',
+      title: `You were assigned "${task.title}"`,
+      link: '/tasks',
+    }).catch(() => {});
+
+    if (sendEmails) {
+      resolveClerkEmail(assigneeId).then((user) => {
+        if (!user) return;
+        return sendTaskAssignedEmail({
+          to: user.email,
+          recipientName: user.name,
+          taskTitle: task.title,
+          assigner: actorUserId,
+          workspaceUrl: WORKSPACE_URL(),
+        });
+      }).catch(() => {});
+    }
+  }
+
+  if (dueDateActuallyChanged && task.assignee_clerk_id && task.assignee_clerk_id !== actorUserId) {
+    const assigneeId = task.assignee_clerk_id;
+    createNotification({
+      workspaceId,
+      recipientClerkId: assigneeId,
+      type: 'due_date_set',
+      title: task.due_date
+        ? `"${task.title}" is due on ${task.due_date}`
+        : `Due date removed from "${task.title}"`,
+      link: '/tasks',
+    }).catch(() => {});
+
+    // Email: due date reminder (only when a date is actually set, not cleared)
+    if (sendEmails && task.due_date) {
+      const dueDate = task.due_date;
+      resolveClerkEmail(assigneeId).then((user) => {
+        if (!user) return;
+        return sendDueDateReminderEmail({
+          to: user.email,
+          recipientName: user.name,
+          taskTitle: task.title,
+          dueDate,
+          workspaceUrl: WORKSPACE_URL(),
+        });
+      }).catch(() => {});
+    }
+  }
+
+  if (assigneeActuallyChanged && data.assignee_clerk_id) {
+    dispatchAutomations({
+      type: 'task.assigned',
+      workspaceId,
+      taskId: task.id,
+      assigneeId: data.assignee_clerk_id,
+      title: task.title,
+    }).catch(() => {});
+  }
+
+  // Push to ninja-task when assignee is set for the first time on an existing task
+  if (
+    assigneeActuallyChanged &&
+    data.assignee_clerk_id &&
+    !prevAssigneeClerkId &&
+    process.env.NINJA_TASK_URL &&
+    process.env.NINJA_TASK_API_KEY
+  ) {
+    const assigneeId = data.assignee_clerk_id;
+    // Atomically claim the sync slot so two concurrent PATCHes assigning this task for the
+    // first time can't both see "not yet synced" and both push a duplicate ninja-task.
+    claimNinjaTaskSync(task.id, workspaceId).then((claimed) => {
+      if (!claimed) return;
+      pushTaskToNinjaTask({
+        title: task.title,
+        description: task.description,
+        priority: task.priority,
+        dueDate: task.due_date,
+        tags: task.tags ?? [],
+        clerkId: assigneeId,
+      }).then((pushResult) => {
+        if (pushResult?.id) {
+          resolveNinjaTaskSync(task.id, pushResult.id)
+            .catch((err: Error) => console.error('[ninja-task] failed to store external_id on patch:', err));
+        } else {
+          releaseNinjaTaskSync(task.id)
+            .catch((err: Error) => console.error('[ninja-task] failed to release sync slot on patch:', err));
+        }
+      }).catch((err: Error) => {
+        console.error('[ninja-task] task push on patch failed:', err);
+        releaseNinjaTaskSync(task.id)
+          .catch((releaseErr: Error) => console.error('[ninja-task] failed to release sync slot on patch:', releaseErr));
+      });
+    }).catch((err: Error) => console.error('[ninja-task] failed to claim sync slot on patch:', err));
+  }
+}
+
+// POST /api/tasks/bulk  — bulk update or delete up to 200 tasks in one request
+// (replaces N parallel PATCH/DELETE calls from the Tasks page, which tripped the rate limiter).
+// Body:
+//   { action: 'update', ids: uuid[], changes: { status?, priority?, assignee_clerk_id?, sprint_id? } }
+//   { action: 'delete', ids: uuid[] }                                  [admin only, like DELETE /:id]
+// Response: { ok: true, action, updated | deleted: number, not_found: string[] }
+// Same auth/validation as the single-task routes; each updated task gets the full PATCH side
+// effects (status transitions via runTaskStatusEffects), except per-task emails.
+const bulkIdsSchema = z.array(z.string().uuid()).min(1).max(200);
+const bulkSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('update'),
+    ids: bulkIdsSchema,
+    changes: z.object({
+      status:            z.enum(TASK_STATUSES).optional(),
+      priority:          z.enum(TASK_PRIORITIES).optional(),
+      assignee_clerk_id: z.string().nullable().optional(),
+      sprint_id:         z.string().uuid().nullable().optional(),
+    }).strict(),
+  }),
+  z.object({
+    action: z.literal('delete'),
+    ids: bulkIdsSchema,
+  }),
+]);
+
+router.post(
+  '/bulk',
+  (req, res, next) => {
+    if (req.body && typeof req.body === 'object' && req.body.action === 'delete') {
+      requireAdmin(req, res, next);
+      return;
+    }
+    next();
+  },
+  async (req, res, next) => {
+    try {
+      const parsed = bulkSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.flatten() });
+        return;
+      }
+      const ids = [...new Set(parsed.data.ids)];
+
+      if (parsed.data.action === 'delete') {
+        const { rows } = await pool.query<{ id: string }>(
+          `UPDATE tasks SET deleted_at = now()
+           WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND deleted_at IS NULL
+           RETURNING id`,
+          [ids, req.workspace.id],
+        );
+        const deletedIds = new Set(rows.map((r) => r.id));
+        for (const id of deletedIds) {
+          fireWebhooks(req.workspace.id, 'task.deleted', { taskId: id });
+        }
+        res.json({
+          ok: true,
+          action: 'delete',
+          deleted: deletedIds.size,
+          not_found: ids.filter((id) => !deletedIds.has(id)),
+        });
+        return;
+      }
+
+      const changes = parsed.data.changes;
+      if (Object.keys(changes).length === 0) {
+        res.status(400).json({ error: 'No fields to update' });
+        return;
+      }
+      if (changes.assignee_clerk_id) {
+        const memberCheck = await pool.query(
+          'SELECT id FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+          [req.workspace.id, changes.assignee_clerk_id],
+        );
+        if (memberCheck.rows.length === 0) {
+          res.status(400).json({ error: 'Assignee is not a member of this workspace' });
+          return;
+        }
+      }
+      // Validate once up front instead of failing half-way through the loop.
+      await assertLinkableToWorkspace('sprints', changes.sprint_id, req.workspace.id);
+
+      let updated = 0;
+      const notFound: string[] = [];
+      // Sequential on purpose: each update takes a pooled connection for its row lock, and a
+      // 200-wide Promise.all would starve the pool for every other tenant.
+      for (const id of ids) {
+        const result = await updateTaskWithPrevState(id, req.workspace.id, changes);
+        if (!result) { notFound.push(id); continue; }
+        updated++;
+        await runTaskUpdateSideEffects({
+          workspaceId: req.workspace.id,
+          actorUserId: req.auth.userId,
+          data: changes,
+          result,
+          source: 'bulk',
+          sendEmails: false,
+        });
+      }
+      res.json({ ok: true, action: 'update', updated, not_found: notFound });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 // GET /api/tasks/:id
 router.get('/:id', async (req, res, next) => {
@@ -465,162 +830,16 @@ router.patch('/:id', async (req, res, next) => {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
-    const { task, prevAssigneeClerkId, prevStatus } = updateResult;
-    await logTaskActivity(task.id, req.auth.userId, 'updated', parsed.data as Record<string, unknown>);
+    await runTaskUpdateSideEffects({
+      workspaceId: req.workspace.id,
+      actorUserId: req.auth.userId,
+      data: parsed.data,
+      result: updateResult,
+      source: 'patch',
+      sendEmails: true,
+    });
 
-    // H3: Only notify when assignee actually changed, not just echoed in a full-object PATCH
-    const assigneeActuallyChanged =
-      parsed.data.assignee_clerk_id !== undefined &&
-      parsed.data.assignee_clerk_id !== prevAssigneeClerkId;
-    if (
-      assigneeActuallyChanged &&
-      parsed.data.assignee_clerk_id &&
-      parsed.data.assignee_clerk_id !== req.auth.userId
-    ) {
-      createNotification({
-        workspaceId: req.workspace.id,
-        recipientClerkId: parsed.data.assignee_clerk_id,
-        type: 'task_assigned',
-        title: `You were assigned "${task.title}"`,
-        link: '/tasks',
-      }).catch(() => {});
-
-      // Email: task assigned
-      resolveClerkEmail(parsed.data.assignee_clerk_id).then((user) => {
-        if (!user) return;
-        return sendTaskAssignedEmail({
-          to: user.email,
-          recipientName: user.name,
-          taskTitle: task.title,
-          assigner: req.auth.userId,
-          workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-        });
-      }).catch(() => {});
-    }
-
-    // Spawn recurring copy when task is completed
-    if (parsed.data.status === 'done' && task.recurrence_rule) {
-      spawnRecurringTask(task).catch(() => {});
-    }
-
-    // Due-date reminder — notify assignee when due_date is explicitly set/changed
-    if (parsed.data.due_date !== undefined && task.assignee_clerk_id && task.assignee_clerk_id !== req.auth.userId) {
-      createNotification({
-        workspaceId: req.workspace.id,
-        recipientClerkId: task.assignee_clerk_id,
-        type: 'due_date_set',
-        title: task.due_date
-          ? `"${task.title}" is due on ${task.due_date}`
-          : `Due date removed from "${task.title}"`,
-        link: '/tasks',
-      }).catch(() => {});
-
-      // Email: due date reminder (only when a date is actually set, not cleared)
-      if (task.due_date) {
-        resolveClerkEmail(task.assignee_clerk_id).then((user) => {
-          if (!user) return;
-          return sendDueDateReminderEmail({
-            to: user.email,
-            recipientName: user.name,
-            taskTitle: task.title,
-            dueDate: task.due_date!,
-            workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-          });
-        }).catch(() => {});
-      }
-    }
-
-    // Goal milestone notifications — when task marked done, check 50%/100% crossings
-    if (parsed.data.status === 'done') {
-      checkAndNotifyGoalMilestones(
-        task.id,
-        req.workspace.id,
-        process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-      );
-    }
-
-    // Notify watchers (fire-and-forget, skip the user who made the update)
-    pool.query<{ user_clerk_id: string }>(
-      `SELECT user_clerk_id FROM task_watchers
-       WHERE task_id = $1 AND workspace_id = $2 AND user_clerk_id <> $3`,
-      [task.id, req.workspace.id, req.auth.userId],
-    ).then((watcherResult) => {
-      for (const { user_clerk_id } of watcherResult.rows) {
-        createNotification({
-          workspaceId: req.workspace.id,
-          recipientClerkId: user_clerk_id,
-          type: 'task_updated',
-          title: `Task updated: "${task.title}"`,
-          body: `A task you're watching was updated.`,
-          link: '/tasks',
-        }).catch(() => {});
-      }
-    }).catch(() => {});
-
-    // Fire webhooks
-    if (parsed.data.status === 'done') {
-      fireWebhooks(req.workspace.id, 'task.completed', { task });
-    } else {
-      fireWebhooks(req.workspace.id, 'task.updated', { task });
-    }
-
-    // Automation dispatch
-    if (parsed.data.status !== undefined && prevStatus && parsed.data.status !== prevStatus) {
-      dispatchAutomations({
-        type: 'task.status_changed',
-        workspaceId: req.workspace.id,
-        taskId: task.id,
-        oldStatus: prevStatus,
-        newStatus: task.status,
-        assigneeId: task.assignee_clerk_id,
-      }).catch(() => {});
-    }
-    if (assigneeActuallyChanged && parsed.data.assignee_clerk_id) {
-      dispatchAutomations({
-        type: 'task.assigned',
-        workspaceId: req.workspace.id,
-        taskId: task.id,
-        assigneeId: parsed.data.assignee_clerk_id,
-        title: task.title,
-      }).catch(() => {});
-    }
-
-    // Push to ninja-task when assignee is set for the first time on an existing task
-    if (
-      assigneeActuallyChanged &&
-      parsed.data.assignee_clerk_id &&
-      !prevAssigneeClerkId &&
-      process.env.NINJA_TASK_URL &&
-      process.env.NINJA_TASK_API_KEY
-    ) {
-      // Atomically claim the sync slot so two concurrent PATCHes assigning this task for the
-      // first time can't both see "not yet synced" and both push a duplicate ninja-task.
-      claimNinjaTaskSync(task.id, req.workspace.id).then((claimed) => {
-        if (!claimed) return;
-        pushTaskToNinjaTask({
-          title: task.title,
-          description: task.description,
-          priority: task.priority,
-          dueDate: task.due_date,
-          tags: task.tags ?? [],
-          clerkId: parsed.data.assignee_clerk_id!,
-        }).then((result) => {
-          if (result?.id) {
-            resolveNinjaTaskSync(task.id, result.id)
-              .catch((err: Error) => console.error('[ninja-task] failed to store external_id on patch:', err));
-          } else {
-            releaseNinjaTaskSync(task.id)
-              .catch((err: Error) => console.error('[ninja-task] failed to release sync slot on patch:', err));
-          }
-        }).catch((err: Error) => {
-          console.error('[ninja-task] task push on patch failed:', err);
-          releaseNinjaTaskSync(task.id)
-            .catch((releaseErr: Error) => console.error('[ninja-task] failed to release sync slot on patch:', releaseErr));
-        });
-      }).catch((err: Error) => console.error('[ninja-task] failed to claim sync slot on patch:', err));
-    }
-
-    res.json(task);
+    res.json(updateResult.task);
   } catch (err) {
     next(err);
   }

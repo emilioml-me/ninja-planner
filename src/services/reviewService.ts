@@ -65,12 +65,12 @@ export async function deleteReview(id: string, workspaceId: string): Promise<boo
   return (result.rowCount ?? 0) > 0;
 }
 
-const REVIEW_UPDATABLE_COLUMNS = new Set(['wins', 'blockers', 'focus_next', 'health_score']);
+const REVIEW_UPDATABLE_COLUMNS = new Set(['week_start', 'wins', 'blockers', 'focus_next', 'health_score']);
 
 export async function updateReview(
   id: string,
   workspaceId: string,
-  data: Partial<Pick<WeeklyReview, 'wins' | 'blockers' | 'focus_next' | 'health_score'>>,
+  data: Partial<Pick<WeeklyReview, 'week_start' | 'wins' | 'blockers' | 'focus_next' | 'health_score'>>,
 ): Promise<WeeklyReview | null> {
   const fields: string[] = [];
   const values: unknown[] = [];

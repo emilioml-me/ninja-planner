@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -27,6 +27,7 @@ export default function ApiKeys() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
+  const isAdminLoaded = useIsAdminLoaded();
   const { toast } = useToast();
 
   const [creating,    setCreating]    = useState(false);
@@ -38,6 +39,9 @@ export default function ApiKeys() {
   const { data: keys = [], isLoading } = useQuery<ApiKey[]>({
     queryKey: ['api-keys'],
     queryFn: () => apiRequest('GET', '/api/api-keys'),
+    // Previously fired unconditionally, guaranteeing a 403 (this route is requireAdmin-gated
+    // server-side) plus react-query's default retry for any non-admin who reaches this page.
+    enabled: isAdmin,
   });
 
   const activeKeys = keys.filter((k) => !k.revoked_at);
@@ -70,14 +74,27 @@ export default function ApiKeys() {
     );
   }
 
-  function copyKey() {
-    if (revealedKey) {
-      navigator.clipboard.writeText(revealedKey);
+  async function copyKey() {
+    if (!revealedKey) return;
+    try {
+      await navigator.clipboard.writeText(revealedKey);
       toast({ title: 'Copied to clipboard' });
+    } catch {
+      // Clipboard API unavailable (insecure context / permission denied) — show it for manual copy.
+      setShowKey(true);
+      toast({ title: 'Could not copy', description: 'Select the key and copy it manually.', variant: 'destructive' });
     }
   }
 
-  if (!isAdmin) {
+  function confirmRevoke(k: ApiKey) {
+    if (!window.confirm(`Revoke the API key "${k.name}"? Integrations using it will stop working immediately. This cannot be undone.`)) return;
+    revokeMutation.mutate(k.id);
+  }
+
+  // Wait for Clerk to resolve before rendering the admin-required block — otherwise an actual
+  // admin sees this flash briefly on every cold load/refresh, since orgRole (and thus isAdmin)
+  // is undefined/false until Clerk finishes loading.
+  if (isAdminLoaded && !isAdmin) {
     return (
       <div className="p-6">
         <h1 className="text-2xl font-bold mb-2">API Keys</h1>
@@ -98,9 +115,14 @@ export default function ApiKeys() {
         </Button>
       </div>
 
-      {/* Revealed key dialog — shown once after creation */}
-      <Dialog open={!!revealedKey} onOpenChange={() => { setRevealedKey(null); setShowKey(false); }}>
-        <DialogContent>
+      {/* Revealed key dialog — shown once after creation. Not dismissable by outside click /
+          Escape / close button: the key can never be shown again, so require the explicit "Done". */}
+      <Dialog open={!!revealedKey}>
+        <DialogContent
+          hideCloseButton
+          onInteractOutside={(e) => e.preventDefault()}
+          onEscapeKeyDown={(e) => e.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>API Key Created</DialogTitle>
           </DialogHeader>
@@ -109,13 +131,13 @@ export default function ApiKeys() {
               Copy this key now. It will not be shown again.
             </p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 bg-muted px-3 py-2 rounded text-sm font-mono overflow-hidden">
+              <code className="flex-1 bg-muted px-3 py-2 rounded text-sm font-mono overflow-hidden select-all break-all">
                 {showKey ? revealedKey : '••••••••••••••••••••••••'}
               </code>
               <Button size="icon" variant="ghost" onClick={() => setShowKey(!showKey)}>
                 {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </Button>
-              <Button size="icon" variant="ghost" onClick={copyKey}>
+              <Button size="icon" variant="ghost" onClick={() => { void copyKey(); }} aria-label="Copy key">
                 <Copy className="h-4 w-4" />
               </Button>
             </div>
@@ -194,7 +216,7 @@ export default function ApiKeys() {
                     </div>
                   </div>
                   <Button size="sm" variant="destructive"
-                    onClick={() => revokeMutation.mutate(k.id)}
+                    onClick={() => confirmRevoke(k)}
                     disabled={revokeMutation.isPending}>
                     <Trash2 className="h-3.5 w-3.5 mr-1" /> Revoke
                   </Button>
@@ -206,7 +228,7 @@ export default function ApiKeys() {
       )}
 
       <div className="text-xs text-muted-foreground border-t pt-4">
-        Include your API key as <code>Authorization: Bearer &lt;key&gt;</code> in requests to <code>/api/*</code> routes.
+        Include your API key as <code>Authorization: Bearer &lt;key&gt;</code> in requests to <code>/api/external/*</code> routes.
       </div>
     </div>
   );

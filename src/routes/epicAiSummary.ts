@@ -6,17 +6,26 @@ import { pool } from '../config/db.js';
 const router = Router({ mergeParams: true });
 router.use(requireWorkspace);
 
-const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://10.10.2.20:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'qwen2.5:14b';
+// OLLAMA_URL empty/unset => AI summaries are disabled (503). No hard-coded fallback host:
+// a baked-in private IP silently sent workspace data to whatever answered at that address.
+// Read per request (not at import) so it reflects env loaded after module evaluation.
+function getOllamaConfig(): { url: string; model: string } | null {
+  const url = process.env.OLLAMA_URL?.trim();
+  if (!url) return null;
+  return { url: url.replace(/\/+$/, ''), model: process.env.OLLAMA_MODEL?.trim() || 'qwen2.5:14b' };
+}
 
 // Mirrors aiSummary.ts's M1 sanitization — strip newlines/quotes that could inject prompt lines.
 function sanitizeForPrompt(s: string, maxLen = 200): string {
-  return s.replace(/[\r\n\t]+/g, ' ').replace(/["""''`]/g, "'").slice(0, maxLen);
+  return s.replace(/[\r\n\t]+/g, ' ').replace(/["'`\u201C\u201D\u2018\u2019]/g, "'").slice(0, maxLen);
 }
 
 const aiLimiter = rateLimit({
   windowMs: 60_000,
   max: 5,
+  // Per user, not per IP: users behind one office NAT shouldn't share a 5/min budget, and one
+  // user can't dodge the limit by switching networks. Always authenticated on this router.
+  keyGenerator: (req) => `ai-summary:${req.auth?.userId ?? req.ip}`,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many AI summary requests, please try again later' },
@@ -25,6 +34,11 @@ const aiLimiter = rateLimit({
 // POST /api/epics/:epicId/ai-summary
 router.post('/', aiLimiter, async (req, res, next) => {
   try {
+    const ollama = getOllamaConfig();
+    if (!ollama) {
+      res.status(503).json({ error: 'AI summaries are not enabled on this server' });
+      return;
+    }
     const { epicId } = req.params as Record<string, string>;
     const epicResult = await pool.query<{
       title: string;
@@ -91,10 +105,10 @@ router.post('/', aiLimiter, async (req, res, next) => {
 
 ${JSON.stringify(epicData, null, 2)}`;
 
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/generate`, {
+    const ollamaRes = await fetch(`${ollama.url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: OLLAMA_MODEL, prompt, stream: false }),
+      body: JSON.stringify({ model: ollama.model, prompt, stream: false }),
       signal: AbortSignal.timeout(30_000),
     });
 

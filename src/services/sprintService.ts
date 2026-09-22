@@ -48,7 +48,7 @@ export async function getSprintById(id: string, workspaceId: string): Promise<Sp
 
 export async function createSprint(
   workspaceId: string,
-  data: { name: string; goal?: string; status?: string; start_date?: string; end_date?: string },
+  data: { name: string; goal?: string | null; status?: string; start_date?: string | null; end_date?: string | null },
   createdBy: string,
 ): Promise<Sprint> {
   const result = await pool.query<Sprint>(
@@ -69,11 +69,18 @@ export async function createSprint(
 
 const SPRINT_UPDATABLE = new Set(['name', 'goal', 'status', 'start_date', 'end_date']);
 
+/**
+ * Updates a sprint and also returns the status it had immediately before this update
+ * (`prev_status`), read under a row lock in the same statement. Callers use it to fire
+ * transition side effects (quest creation, sprint.completed automations/webhooks) only when the
+ * status actually changes — not on every save whose payload happens to repeat the status.
+ * `null` values clear nullable columns; `undefined` leaves them untouched.
+ */
 export async function updateSprint(
   id: string,
   workspaceId: string,
   data: Partial<Pick<Sprint, 'name' | 'goal' | 'status' | 'start_date' | 'end_date'>>,
-): Promise<Sprint | null> {
+): Promise<(Sprint & { prev_status: string }) | null> {
   const fields: string[] = [];
   const values: unknown[] = [];
   let i = 1;
@@ -85,8 +92,14 @@ export async function updateSprint(
   }
   if (fields.length === 0) return null;
   values.push(id, workspaceId);
-  const result = await pool.query<Sprint>(
-    `UPDATE sprints SET ${fields.join(', ')} WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
+  const result = await pool.query<Sprint & { prev_status: string }>(
+    `WITH prev AS (
+       SELECT id, status FROM sprints WHERE id = $${i++} AND workspace_id = $${i} FOR UPDATE
+     )
+     UPDATE sprints s SET ${fields.join(', ')}
+     FROM prev
+     WHERE s.id = prev.id
+     RETURNING s.*, prev.status AS prev_status`,
     values,
   );
   return result.rows[0] ?? null;

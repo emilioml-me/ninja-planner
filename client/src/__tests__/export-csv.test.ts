@@ -4,15 +4,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mockClick       = vi.fn();
 const mockCreateURL   = vi.fn().mockReturnValue('blob:mock-url');
 const mockRevokeURL   = vi.fn();
-const mockCreateElement = vi.fn().mockReturnValue({
-  href: '',
-  download: '',
-  click: mockClick,
-});
+const mockRemove      = vi.fn();
+const mockAppendChild = vi.fn();
+const makeAnchor = () => ({ href: '', download: '', click: mockClick, remove: mockRemove });
+const mockCreateElement = vi.fn().mockImplementation(makeAnchor);
+
+// The CSV text is the Blob part after the UTF-8 BOM part.
+const csvOf = (blob: any): string => (blob.parts as string[]).join('').replace(/^\uFEFF/, '');
 
 beforeEach(() => {
+  vi.useFakeTimers();
   vi.stubGlobal('URL', { createObjectURL: mockCreateURL, revokeObjectURL: mockRevokeURL });
-  vi.stubGlobal('document', { createElement: mockCreateElement });
+  vi.stubGlobal('document', { createElement: mockCreateElement, body: { appendChild: mockAppendChild } });
   vi.stubGlobal('Blob', class {
     constructor(public parts: BlobPart[], public opts?: BlobPropertyBag) {}
   });
@@ -31,42 +34,37 @@ describe('downloadCsv', () => {
 
   it('generates correct CSV headers', () => {
     downloadCsv('test.csv', [{ name: 'Alice', score: 42 }]);
-    const blob = mockCreateURL.mock.calls[0][0] as any;
-    const csv = blob.parts[0] as string;
+    const csv = csvOf(mockCreateURL.mock.calls[0][0]);
     expect(csv.split('\n')[0]).toBe('name,score');
   });
 
   it('generates correct CSV data row', () => {
     downloadCsv('test.csv', [{ name: 'Alice', score: 42 }]);
-    const blob = mockCreateURL.mock.calls[0][0] as any;
-    const csv = blob.parts[0] as string;
+    const csv = csvOf(mockCreateURL.mock.calls[0][0]);
     expect(csv.split('\n')[1]).toBe('Alice,42');
   });
 
   it('wraps values containing commas in quotes', () => {
     downloadCsv('test.csv', [{ name: 'Smith, John', score: 10 }]);
-    const blob = mockCreateURL.mock.calls[0][0] as any;
-    const csv = blob.parts[0] as string;
+    const csv = csvOf(mockCreateURL.mock.calls[0][0]);
     expect(csv).toContain('"Smith, John"');
   });
 
   it('escapes double-quotes inside values', () => {
     downloadCsv('test.csv', [{ note: 'He said "hello"' }]);
-    const blob = mockCreateURL.mock.calls[0][0] as any;
-    const csv = blob.parts[0] as string;
+    const csv = csvOf(mockCreateURL.mock.calls[0][0]);
     expect(csv).toContain('"He said ""hello"""');
   });
 
   it('handles null and undefined values as empty string', () => {
     downloadCsv('test.csv', [{ a: null, b: undefined, c: 'ok' }]);
-    const blob = mockCreateURL.mock.calls[0][0] as any;
-    const csv = blob.parts[0] as string;
+    const csv = csvOf(mockCreateURL.mock.calls[0][0]);
     const row = csv.split('\n')[1];
     expect(row).toBe(',,ok');
   });
 
   it('sets the correct filename on the anchor', () => {
-    const anchor = { href: '', download: '', click: mockClick };
+    const anchor = makeAnchor();
     mockCreateElement.mockReturnValueOnce(anchor);
     downloadCsv('my-export.csv', [{ x: 1 }]);
     expect(anchor.download).toBe('my-export.csv');
@@ -77,8 +75,28 @@ describe('downloadCsv', () => {
     expect(mockClick).toHaveBeenCalledOnce();
   });
 
-  it('revokes the object URL after clicking', () => {
+  it('revokes the object URL after clicking (on the next tick)', () => {
     downloadCsv('test.csv', [{ x: 1 }]);
+    expect(mockRevokeURL).not.toHaveBeenCalled();
+    vi.runAllTimers();
     expect(mockRevokeURL).toHaveBeenCalledWith('blob:mock-url');
+    expect(mockRemove).toHaveBeenCalled();
+  });
+
+  it('attaches the anchor to the document before clicking', () => {
+    downloadCsv('test.csv', [{ x: 1 }]);
+    expect(mockAppendChild).toHaveBeenCalledOnce();
+  });
+
+  it('prepends a UTF-8 BOM', () => {
+    downloadCsv('test.csv', [{ x: 1 }]);
+    const blob = mockCreateURL.mock.calls[0][0] as any;
+    expect((blob.parts as string[]).join('').startsWith('\uFEFF')).toBe(true);
+  });
+
+  it('guards formula-like strings but not negative numbers', () => {
+    downloadCsv('test.csv', [{ a: '=SUM(A1)', b: -5, c: '-12.5', d: '-foo' }]);
+    const row = csvOf(mockCreateURL.mock.calls[0][0]).split('\n')[1];
+    expect(row).toBe("'=SUM(A1),-5,-12.5,'-foo");
   });
 });

@@ -41,16 +41,19 @@ export async function deleteComment(
   commentId: string,
   authorId: string,
   workspaceId: string,
+  taskId: string,
 ): Promise<boolean> {
-  // Author can only delete their own comment; join through tasks for workspace isolation
+  // Author can only delete their own comment; join through tasks for workspace isolation, and
+  // match the :taskId from the URL so a comment can't be deleted via another task's route.
   const result = await pool.query(
     `DELETE FROM task_comments tc
      USING tasks t
      WHERE tc.id = $1
        AND tc.author_clerk_id = $2
        AND tc.task_id = t.id
-       AND t.workspace_id = $3`,
-    [commentId, authorId, workspaceId],
+       AND t.workspace_id = $3
+       AND tc.task_id = $4`,
+    [commentId, authorId, workspaceId, taskId],
   );
   return (result.rowCount ?? 0) > 0;
 }

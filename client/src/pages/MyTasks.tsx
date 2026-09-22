@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { isBefore, isToday, startOfDay, addDays, isAfter } from 'date-fns';
+import { isBefore, isToday, startOfDay, addDays, format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { useMembers } from '@/hooks/use-members';
+import { useAssignedTasks } from '@/hooks/use-tasks';
 import { TaskFormDialog, type Task } from '@/components/TaskFormDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,8 +14,8 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog';
-import { Clock, Calendar, CheckCircle2, AlertCircle, Inbox, Plus, FileText } from 'lucide-react';
-import { cn, localDateOnly, safeFormat } from '@/lib/utils';
+import { Clock, Calendar, CheckCircle2, AlertCircle, Inbox, Plus, FileText, AlertTriangle } from 'lucide-react';
+import { cn, localDateOnly, safeFormat, todayLocal } from '@/lib/utils';
 
 interface TaskTemplate {
   id: string;
@@ -102,27 +103,6 @@ function TaskCard({ task, onClick }: { task: Task; onClick: () => void }) {
   );
 }
 
-function GroupSection({ group }: { group: TaskGroup }) {
-  if (group.tasks.length === 0) return null;
-  const Icon = group.icon;
-
-  return (
-    <section className="space-y-2">
-      <div className="flex items-center gap-2">
-        <Icon className={cn('h-4 w-4', group.iconClass)} />
-        <h2 className="text-sm font-semibold">{group.label}</h2>
-        <span className="text-xs text-muted-foreground">({group.tasks.length})</span>
-      </div>
-      <div className="space-y-2 pl-6">
-        {group.tasks.map((task) => (
-          // TaskCard onClick handled by parent
-          <TaskCard key={task.id} task={task} onClick={() => {}} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
 export default function MyTasks() {
   const { userId } = useAuth();
   const { apiRequest } = useApiClient();
@@ -134,10 +114,9 @@ export default function MyTasks() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
 
-  const { data: tasks = [], isLoading } = useQuery<Task[]>({
-    queryKey: ['/api/tasks'],
-    queryFn: () => apiRequest<Task[]>('GET', '/api/tasks'),
-  });
+  // Filtered server-side (?assignee=) -- filtering the capped workspace-wide list client-side
+  // silently dropped the user's tasks once the workspace had more than the list cap.
+  const { tasks, isLoading, truncated, total: totalTasks } = useAssignedTasks(userId);
 
   const { data: templates = [] } = useQuery<TaskTemplate[]>({
     queryKey: ['/api/task-templates'],
@@ -172,6 +151,23 @@ export default function MyTasks() {
     setDialogOpen(true);
   };
 
+  // New tasks from this page default to "assigned to me" by pre-filling the form (a draft with
+  // id '' opens the create form); whatever the user picks in the form is then respected.
+  const openNewTask = () => {
+    setEditingTask({
+      id: '',
+      title: '',
+      description: null,
+      status: 'todo',
+      priority: 'medium',
+      tags: [],
+      position: 0,
+      assignee_clerk_id: userId ?? null,
+      due_date: null,
+    });
+    setDialogOpen(true);
+  };
+
   const handleSelectTemplate = (tpl: TaskTemplate) => {
     setTemplatePickerOpen(false);
     setEditingTask({
@@ -200,27 +196,16 @@ export default function MyTasks() {
     (t) => t.assignee_clerk_id === userId && t.status !== 'done',
   );
 
-  const todayStart = startOfDay(new Date());
-  const in7Days = addDays(todayStart, 7);
+  // Compare LOCAL calendar days as YYYY-MM-DD strings so every task lands in exactly one group
+  // (previously a task due exactly 7 days out matched neither "This Week" nor "Later").
+  const today = todayLocal();
+  const weekEnd = format(addDays(startOfDay(new Date()), 7), 'yyyy-MM-dd');
+  const dueDay = (t: Task) => (t.due_date ? t.due_date.substring(0, 10) : null);
 
-  const overdue = myTasks.filter(
-    (t) => t.due_date && isBefore(new Date(t.due_date + 'T23:59:59'), todayStart),
-  );
-  const dueToday = myTasks.filter(
-    (t) => t.due_date && isToday(localDateOnly(t.due_date)),
-  );
-  const upcoming = myTasks.filter(
-    (t) =>
-      t.due_date &&
-      isAfter(localDateOnly(t.due_date), todayStart) &&
-      !isToday(localDateOnly(t.due_date)) &&
-      isBefore(localDateOnly(t.due_date), in7Days),
-  );
-  const later = myTasks.filter(
-    (t) =>
-      !t.due_date ||
-      isAfter(localDateOnly(t.due_date), in7Days),
-  );
+  const overdue  = myTasks.filter((t) => { const d = dueDay(t); return d !== null && d < today; });
+  const dueToday = myTasks.filter((t) => dueDay(t) === today);
+  const upcoming = myTasks.filter((t) => { const d = dueDay(t); return d !== null && d > today && d <= weekEnd; });
+  const later    = myTasks.filter((t) => { const d = dueDay(t); return d === null || d > weekEnd; });
 
   const groups: TaskGroup[] = [
     { label: 'Overdue',     icon: Clock,     iconClass: 'text-destructive',  tasks: overdue  },
@@ -235,7 +220,8 @@ export default function MyTasks() {
     if (editingTask?.id) {
       updateMutation.mutate({ ...data, id: editingTask.id });
     } else {
-      createMutation.mutate({ ...data, assignee_clerk_id: userId ?? null });
+      // Respect the assignee chosen in the form (it is pre-filled with the current user).
+      createMutation.mutate(data);
     }
   };
 
@@ -269,7 +255,7 @@ export default function MyTasks() {
           <Button
             size="sm"
             className="gap-2"
-            onClick={() => { setEditingTask(null); setDialogOpen(true); }}
+            onClick={openNewTask}
           >
             <Plus className="h-4 w-4" />
             New Task
@@ -278,6 +264,12 @@ export default function MyTasks() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
+        {truncated && (
+          <div className="mb-4 flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-900 dark:bg-yellow-950/40 dark:text-yellow-300">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            Showing {tasks.length} of {Math.max(totalTasks, tasks.length)} tasks assigned to you; the rest are not listed.
+          </div>
+        )}
         {isLoading ? (
           <div className="space-y-6">
             {[1, 2, 3].map((i) => (
@@ -293,7 +285,18 @@ export default function MyTasks() {
             <CheckCircle2 className="h-10 w-10 text-muted-foreground/30" />
             <p className="text-sm font-medium">No tasks assigned to you</p>
             <p className="text-xs text-muted-foreground">Create a task or ask a teammate to assign one.</p>
-            <Button size="sm" className="mt-2 gap-2" onClick={() => setDialogOpen(true)}>
+            <Button size="sm" className="mt-2 gap-2" onClick={openNewTask}>
+              <Plus className="h-4 w-4" /> Create task
+            </Button>
+          </div>
+        ) : myTasks.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 gap-3 text-center">
+            <CheckCircle2 className="h-10 w-10 text-green-500/60" />
+            <p className="text-sm font-medium">All caught up</p>
+            <p className="text-xs text-muted-foreground">
+              You have no open tasks — {doneCount} completed.
+            </p>
+            <Button size="sm" variant="outline" className="mt-2 gap-2" onClick={openNewTask}>
               <Plus className="h-4 w-4" /> Create task
             </Button>
           </div>

@@ -7,6 +7,7 @@ import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
 import { safeFormat } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { useIsAdmin } from '@/hooks/use-is-admin';
 import { StatCard } from '@/components/StatCard';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -50,36 +51,50 @@ function linearRegression(points: { x: number; y: number }[]): { slope: number; 
   return { slope, intercept };
 }
 
+// Pure calendar arithmetic on YYYY-MM-DD, returned as local YYYY-MM-DD (toISOString() is UTC and
+// shifted the month for users east of UTC; setMonth also overflowed Jan 31 -> Mar 3).
 function addMonths(dateStr: string, n: number): string {
-  const d = new Date(dateStr + 'T00:00:00');
-  d.setMonth(d.getMonth() + n);
-  return d.toISOString().slice(0, 10);
+  const [y, m] = dateStr.slice(0, 10).split('-').map(Number);
+  const total = y * 12 + (m - 1) + n;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  return `${ny}-${String(nm).padStart(2, '0')}-01`;
 }
 
-function RevenueChart({ targets }: { targets: RevenueTarget[] }) {
-  const monthlyTargets = targets.filter((t) => t.period_type === 'monthly');
+/** Absolute month index (year*12 + month) of a YYYY-MM-DD string — real gaps between months count. */
+function monthIndex(dateStr: string): number {
+  const [y, m] = dateStr.slice(0, 10).split('-').map(Number);
+  return y * 12 + (m - 1);
+}
 
+type PeriodType = 'monthly' | 'quarterly' | 'yearly';
+
+/** `targets` must already be filtered to a single period type. */
+function RevenueChart({ targets, periodType }: { targets: RevenueTarget[]; periodType: PeriodType }) {
   const sorted = [...targets]
-    .sort((a, b) => new Date(a.period_start).getTime() - new Date(b.period_start).getTime())
+    .sort((a, b) => a.period_start.localeCompare(b.period_start))
     .slice(-8);
 
   if (sorted.length < 2) return null;
 
-  // Build forecast from monthly actuals with real values
-  const monthlyWithActual = [...monthlyTargets]
-    .filter((t) => Number(t.actual_amount) > 0)
-    .sort((a, b) => new Date(a.period_start).getTime() - new Date(b.period_start).getTime())
-    .slice(-6); // use last 6 data points
+  // Forecast only for monthly rows: x is the absolute month index, so a missing month is a real
+  // gap in the regression instead of being treated as adjacent.
+  const monthlyWithActual = periodType === 'monthly'
+    ? sorted.filter((t) => Number(t.actual_amount) > 0).slice(-6)
+    : [];
 
-  const regressionPoints = monthlyWithActual.map((t, i) => ({ x: i, y: Number(t.actual_amount) }));
+  const regressionPoints = monthlyWithActual.map((t) => ({ x: monthIndex(t.period_start), y: Number(t.actual_amount) }));
   const regression = regressionPoints.length >= 3 ? linearRegression(regressionPoints) : null;
 
-  // Projected months: 2 months after the last in `sorted`
+  // Projected months: the 2 months after the last monthly row shown.
   const lastSortedDate = sorted[sorted.length - 1].period_start;
-  const forecastMonths = regression ? [1, 2].map((offset) => ({
-    period_start: addMonths(lastSortedDate, offset),
-    projected: Math.max(0, regression.intercept + regression.slope * (regressionPoints.length - 1 + offset)),
-  })) : [];
+  const forecastMonths = regression ? [1, 2].map((offset) => {
+    const period_start = addMonths(lastSortedDate, offset);
+    return {
+      period_start,
+      projected: Math.max(0, regression.intercept + regression.slope * monthIndex(period_start)),
+    };
+  }) : [];
 
   const allForDisplay = [
     ...sorted,
@@ -235,7 +250,8 @@ interface RevenueTarget {
 const formSchema = z.object({
   period_type: z.enum(['monthly', 'quarterly', 'yearly']),
   period_start: z.string().min(1, 'Required'),
-  target_amount: z.coerce.number().positive('Must be positive'),
+  // 0 allowed: integration syncs create rows with target 0, which must stay editable.
+  target_amount: z.coerce.number().min(0, 'Must be ≥ 0'),
   actual_amount: z.coerce.number().min(0).optional(),
   notes: z.string().optional(),
 });
@@ -255,8 +271,12 @@ export default function Revenue() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
+  const isAdmin = useIsAdmin();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<RevenueTarget | null>(null);
+  // Totals, chart and table cover one period type at a time — summing monthly, quarterly and
+  // yearly rows double-counts the same revenue.
+  const [periodType, setPeriodType] = useState<PeriodType>('monthly');
 
   const { data: targets = [], isLoading } = useQuery<RevenueTarget[]>({
     queryKey: ['/api/revenue'],
@@ -288,7 +308,7 @@ export default function Revenue() {
 
   const createMut = useMutation({
     mutationFn: (d: FormData) => apiRequest('POST', '/api/revenue', d),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/revenue'] }); setOpen(false); toast({ title: 'Target created' }); },
+    onSuccess: (_r, d) => { qc.invalidateQueries({ queryKey: ['/api/revenue'] }); setOpen(false); setPeriodType(d.period_type); toast({ title: 'Target created' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
@@ -322,9 +342,19 @@ export default function Revenue() {
     onError: (e: Error) => toast({ title: 'Sync failed', description: e.message, variant: 'destructive' }),
   });
 
-  const totalTarget = targets.reduce((s, t) => s + Number(t.target_amount), 0);
-  const totalActual = targets.reduce((s, t) => s + Number(t.actual_amount), 0);
-  const avgPct = targets.length ? Math.round(targets.reduce((s, t) => s + pct(t.actual_amount, t.target_amount), 0) / targets.length) : 0;
+  const shown = targets.filter((t) => t.period_type === periodType);
+  const totalTarget = shown.reduce((s, t) => s + Number(t.target_amount), 0);
+  const totalActual = shown.reduce((s, t) => s + Number(t.actual_amount), 0);
+  // Rows without a target (e.g. created by a sync) have no meaningful achievement %.
+  const withTarget = shown.filter((t) => Number(t.target_amount) > 0);
+  const avgPct = withTarget.length ? Math.round(withTarget.reduce((s, t) => s + pct(t.actual_amount, t.target_amount), 0) / withTarget.length) : 0;
+
+  const periodLabel = (t: RevenueTarget) => {
+    const start = t.period_start.substring(0, 10);
+    if (t.period_type === 'yearly') return start.slice(0, 4);
+    if (t.period_type === 'quarterly') return `Q${Math.ceil(Number(start.slice(5, 7)) / 3)} ${start.slice(0, 4)}`;
+    return safeFormat(start, 'MMM yyyy');
+  };
 
   const handleSubmit = (d: FormData) => {
     editing ? updateMut.mutate(d) : createMut.mutate(d);
@@ -341,6 +371,14 @@ export default function Revenue() {
       <div className="flex items-center justify-between px-6 py-4 border-b">
         <h1 className="text-xl font-semibold">Revenue</h1>
         <div className="flex items-center gap-2">
+          <Select value={periodType} onValueChange={(v) => setPeriodType(v as PeriodType)}>
+            <SelectTrigger className="h-8 w-32 text-sm"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="monthly">Monthly</SelectItem>
+              <SelectItem value="quarterly">Quarterly</SelectItem>
+              <SelectItem value="yearly">Yearly</SelectItem>
+            </SelectContent>
+          </Select>
           <Button size="sm" variant="outline" className="gap-2"
             onClick={() => downloadCsv('revenue.csv', targets.map((t) => ({
               period_type: t.period_type,
@@ -352,6 +390,7 @@ export default function Revenue() {
             <Download className="h-4 w-4" />
             <span className="hidden sm:inline">Export</span>
           </Button>
+          {isAdmin && (<>
           <Button
             size="sm"
             variant="outline"
@@ -377,6 +416,7 @@ export default function Revenue() {
           <Button size="sm" className="gap-2" onClick={openCreate}>
             <Plus className="h-4 w-4" /> Add Target
           </Button>
+          </>)}
         </div>
       </div>
 
@@ -389,15 +429,18 @@ export default function Revenue() {
         </div>
 
         {/* Chart */}
-        {!isLoading && <RevenueChart targets={targets} />}
+        {!isLoading && <RevenueChart targets={shown} periodType={periodType} />}
 
         {/* Table */}
         {isLoading ? (
           <div className="space-y-2">
             {[1,2,3].map(i => <Skeleton key={i} className="h-14 w-full" />)}
           </div>
-        ) : targets.length === 0 ? (
-          <div className="text-center py-12 text-muted-foreground text-sm">No revenue targets yet. Add your first one.</div>
+        ) : shown.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground text-sm">
+            {targets.length === 0 ? 'No revenue targets yet.' : `No ${periodType} targets.`}
+            {isAdmin && ' Add your first one.'}
+          </div>
         ) : (
           <Table>
             <TableHeader>
@@ -412,12 +455,12 @@ export default function Revenue() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {targets.map((t) => {
+              {shown.map((t) => {
                 const p = pct(t.actual_amount, t.target_amount);
                 return (
                   <TableRow key={t.id}>
                     <TableCell className="font-medium">
-                      {safeFormat(t.period_start, 'MMM yyyy')}
+                      {periodLabel(t)}
                     </TableCell>
                     <TableCell>
                       <Badge variant={periodTypeColor[t.period_type] as 'default' | 'secondary' | 'outline'}>
@@ -436,6 +479,7 @@ export default function Revenue() {
                       {t.notes}
                     </TableCell>
                     <TableCell>
+                      {isAdmin && (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" className="h-8 w-8">
@@ -448,12 +492,13 @@ export default function Revenue() {
                           </DropdownMenuItem>
                           <DropdownMenuItem
                             className="text-destructive"
-                            onClick={() => deleteMut.mutate(t.id)}
+                            onClick={() => { if (confirm(`Delete the ${t.period_type} target for ${periodLabel(t)}?`)) deleteMut.mutate(t.id); }}
                           >
                             <Trash2 className="h-4 w-4 mr-2" /> Delete
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

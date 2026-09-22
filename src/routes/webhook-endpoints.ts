@@ -8,6 +8,7 @@ import {
   updateEndpoint,
   deleteEndpoint,
   getDeliveries,
+  ALL_EVENTS,
 } from '../services/webhookService.js';
 import { isSafeWebhookUrl } from '../lib/ssrf.js';
 
@@ -18,19 +19,24 @@ const safeUrl = z.string().url().max(2048).refine(isSafeWebhookUrl, {
   message: 'URL must not point to a private or internal address',
 });
 
-const VALID_EVENTS = [
-  'task.created', 'task.updated', 'task.completed', 'task.deleted', 'review.submitted',
-  'epic.created', 'epic.updated', 'epic.deleted', 'sprint.completed', 'goal.completed',
-] as const;
+// Shared with webhookService so the validated set and the fired set can't drift.
+const VALID_EVENTS = ALL_EVENTS;
 
 const createSchema = z.object({
   url:    safeUrl,
-  events: z.array(z.enum(VALID_EVENTS)).default([]),
+  // Previously defaulted to [] and the delivery query (webhookService._deliver) treated an
+  // empty `events` array as a wildcard match for every event type — an admin who forgot to pick
+  // specific events (or an integration that omitted the field) ended up subscribed to
+  // everything, with no code comment anywhere indicating that was intentional. Requiring at
+  // least one explicit event makes "subscribed to nothing by default" the actual default.
+  // Legacy rows created with events = '{}' under the old wildcard semantics were backfilled to
+  // the full event list by migration 054 so they keep receiving everything.
+  events: z.array(z.enum(VALID_EVENTS)).min(1, 'Select at least one event to subscribe to'),
 });
 
 const updateSchema = z.object({
   url:    safeUrl.optional(),
-  events: z.array(z.enum(VALID_EVENTS)).optional(),
+  events: z.array(z.enum(VALID_EVENTS)).min(1, 'Select at least one event to subscribe to').optional(),
   active: z.boolean().optional(),
 });
 
@@ -39,7 +45,7 @@ router.get('/health', async (req, res, next) => {
   try {
     const { pool } = await import('../config/db.js');
     const result = await pool.query<{
-      total: number; active: number; last_status: string | null; last_delivered_at: string | null;
+      total: number; active: number; last_status: string | null; last_delivered_at: Date | null;
     }>(
       `SELECT
          COUNT(we.id)::int                                                                     AS total,
@@ -48,7 +54,7 @@ router.get('/health', async (req, res, next) => {
           JOIN webhook_endpoints we2 ON we2.id = wd.endpoint_id
           WHERE we2.workspace_id = $1
           ORDER BY wd.created_at DESC LIMIT 1)                                                AS last_status,
-         (SELECT wd.delivered_at::text FROM webhook_deliveries wd
+         (SELECT wd.delivered_at FROM webhook_deliveries wd
           JOIN webhook_endpoints we2 ON we2.id = wd.endpoint_id
           WHERE we2.workspace_id = $1
           ORDER BY wd.created_at DESC LIMIT 1)                                                AS last_delivered_at

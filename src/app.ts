@@ -10,6 +10,7 @@ import pinoHttp           from 'pino-http';
 import { logger }      from './config/logger.js';
 import { requireAuth } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { getAllowedOrigins } from './config/origins.js';
 import { createNinjaTaskWebhookRouter } from './routes/ninjataskWebhook.js';
 import { createCrmWebhookRouter } from './routes/crmWebhook.js';
 import { pool } from './config/db.js';
@@ -64,9 +65,21 @@ export function createApp() {
 
   app.set('trust proxy', 1);
 
-  const clerkOrigin = process.env.ALLOWED_ORIGIN
-    ? `https://clerk.${new URL(process.env.ALLOWED_ORIGIN).host}`
+  const allowedOrigins = getAllowedOrigins();
+  const clerkOrigin = allowedOrigins.length > 0
+    ? `https://clerk.${new URL(allowedOrigins[0]).host}`
     : '';
+
+  // H4: attachments are uploaded straight from the browser to a presigned R2 URL. The AWS SDK
+  // presigns virtual-hosted-style URLs (https://<bucket>.<account>.r2.cloudflarestorage.com)
+  // unless forcePathStyle is set, so allow both the account endpoint and its bucket subdomains.
+  const r2AccountId = (process.env.R2_ACCOUNT_ID ?? '').trim();
+  const r2Origins = /^[a-z0-9]+$/i.test(r2AccountId)
+    ? [
+        `https://${r2AccountId}.r2.cloudflarestorage.com`,
+        `https://*.${r2AccountId}.r2.cloudflarestorage.com`,
+      ]
+    : [];
 
   app.use(helmet({
     contentSecurityPolicy: {
@@ -87,7 +100,7 @@ export function createApp() {
         ],
         scriptSrcAttr: ["'none'"],
         workerSrc:     ["'self'", 'blob:'],
-        connectSrc:    ["'self'", ...(clerkOrigin ? [clerkOrigin] : []), 'https://api.clerk.com', 'https://cloudflareinsights.com'],
+        connectSrc:    ["'self'", ...(clerkOrigin ? [clerkOrigin] : []), 'https://api.clerk.com', 'https://cloudflareinsights.com', ...r2Origins],
         styleSrc:      ["'self'", 'https:', "'unsafe-inline'"],
         upgradeInsecureRequests: [],
       },
@@ -96,7 +109,7 @@ export function createApp() {
 
   // M2: Fall back to false (block all cross-origin) rather than undefined (allow all)
   // when ALLOWED_ORIGIN is not set — prevents wide-open CORS in misconfigured deploys.
-  app.use(cors({ origin: process.env.ALLOWED_ORIGIN ?? false, credentials: true }));
+  app.use(cors({ origin: allowedOrigins.length > 0 ? allowedOrigins : false, credentials: true }));
 
   app.use(rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
@@ -129,6 +142,15 @@ export function createApp() {
   // External REST API — uses API key auth instead of Clerk; must be before requireAuth
   app.use('/api/external', externalRouter);
 
+  // C2a: public invite lookup (GET /token/:token, rate-limited inside the router) must be
+  // reachable without a Clerk session — the invitee usually isn't signed in yet. The accept
+  // route in the same router carries its own per-route requireAuth.
+  app.use('/api/invites',        publicInvitesRouter);
+
+  // M46: public API docs (Swagger UI + openapi.json) — describes the API-key external API too,
+  // and a browser can't attach a Clerk bearer token to a plain page load anyway.
+  app.use('/api/docs', docsRouter);
+
   app.use('/api', requireAuth);
 
   app.use('/api/workspaces', workspacesRouter);
@@ -147,7 +169,6 @@ export function createApp() {
   app.use('/api/sprints',        sprintsRouter);
   app.use('/api/webhooks',       webhookEndpointsRouter);
   app.use('/api/workspaces',     workspaceInvitesRouter);  // H1: admin invite management
-  app.use('/api/invites',        publicInvitesRouter);     // H1: public token lookup + accept
   app.use('/api/epics',          epicsRouter);
   app.use('/api/epics/:epicId/comments', epicCommentsRouter);
   app.use('/api/tasks/:taskId/dependencies',      taskDepsRouter);
@@ -170,10 +191,6 @@ export function createApp() {
   app.use('/api/api-keys',       apiKeysRouter);
   app.use('/api/custom-fields',  customFieldsRouter);
   app.use('/api/automations',    automationsRouter);
-  // M3: API docs only in non-production — avoids exposing the full OpenAPI schema publicly
-  if (process.env.NODE_ENV !== 'production') {
-    app.use('/api/docs', docsRouter);
-  }
 
   if (process.env.NODE_ENV === 'production') {
     const __dirname = dirname(fileURLToPath(import.meta.url));

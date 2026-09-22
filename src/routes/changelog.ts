@@ -46,21 +46,47 @@ router.get('/', async (req, res, next) => {
     // Pass date strings and let PostgreSQL cast with timezone: date+time+offset
     const toDate   = to   ? `${to}T23:59:59Z`   : new Date().toISOString();
     const fromDate = from ? `${from}T00:00:00Z`  : new Date(Date.now() - 30 * 86400_000).toISOString();
+    // Exclusive upper bound: midnight UTC of the day AFTER `to`. A `<= to 23:59:59` bound dropped
+    // completions in the final (sub-)second of the day (timestamptz has microsecond precision).
+    let toExclusive: string;
+    if (to) {
+      const next = new Date(`${to}T00:00:00Z`);
+      next.setUTCDate(next.getUTCDate() + 1);
+      toExclusive = next.toISOString();
+    } else {
+      // "now" + 1ms so a completion logged in the current millisecond is still included.
+      toExclusive = new Date(Date.now() + 1).toISOString();
+    }
 
-    // Find done-date for each completed task using task_activity
+    // Completion time = start of each done task's current "done" streak: the first status='done'
+    // row after its last non-done status row. Taking the LATEST status='done' row instead moved a
+    // task's completion forward every time a done task was edited (or dragged within Done).
+    // 'created' covers tasks created directly as done (M5); historical 'moved' rows carry the
+    // status of Kanban drags logged before the reorder path switched to logging 'updated'.
     const result = await pool.query<ChangelogTask & { sprint_id: string | null }>(
-      `WITH done_times AS (
-         SELECT DISTINCT ON (ta.task_id)
-           ta.task_id,
-           ta.created_at AS completed_at
+      `WITH status_rows AS (
+         SELECT ta.task_id, ta.created_at, ta.payload->>'status' AS status
          FROM task_activity ta
          JOIN tasks t ON t.id = ta.task_id
          WHERE t.workspace_id = $1
            AND t.status = 'done'
-           AND ta.action IN ('updated', 'created')   -- M5: include tasks created directly as done
-           AND (ta.payload->>'status') = 'done'
            AND t.deleted_at IS NULL
-         ORDER BY ta.task_id, ta.created_at DESC
+           AND ta.action IN ('updated', 'created', 'moved')
+           AND (ta.payload->>'status') IS NOT NULL
+       ),
+       last_reopen AS (
+         SELECT task_id, MAX(created_at) AS reopened_at
+         FROM status_rows
+         WHERE status <> 'done'
+         GROUP BY task_id
+       ),
+       done_times AS (
+         SELECT sr.task_id, MIN(sr.created_at) AS completed_at
+         FROM status_rows sr
+         LEFT JOIN last_reopen lr ON lr.task_id = sr.task_id
+         WHERE sr.status = 'done'
+           AND (lr.reopened_at IS NULL OR sr.created_at > lr.reopened_at)
+         GROUP BY sr.task_id
        )
        SELECT
          t.id,
@@ -81,13 +107,15 @@ router.get('/', async (req, res, next) => {
        LEFT JOIN epics   e             ON e.id  = t.epic_id
        WHERE t.workspace_id = $1
          AND dt.completed_at >= $2
-         AND dt.completed_at <= $3
+         AND dt.completed_at < $3
        ORDER BY dt.completed_at DESC
        LIMIT $4`,
-      [req.workspace.id, fromDate, toDate, limit],
+      [req.workspace.id, fromDate, toExclusive, limit],
     );
 
-    // Group by sprint (then epic within sprint)
+    // One group per sprint; tasks with no sprint are grouped by their epic instead (or into a
+    // single ungrouped bucket). Epic info inside a sprint group is carried per task
+    // (epic_title/epic_color on each row), not as nested sub-groups.
     const groupMap = new Map<string, ChangelogGroup>();
 
     for (const row of result.rows) {
@@ -114,6 +142,12 @@ router.get('/', async (req, res, next) => {
       total_tasks: result.rows.length,
       total_points: result.rows.reduce((s, r) => s + (r.story_points ?? 0), 0),
       groups: Array.from(groupMap.values()),
+      // Signals the UI that total_tasks/total_points/groups reflect only the most-recent
+      // `limit` completions within the range, not the true total — same class of silent
+      // undercount that analytics.ts's time-report fixed (this endpoint just uses a "most
+      // recent N" cap by design rather than an unbounded aggregate, so a `truncated` flag is
+      // the right fix here rather than a second unbounded query).
+      truncated: result.rows.length === limit,
     });
   } catch (err) { next(err); }
 });

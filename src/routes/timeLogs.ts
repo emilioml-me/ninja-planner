@@ -14,6 +14,7 @@ router.use(requireWorkspace);
 const createSchema = z.object({
   minutes:     z.number().int().min(1).max(14400),
   note:        z.string().max(500).optional(),
+  // Only admins may set a rate (it drives budget time_cost rollups); see POST below.
   billable:    z.boolean().optional(),
   hourly_rate: z.number().min(0).max(10000).nullable().optional(),
 });
@@ -45,6 +46,14 @@ router.post('/', async (req, res, next) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
+    // hourly_rate feeds every budget's time_cost rollup, so a member must not be able to price
+    // their own time; members log billable time without a rate (an admin can price it later).
+    const isAdmin = ADMIN_ROLES.has(req.auth.memberRole ?? '');
+    if (!isAdmin && parsed.data.hourly_rate != null) {
+      res.status(403).json({ error: 'Only workspace admins can set an hourly rate' });
+      return;
+    }
+
     const log = await addTimeLog(
       (req.params as Record<string, string>).taskId,
       req.workspace.id,
@@ -66,7 +75,9 @@ router.patch('/:id/budget-entry', async (req, res, next) => {
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
     const isAdmin = ADMIN_ROLES.has(req.auth.memberRole ?? '');
-    const log = await setTimeLogBudgetEntry(req.params.id, req.workspace.id, req.auth.userId, isAdmin, parsed.data.budget_entry_id);
+    const log = await setTimeLogBudgetEntry(
+      req.params.id, (req.params as Record<string, string>).taskId, req.workspace.id, req.auth.userId, isAdmin, parsed.data.budget_entry_id,
+    );
     if (!log) { res.status(404).json({ error: 'Log not found, not yours, or budget entry not found' }); return; }
     res.json(log);
   } catch (err) { next(err); }
@@ -78,6 +89,7 @@ router.delete('/:id', async (req, res, next) => {
     const isAdmin = ADMIN_ROLES.has(req.auth.memberRole ?? '');
     const deleted = await deleteTimeLog(
       req.params.id,
+      (req.params as Record<string, string>).taskId,
       req.workspace.id,
       req.auth.userId,
       isAdmin,

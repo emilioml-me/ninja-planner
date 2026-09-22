@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import request from 'supertest';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -30,6 +30,7 @@ vi.mock('../middleware/requireAdmin.js', () => ({
 }));
 
 let app: any;
+const ORIGINAL_ENV = { ...process.env };
 beforeAll(async () => {
   process.env.CLERK_SECRET_KEY     = 'test';
   process.env.CLERK_WEBHOOK_SECRET = 'test';
@@ -39,7 +40,16 @@ beforeAll(async () => {
   app = createApp();
 });
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  // Undo per-test vi.stubEnv / vi.stubGlobal('fetch', ...) even when an assertion failed.
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
+afterAll(() => {
+  process.env = ORIGINAL_ENV;
+});
 
 describe('GET /api/ninja-stack/status', () => {
   it('returns no_code when workspace has no subscription', async () => {
@@ -93,17 +103,14 @@ describe('POST /api/ninja-stack/activate', () => {
   });
 
   it('returns 502 when ninja-core is unreachable', async () => {
-    process.env.NINJA_CORE_APP_ID     = 'app_test';
-    process.env.NINJA_CORE_APP_SECRET = 'secret_test';
-    global.fetch = vi.fn().mockRejectedValueOnce(new Error('network error'));
+    vi.stubEnv('NINJA_CORE_APP_ID', 'app_test');
+    vi.stubEnv('NINJA_CORE_APP_SECRET', 'secret_test');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new Error('network error')));
 
     const res = await request(app)
       .post('/api/ninja-stack/activate')
       .send({ code: 'nsk_test' });
 
     expect(res.status).toBe(502);
-
-    delete process.env.NINJA_CORE_APP_ID;
-    delete process.env.NINJA_CORE_APP_SECRET;
   });
 });

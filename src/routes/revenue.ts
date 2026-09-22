@@ -15,10 +15,15 @@ router.use(requireWorkspace);
 const createSchema = z.object({
   period_type:    z.enum(['monthly', 'quarterly', 'yearly']),
   period_start:   z.string().date(),
-  target_amount:  z.number().positive(),
-  actual_amount:  z.number().min(0).optional(),
-  notes:          z.string().optional(),
+  // numeric(12,2) columns. target 0 is allowed: integration syncs create rows with target 0,
+  // and those rows must stay editable (L14).
+  target_amount:  z.number().finite().min(0).max(9_999_999_999.99),
+  actual_amount:  z.number().finite().min(0).max(9_999_999_999.99).optional(),
+  notes:          z.string().max(2000).optional(),
 });
+
+// DB errors (e.g. 23505 duplicate period) are passed to next(err) and mapped centrally by
+// middleware/errorHandler.ts (23505 -> 409).
 
 const updateSchema = createSchema.partial();
 

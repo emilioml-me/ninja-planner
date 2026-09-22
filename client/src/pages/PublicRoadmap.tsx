@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ThumbsUp, ArrowUpDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/hooks/use-toast';
 
 interface RoadmapItem {
   id: string;
@@ -29,11 +30,16 @@ const STATUS_ORDER = ['building', 'idea', 'live'];
 const VISITOR_KEY = 'ninja-planner:visitor_id';
 const VOTES_KEY   = (token: string) => `ninja-planner:votes:${token}`;
 
+// localStorage access can throw (private mode, blocked storage, sandboxed iframe) — voting must
+// still work then, just without persistence across visits.
 function getOrCreateVisitorId(): string {
-  let id = localStorage.getItem(VISITOR_KEY);
+  let id: string | null = null;
+  try { id = localStorage.getItem(VISITOR_KEY); } catch { /* storage unavailable */ }
   if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(VISITOR_KEY, id);
+    id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    try { localStorage.setItem(VISITOR_KEY, id); } catch { /* storage unavailable */ }
   }
   return id;
 }
@@ -49,7 +55,9 @@ function loadVotedIds(token: string): Set<string> {
 }
 
 function saveVotedIds(token: string, ids: Set<string>): void {
-  localStorage.setItem(VOTES_KEY(token), JSON.stringify([...ids]));
+  try {
+    localStorage.setItem(VOTES_KEY(token), JSON.stringify([...ids]));
+  } catch { /* storage unavailable or full — keep in-memory state only */ }
 }
 
 interface PublicRoadmapProps {
@@ -58,6 +66,7 @@ interface PublicRoadmapProps {
 
 export default function PublicRoadmap({ token }: PublicRoadmapProps) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [sortByVotes, setSortByVotes] = useState(false);
   const [votedIds, setVotedIds] = useState<Set<string>>(new Set());
   const [visitorId, setVisitorId] = useState('');
@@ -76,6 +85,8 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
       return res.json();
     },
     retry: false,
+    // The footer promises the page updates automatically.
+    refetchInterval: 60_000,
   });
 
   // Generic vote toggler — hits POST or DELETE depending on current state
@@ -86,10 +97,18 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ visitor_id: visitorId }),
       });
-      if (!res.ok) throw new Error('Vote failed');
-      return res.json() as Promise<{ vote_count: number }>;
+      if (!res.ok) {
+        let message = 'Please try again.';
+        try {
+          const body = await res.json() as { error?: unknown };
+          if (typeof body.error === 'string') message = body.error;
+        } catch { /* non-JSON body */ }
+        // 429 = per-network vote limit reached; surface the server's message as-is.
+        throw new Error(message);
+      }
+      return res.json() as Promise<{ vote_count: number; changed?: boolean }>;
     },
-    onSuccess: ({ vote_count }, { itemId, removing }) => {
+    onSuccess: ({ vote_count, changed }, { itemId, removing }) => {
       // Update cache in-place
       queryClient.setQueryData<PublicRoadmapData>(['/public/roadmap', token], (old) => {
         if (!old) return old;
@@ -99,13 +118,24 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
         };
       });
 
-      // Persist voted state to localStorage
+      // Votes are idempotent per visitor_id: after a successful POST this visitor HAS a vote
+      // (changed=false just means it already existed, e.g. localStorage was cleared), and after a
+      // DELETE they don't. So set the state the server now reports instead of blindly toggling;
+      // if nothing changed and our local state already matches, there's nothing to persist.
+      const nowVoted = !removing;
+      if (changed === false && votedIds.has(itemId) === nowVoted) return;
       setVotedIds((prev) => {
         const next = new Set(prev);
         if (removing) next.delete(itemId); else next.add(itemId);
         saveVotedIds(token, next);
         return next;
       });
+    },
+    // Previously no error handler at all — a failed vote (network blip, expired/revoked token,
+    // rate limit) silently left the button clickable again with no indication to the visitor
+    // that their click didn't register.
+    onError: (err: Error) => {
+      toast({ title: "Couldn't record your vote", description: err.message, variant: 'destructive' });
     },
   });
 

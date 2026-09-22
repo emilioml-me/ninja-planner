@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
+import { todayLocal } from '@/lib/utils';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -56,7 +57,8 @@ function UseTemplateDialog({ template, onDone }: { template: EpicTemplate; onDon
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
-  const today = new Date().toISOString().split('T')[0];
+  // Local date — toISOString() is UTC and gives tomorrow for evening users west of UTC.
+  const today = todayLocal();
 
   const [epicTitle, setEpicTitle] = useState(template.epic_title);
   const [startDate, setStartDate] = useState(today);
@@ -71,7 +73,7 @@ function UseTemplateDialog({ template, onDone }: { template: EpicTemplate; onDon
       toast({ title: 'Epic created from template' });
       onDone();
     },
-    onError: () => toast({ title: 'Failed to create epic', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create epic', description: err.message, variant: 'destructive' }),
   });
 
   return (
@@ -92,7 +94,8 @@ function UseTemplateDialog({ template, onDone }: { template: EpicTemplate; onDon
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onDone}>Cancel</Button>
         <Button
-          onClick={() => mutation.mutate({ epic_title: epicTitle, ...(template.sprint_template_id ? { start_date: startDate } : {}) })}
+          /* Never send '' — a cleared date input omits start_date so the server uses today. */
+          onClick={() => mutation.mutate({ epic_title: epicTitle, ...(template.sprint_template_id && startDate ? { start_date: startDate } : {}) })}
           disabled={!epicTitle.trim() || mutation.isPending}>
           Create
         </Button>
@@ -143,7 +146,8 @@ export default function EpicTemplates() {
   const buildPayload = (f: FormState) => ({
     name: f.name,
     epic_title: f.epic_title,
-    epic_description: f.epic_description.trim() || undefined,
+    // null (not undefined) so clearing the description on edit actually persists.
+    epic_description: f.epic_description.trim() || null,
     epic_color: f.epic_color,
     sprint_template_id: f.sprint_template_id === NO_SPRINT_TEMPLATE ? null : f.sprint_template_id,
     task_template_ids: f.task_template_ids,
@@ -152,19 +156,19 @@ export default function EpicTemplates() {
   const createMutation = useMutation({
     mutationFn: (data: ReturnType<typeof buildPayload>) => apiRequest('POST', '/api/epic-templates', data),
     onSuccess: () => { invalidate(); setCreating(false); setForm(EMPTY_FORM); toast({ title: 'Template created' }); },
-    onError: () => toast({ title: 'Failed to create template', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create template', description: err.message, variant: 'destructive' }),
   });
 
   const updateMutation = useMutation({
     mutationFn: (data: ReturnType<typeof buildPayload>) => apiRequest('PATCH', `/api/epic-templates/${editing!.id}`, data),
     onSuccess: () => { invalidate(); closeDialog(); toast({ title: 'Template updated' }); },
-    onError: () => toast({ title: 'Failed to update template', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to update template', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/epic-templates/${id}`),
     onSuccess: () => { invalidate(); toast({ title: 'Template deleted' }); },
-    onError: () => toast({ title: 'Failed to delete template', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to delete template', description: err.message, variant: 'destructive' }),
   });
 
   const toggleTaskTemplate = (id: string) => {
@@ -299,22 +303,23 @@ export default function EpicTemplates() {
                     </Badge>
                   ))}
                 </div>
+                {/* /use is requireAdmin server-side, so the whole action row is admin-only. */}
+                {isAdmin && (
                 <div className="flex gap-2 pt-1">
                   <Button size="sm" className="gap-1 flex-1" onClick={() => setUsing(t)}>
                     <Play className="h-3.5 w-3.5" /> Use Template
                   </Button>
-                  {isAdmin && (
                     <>
                       <Button size="sm" variant="ghost" onClick={() => openEdit(t)}>
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
                       <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
-                        onClick={() => deleteMutation.mutate(t.id)} disabled={deleteMutation.isPending}>
+                        onClick={() => { if (confirm(`Delete template "${t.name}"?`)) deleteMutation.mutate(t.id); }} disabled={deleteMutation.isPending}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </>
-                  )}
                 </div>
+                )}
               </CardContent>
             </Card>
           ))}

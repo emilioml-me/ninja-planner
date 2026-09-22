@@ -4,6 +4,7 @@ import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getWorkspacesForUser,
+  getWorkspaceForOrg,
   updateWorkspace,
 } from '../services/workspaceService.js';
 
@@ -19,6 +20,28 @@ router.get('/me', async (req, res, next) => {
   try {
     const workspaces = await getWorkspacesForUser(req.auth.userId);
     res.json(workspaces);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/workspaces/current — H13: the workspace for the ACTIVE org in the session token
+// (what requireWorkspace resolves for every other route). 404 when the workspace row or the
+// caller's membership doesn't exist yet (e.g. Clerk webhook still in flight), so the client's
+// WorkspaceGate can show its recovery screen instead of rendering an app that 403s everywhere.
+router.get('/current', async (req, res, next) => {
+  try {
+    const orgId = req.auth.orgId;
+    if (!orgId || orgId.trim() === '') {
+      res.status(403).json({ error: 'No active organization in token' });
+      return;
+    }
+    const workspace = await getWorkspaceForOrg(orgId, req.auth.userId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+    res.json(workspace);
   } catch (err) {
     next(err);
   }

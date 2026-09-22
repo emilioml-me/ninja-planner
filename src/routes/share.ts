@@ -1,18 +1,59 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { createHash } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import {
   getPublicRoadmap,
   validateShareToken,
   addRoadmapVote,
   removeRoadmapVote,
+  type VoteResult,
 } from '../services/shareService.js';
 
-/** SHA-256 hash of the client IP — never log raw IPs */
+/**
+ * Key for hashing voter IPs. A plain SHA-256 of an IPv4 address is trivially reversible by
+ * enumerating the address space, so the hash is an HMAC keyed with a server secret:
+ * VOTE_IP_HASH_SECRET when set, otherwise a key derived from CLERK_SECRET_KEY (always present in
+ * a working deployment). Resolved lazily so it reads env after dotenv has loaded.
+ */
+let ipHashKey: string | null = null;
+function getIpHashKey(): string {
+  if (ipHashKey) return ipHashKey;
+  const explicit = process.env.VOTE_IP_HASH_SECRET;
+  if (explicit) {
+    ipHashKey = explicit;
+  } else {
+    const base = process.env.CLERK_SECRET_KEY;
+    if (!base) throw new Error('VOTE_IP_HASH_SECRET or CLERK_SECRET_KEY must be set');
+    ipHashKey = createHmac('sha256', base).update('ninja-planner:roadmap-vote-ip-hash').digest('hex');
+  }
+  return ipHashKey;
+}
+
+/** Salted HMAC of the client IP - raw IPs are never stored or logged. */
 function hashIp(ip: string | undefined): string | null {
   if (!ip) return null;
+  return createHmac('sha256', getIpHashKey()).update(ip).digest('hex');
+}
+
+/** Pre-salt format (plain SHA-256), only used to let visitors retract votes cast before the switch. */
+function legacyHashIp(ip: string | undefined): string | null {
+  if (!ip) return null;
   return createHash('sha256').update(ip).digest('hex');
+}
+
+function sendVoteResult(res: import('express').Response, result: VoteResult): void {
+  if (result.status === 'not_found') {
+    res.status(404).json({ error: 'Item not found' });
+    return;
+  }
+  if (result.status === 'ip_limit') {
+    res.status(429).json({ error: 'Vote limit reached for this network', vote_count: result.vote_count });
+    return;
+  }
+  // `changed` tells the client whether this call actually added/removed a vote (false when the
+  // visitor had already voted / had no vote), so it only flips its local "voted" state on a change.
+  res.json({ vote_count: result.vote_count, changed: result.changed });
 }
 
 /**
@@ -42,8 +83,9 @@ const publicReadLimiter = rateLimit({
 });
 
 const voteBodySchema = z.object({
-  visitor_id: z.string().min(1).max(128),
+  visitor_id: z.string().trim().min(1).max(128),
 });
+const itemIdSchema = z.string().uuid();
 
 // GET /public/roadmap/:token
 router.get('/roadmap/:token', publicReadLimiter, async (req, res, next) => {
@@ -67,6 +109,10 @@ router.post('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, next)
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+    if (!itemIdSchema.safeParse(req.params.itemId).success) {
+      res.status(404).json({ error: 'Item not found' });
+      return;
+    }
     const workspaceId = await validateShareToken(req.params.token, 'roadmap');
     if (!workspaceId) {
       res.status(404).json({ error: 'Roadmap not found or link expired' });
@@ -77,12 +123,8 @@ router.post('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, next)
       res.status(400).json({ error: 'Unable to process vote: client IP could not be determined' });
       return;
     }
-    const voteCount = await addRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash);
-    if (voteCount === null) {
-      res.status(404).json({ error: 'Item not found' });
-      return;
-    }
-    res.json({ vote_count: voteCount });
+    const result = await addRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash);
+    sendVoteResult(res, result);
   } catch (err) {
     next(err);
   }
@@ -96,6 +138,10 @@ router.delete('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, nex
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+    if (!itemIdSchema.safeParse(req.params.itemId).success) {
+      res.status(404).json({ error: 'Item not found' });
+      return;
+    }
     const workspaceId = await validateShareToken(req.params.token, 'roadmap');
     if (!workspaceId) {
       res.status(404).json({ error: 'Roadmap not found or link expired' });
@@ -106,12 +152,10 @@ router.delete('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, nex
       res.status(400).json({ error: 'Unable to process vote: client IP could not be determined' });
       return;
     }
-    const voteCount = await removeRoadmapVote(req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash);
-    if (voteCount === null) {
-      res.status(404).json({ error: 'Item not found' });
-      return;
-    }
-    res.json({ vote_count: voteCount });
+    const result = await removeRoadmapVote(
+      req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash, legacyHashIp(req.ip),
+    );
+    sendVoteResult(res, result);
   } catch (err) {
     next(err);
   }

@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
-import { safeFormat } from '@/lib/utils';
+import { safeFormat, todayLocal } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -40,6 +39,7 @@ interface ChangelogResponse {
   total_tasks: number;
   total_points: number;
   groups: ChangelogGroup[];
+  truncated?: boolean;
 }
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -49,20 +49,28 @@ const PRIORITY_COLORS: Record<string, string> = {
   urgent: 'bg-red-100 text-red-700',
 };
 
+// Local-calendar YYYY-MM-DD (toISOString() is UTC and can be a day off in the evening west of UTC).
 function defaultFrom() {
   const d = new Date();
   d.setDate(d.getDate() - 30);
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 export default function Changelog() {
   const { apiRequest } = useApiClient();
   const [from, setFrom] = useState(defaultFrom);
-  const [to, setTo]     = useState(new Date().toISOString().slice(0, 10));
+  const [to, setTo]     = useState(todayLocal);
 
-  const { data, isLoading } = useQuery<ChangelogResponse>({
+  // A cleared date input yields '' — omit that param instead of sending `from=` (which the
+  // server's z.string().date() rejects with a 400); the server then applies its own default.
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  const qs = params.toString();
+
+  const { data, isLoading, isError, error } = useQuery<ChangelogResponse>({
     queryKey: ['/api/changelog', from, to],
-    queryFn: () => apiRequest('GET', `/api/changelog?from=${from}&to=${to}`),
+    queryFn: () => apiRequest('GET', `/api/changelog${qs ? `?${qs}` : ''}`),
   });
 
   const exportCsv = () => {
@@ -122,9 +130,14 @@ export default function Changelog() {
             </span>
           )}
           <span className="text-muted-foreground">
-            {format(new Date(data.from + 'T00:00:00'), 'MMM d')} – {format(new Date(data.to + 'T00:00:00'), 'MMM d, yyyy')}
+            {safeFormat(data.from, 'MMM d')} – {safeFormat(data.to, 'MMM d, yyyy')}
           </span>
         </div>
+      )}
+      {data?.truncated && (
+        <p className="text-xs text-amber-600">
+          Showing only the most recent {data.total_tasks} completed tasks in this range — narrow the date range to see everything.
+        </p>
       )}
 
       {/* Groups */}
@@ -133,6 +146,12 @@ export default function Changelog() {
           {[1, 2].map((i) => (
             <Card key={i}><CardContent className="pt-4"><Skeleton className="h-32 w-full" /></CardContent></Card>
           ))}
+        </div>
+      ) : isError ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <History className="h-10 w-10 text-destructive/40 mb-3" />
+          <p className="text-sm font-medium text-destructive">Failed to load changelog</p>
+          <p className="text-xs text-muted-foreground mt-1">{(error as Error | null)?.message ?? 'Please try again.'}</p>
         </div>
       ) : !data || data.groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -155,7 +174,7 @@ export default function Changelog() {
                     {group.epic_title}
                   </>
                 )
-                : <><Layers className="h-3.5 w-3.5 text-muted-foreground inline-block mr-1" />Ungroups</>;
+                : <><Layers className="h-3.5 w-3.5 text-muted-foreground inline-block mr-1" />Ungrouped</>;
 
             return (
               <Card key={gi}>

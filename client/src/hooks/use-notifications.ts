@@ -59,7 +59,7 @@ export function useMarkAllRead() {
 
 export function useTaskComments(taskId: string | undefined) {
   const { apiRequest } = useApiClient();
-  return useQuery<import('./use-notifications').TaskComment[]>({
+  return useQuery<TaskComment[]>({
     queryKey: ['/api/tasks', taskId, 'comments'],
     queryFn: () => apiRequest('GET', `/api/tasks/${taskId}/comments`),
     enabled: !!taskId,

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
-import { dispatchAutomations } from '../services/automationService.js';
+import { claimOverdueTasks, dispatchDueDatePassed } from '../services/automationService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -20,15 +20,24 @@ export const ACTION_TYPES  = ['notify_assignee', 'reassign_task', 'set_status', 
 // dispatch (automationService.ts's executeAction/triggerMatches guard every field access with
 // `if (!x) break`/`if (cfg.x && ...)`). Validating the actual shape each action/trigger type
 // expects here means bad config fails fast instead of quietly never firing.
+// Must match the task status enum in routes/tasks.ts — a free-form string here let a rule set a
+// task to a status the rest of the app can't render, or filter on a status that never occurs.
+const TASK_STATUSES = ['todo', 'in_progress', 'done', 'blocked'] as const;
+// '' (an "any" select option) is treated as "no filter".
+const optionalStatusFilter = z.preprocess(
+  (v) => (v === '' || v === null ? undefined : v),
+  z.enum(TASK_STATUSES).optional(),
+);
+
 const triggerConfigSchema = z.object({
-  from_status:       z.string().max(50).optional(),
-  to_status:         z.string().max(50).optional(),
-  assignee_clerk_id: z.string().optional(),
+  from_status:       optionalStatusFilter,
+  to_status:         optionalStatusFilter,
+  assignee_clerk_id: z.preprocess((v) => (v === '' || v === null ? undefined : v), z.string().max(255).optional()),
 }).strict();
 
 const actionConfigSchemas: Record<typeof ACTION_TYPES[number], z.ZodTypeAny> = {
-  set_status:      z.object({ status: z.string().min(1).max(50) }).strict(),
-  reassign_task:   z.object({ assignee_clerk_id: z.string().min(1) }).strict(),
+  set_status:      z.object({ status: z.enum(TASK_STATUSES) }).strict(),
+  reassign_task:   z.object({ assignee_clerk_id: z.string().trim().min(1).max(255) }).strict(),
   notify_assignee: z.object({ title: z.string().max(200).optional(), message: z.string().max(1000).optional() }).strict(),
   post_webhook:    z.object({ endpoint_id: z.string().uuid() }).strict(),
 };
@@ -38,6 +47,22 @@ function validateActionConfig(actionType: string, actionConfig: unknown): string
   if (!schema) return 'Unknown action_type';
   const result = schema.safeParse(actionConfig);
   return result.success ? null : `Invalid action_config for ${actionType}: ${result.error.message}`;
+}
+
+/** reassign_task must target a current workspace member; returns an error message or null. */
+async function validateReassignTarget(
+  workspaceId: string,
+  actionType: string,
+  actionConfig: Record<string, unknown>,
+): Promise<string | null> {
+  if (actionType !== 'reassign_task') return null;
+  const assigneeId = actionConfig.assignee_clerk_id;
+  if (typeof assigneeId !== 'string' || !assigneeId) return 'reassign_task requires an assignee';
+  const { rows } = await pool.query(
+    'SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+    [workspaceId, assigneeId],
+  );
+  return rows.length > 0 ? null : 'Assignee is not a member of this workspace';
 }
 
 const ruleSchemaBase = z.object({
@@ -90,6 +115,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const parsed = ruleSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     const { name, trigger_type, trigger_config, action_type, action_config, active } = parsed.data;
+    const reassignError = await validateReassignTarget(req.workspace.id, action_type, action_config);
+    if (reassignError) { res.status(400).json({ error: reassignError }); return; }
 
     const { rows } = await pool.query(
       `INSERT INTO automation_rules
@@ -115,7 +142,8 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
       if (current.rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
       const effectiveActionType   = parsed.data.action_type   ?? current.rows[0].action_type;
       const effectiveActionConfig = parsed.data.action_config ?? current.rows[0].action_config;
-      const error = validateActionConfig(effectiveActionType, effectiveActionConfig);
+      const error = validateActionConfig(effectiveActionType, effectiveActionConfig)
+        ?? await validateReassignTarget(req.workspace.id, effectiveActionType, effectiveActionConfig);
       if (error) { res.status(400).json({ error }); return; }
     }
 
@@ -143,41 +171,18 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/automations/due-date-check  [admin only]
-// Dispatches the task.due_date_passed trigger for tasks that just became overdue.
-// Meant to be hit periodically by an external scheduler, mirroring the POST /api/tasks/alert-check
-// pattern used for the Slack overdue digest. Was previously a dead trigger type: it could be
-// configured on a rule but nothing anywhere ever dispatched it.
+// Manual trigger for the task.due_date_passed sweep of THIS workspace. The regular sweep runs
+// in-process (automationService.startDueDateScheduler, started from index.ts) — an external
+// scheduler can't call this route since it requires a Clerk admin session.
+// Claims up to 200 newly-overdue tasks atomically (same claim-then-dispatch as the scheduler,
+// so it can't double-dispatch against it), responds immediately, and dispatches in the
+// background: post_webhook actions can take over a minute with retries, which previously kept
+// this request open until the proxy timed it out.
 router.post('/due-date-check', requireAdmin, async (req, res, next) => {
   try {
-    const { rows: overdue } = await pool.query<{
-      id: string; title: string; assignee_clerk_id: string | null;
-    }>(
-      `SELECT id, title, assignee_clerk_id
-       FROM tasks
-       WHERE workspace_id = $1
-         AND status <> 'done'
-         AND deleted_at IS NULL
-         AND due_date < CURRENT_DATE
-         AND due_date_passed_notified_at IS NULL
-       LIMIT 200`,
-      [req.workspace.id],
-    );
-
-    for (const task of overdue) {
-      await dispatchAutomations({
-        type: 'task.due_date_passed',
-        workspaceId: req.workspace.id,
-        taskId: task.id,
-        assigneeId: task.assignee_clerk_id,
-        title: task.title,
-      });
-      await pool.query(
-        `UPDATE tasks SET due_date_passed_notified_at = now() WHERE id = $1 AND workspace_id = $2`,
-        [task.id, req.workspace.id],
-      );
-    }
-
-    res.json({ ok: true, dispatched: overdue.length });
+    const claimed = await claimOverdueTasks(req.workspace.id, 200);
+    dispatchDueDatePassed(claimed).catch(() => {});
+    res.json({ ok: true, dispatched: claimed.length });
   } catch (err) { next(err); }
 });
 

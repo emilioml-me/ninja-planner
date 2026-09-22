@@ -6,12 +6,12 @@
 
   <!-- Landing page — highest priority -->
   <url>
-    <loc>https://plan-ninja.com/</loc>
+    <loc>https://ninja-planner.com/</loc>
     <lastmod>2026-06-01</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
-    <xhtml:link rel="alternate" hreflang="es" href="https://plan-ninja.com/" />
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://plan-ninja.com/" />
+    <xhtml:link rel="alternate" hreflang="es" href="https://ninja-planner.com/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://ninja-planner.com/" />
   </url>
 
 </urlset>

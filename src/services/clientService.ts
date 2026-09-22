@@ -69,6 +69,7 @@ export async function updateClient(
   const values: unknown[] = [];
   let i = 1;
 
+  // undefined = leave unchanged; null = clear the column (nullable columns only).
   for (const [key, value] of Object.entries(data)) {
     if (value !== undefined && CLIENT_UPDATABLE_COLUMNS.has(key)) {
       fields.push(`${key} = $${i++}`);
@@ -76,6 +77,7 @@ export async function updateClient(
     }
   }
   if (fields.length === 0) return null;
+  fields.push('updated_at = now()');
 
   values.push(id, workspaceId);
   const result = await pool.query<Client>(

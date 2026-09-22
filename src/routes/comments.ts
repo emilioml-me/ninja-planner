@@ -2,15 +2,17 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { getComments, createComment, deleteComment } from '../services/commentService.js';
-import { createNotification } from '../services/notificationService.js';
+import { createNotification, isNotificationEnabled } from '../services/notificationService.js';
 import { pool } from '../config/db.js';
-import { sendCommentMentionEmail, resolveClerkEmail } from '../services/emailService.js';
+import { logger } from '../config/logger.js';
+import { sendCommentMentionEmail, sendCommentAddedEmail, resolveClerkEmail } from '../services/emailService.js';
 
 const router = Router({ mergeParams: true }); // inherit :taskId from parent
 router.use(requireWorkspace);
 
 const createSchema = z.object({
-  body:     z.string().min(1).max(5000),
+  // trim BEFORE min(1) so whitespace-only comments are rejected
+  body:     z.string().trim().min(1).max(5000),
   mentions: z.array(z.string()).max(20).optional(), // clerk_ids of mentioned workspace members
 });
 
@@ -65,79 +67,67 @@ router.post('/', async (req, res, next) => {
       [...validMentions],
     );
 
-    // Notify task owner + assignee (not the commenter themselves)
+    // Notify task owner + assignee (not the commenter themselves). Mentioned users get the
+    // 'mention' notification instead of 'comment_added' (one notification per person).
     const task = taskResult.rows[0];
-    const recipients = new Set([task.created_by, task.assignee_clerk_id].filter(Boolean) as string[]);
-    recipients.delete(req.auth.userId);
+    const workspaceId = req.workspace.id;
+    const commenterId = req.auth.userId;
+    const workspaceUrl = process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com';
+    const candidates = new Set([task.created_by, task.assignee_clerk_id].filter(Boolean) as string[]);
+    candidates.delete(commenterId);
+    for (const id of validMentions) candidates.delete(id);
 
-    // Resolve commenter name once for email (fire-and-forget)
-    resolveClerkEmail(req.auth.userId).then((commenter) => {
-      for (const recipientClerkId of recipients) {
-        createNotification({
-          workspaceId: req.workspace.id,
+    // Fire-and-forget: notification fan-out must never delay or fail the comment response.
+    (async () => {
+      // Only CURRENT members get anything — the task's creator/assignee may have left the
+      // workspace since (mentions were already validated against membership above).
+      let recipients: string[] = [];
+      if (candidates.size > 0) {
+        const memberRes = await pool.query<{ clerk_user_id: string }>(
+          `SELECT clerk_user_id FROM workspace_members
+           WHERE workspace_id = $1 AND clerk_user_id = ANY($2)`,
+          [workspaceId, [...candidates]],
+        );
+        recipients = memberRes.rows.map((r) => r.clerk_user_id);
+      }
+
+      const commenter = await resolveClerkEmail(commenterId);
+      const commenterName = commenter?.name ?? 'A teammate';
+
+      const notify = async (recipientClerkId: string, type: 'comment_added' | 'mention') => {
+        // createNotification checks the recipient's preference itself; email must honour the
+        // same preference (previously emails went out even when the type was muted).
+        await createNotification({
+          workspaceId,
           recipientClerkId,
-          type: 'comment_added',
-          title: `New comment on "${task.title}"`,
+          type,
+          title: type === 'mention' ? `You were mentioned in "${task.title}"` : `New comment on "${task.title}"`,
           body: comment.body.slice(0, 120),
           link: `/tasks`,
-        }).catch(() => {});
+        });
+        if (!(await isNotificationEnabled(workspaceId, recipientClerkId, type))) return;
+        const recipient = await resolveClerkEmail(recipientClerkId);
+        if (!recipient) return;
+        const emailOpts = {
+          to: recipient.email,
+          recipientName: recipient.name,
+          commenter: commenterName,
+          taskTitle: task.title,
+          commentBody: comment.body,
+          workspaceUrl,
+        };
+        // "You were mentioned" only for actual mentions; owner/assignee get a plain comment email.
+        if (type === 'mention') await sendCommentMentionEmail(emailOpts);
+        else await sendCommentAddedEmail(emailOpts);
+      };
 
-        resolveClerkEmail(recipientClerkId).then((recipient) => {
-          if (!recipient) return;
-          return sendCommentMentionEmail({
-            to: recipient.email,
-            recipientName: recipient.name,
-            commenter: commenter?.name ?? 'A teammate',
-            taskTitle: task.title,
-            commentBody: parsed.data.body,
-            workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-          });
-        }).catch(() => {});
-      }
-    }).catch(() => {
-      // Fallback: still send in-app notifications even if email resolution fails
-      for (const recipientClerkId of recipients) {
-        createNotification({
-          workspaceId: req.workspace.id,
-          recipientClerkId,
-          type: 'comment_added',
-          title: `New comment on "${task.title}"`,
-          body: comment.body.slice(0, 120),
-          link: `/tasks`,
-        }).catch(() => {});
-      }
+      await Promise.allSettled([
+        ...recipients.map((id) => notify(id, 'comment_added')),
+        ...[...validMentions].map((id) => notify(id, 'mention')),
+      ]);
+    })().catch((err) => {
+      logger.warn({ err, taskId: task.id }, 'comment notification fan-out failed');
     });
-
-    // @mention notifications — mentions were already validated against workspace membership above
-    if (validMentions.size > 0) {
-      for (const mentionedId of validMentions) {
-        if (recipients.has(mentionedId)) continue; // already notified above
-        createNotification({
-          workspaceId: req.workspace.id,
-          recipientClerkId: mentionedId,
-          type: 'mention',
-          title: `You were mentioned in "${task.title}"`,
-          body: comment.body.slice(0, 120),
-          link: `/tasks`,
-        }).catch(() => {});
-
-        // Email: @mention
-        Promise.all([
-          resolveClerkEmail(mentionedId),
-          resolveClerkEmail(req.auth.userId),
-        ]).then(([recipient, commenter]) => {
-          if (!recipient) return;
-          return sendCommentMentionEmail({
-            to: recipient.email,
-            recipientName: recipient.name,
-            commenter: commenter?.name ?? 'A teammate',
-            taskTitle: task.title,
-            commentBody: parsed.data.body,
-            workspaceUrl: process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com',
-          });
-        }).catch(() => {});
-      }
-    }
 
     res.status(201).json(comment);
   } catch (err) {
@@ -148,7 +138,12 @@ router.post('/', async (req, res, next) => {
 // DELETE /api/tasks/:taskId/comments/:commentId
 router.delete('/:commentId', async (req, res, next) => {
   try {
-    const deleted = await deleteComment(req.params.commentId, req.auth.userId, req.workspace.id);
+    const deleted = await deleteComment(
+      req.params.commentId,
+      req.auth.userId,
+      req.workspace.id,
+      (req.params as Record<string, string>).taskId,
+    );
     if (!deleted) {
       res.status(404).json({ error: 'Comment not found' });
       return;

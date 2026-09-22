@@ -34,8 +34,10 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
 
     const scopes: string[] = share.scopes;
     const wid = share.workspace_id;
+    // Only fields GuestView.tsx actually renders are returned — internal identifiers (workspace
+    // id, assignee Clerk ids), tags, and free-text descriptions/goals aren't meant for external
+    // stakeholders on a share link.
     const result: Record<string, unknown> = {
-      workspace_id: wid,
       label: share.label,
       scopes,
     };
@@ -43,30 +45,30 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
     await Promise.all([
       scopes.includes('tasks:read') && (async () => {
         const { rows } = await pool.query(
-          `SELECT id, title, status, priority, due_date, tags, assignee_clerk_id
-           FROM tasks WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY position, created_at`,
+          `SELECT id, title, status, priority, due_date
+           FROM tasks WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY position, created_at LIMIT 500`,
           [wid],
         );
         result.tasks = rows;
       })(),
       scopes.includes('roadmap:read') && (async () => {
         const { rows } = await pool.query(
-          `SELECT id, title, description, phase, status, priority
-           FROM roadmap_items WHERE workspace_id = $1 ORDER BY priority, created_at`,
+          `SELECT id, title, phase, status, priority
+           FROM roadmap_items WHERE workspace_id = $1 ORDER BY priority, created_at LIMIT 200`,
           [wid],
         );
         result.roadmap = rows;
       })(),
       scopes.includes('goals:read') && (async () => {
         const { rows } = await pool.query(
-          `SELECT id, title, status, due_date FROM goals WHERE workspace_id = $1 ORDER BY created_at`,
+          `SELECT id, title, status, due_date FROM goals WHERE workspace_id = $1 ORDER BY created_at LIMIT 200`,
           [wid],
         );
         result.goals = rows;
       })(),
       scopes.includes('sprints:read') && (async () => {
         const { rows } = await pool.query(
-          `SELECT id, name, status, start_date, end_date, goal
+          `SELECT id, name, status, start_date, end_date
            FROM sprints WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 20`,
           [wid],
         );
@@ -77,14 +79,14 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
       scopes.includes('epics:read') && (async () => {
         const { rows } = await pool.query(
           `SELECT
-             e.id, e.title, e.description, e.status, e.color,
+             e.id, e.title, e.status, e.color,
              COUNT(t.id) FILTER (WHERE t.deleted_at IS NULL)::int AS total_tasks,
              COUNT(t.id) FILTER (WHERE t.status = 'done' AND t.deleted_at IS NULL)::int AS done_tasks
            FROM epics e
            LEFT JOIN tasks t ON t.epic_id = e.id
            WHERE e.workspace_id = $1 AND e.status != 'archived'
            GROUP BY e.id
-           ORDER BY e.created_at DESC`,
+           ORDER BY e.created_at DESC LIMIT 200`,
           [wid],
         );
         result.epics = rows;
@@ -93,18 +95,31 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
       // fields — clients on a shared link get the same "what shipped" view as workspace members.
       scopes.includes('changelog:read') && (async () => {
         const { rows } = await pool.query(
-          `WITH done_times AS (
-             SELECT DISTINCT ON (ta.task_id)
-               ta.task_id,
-               ta.created_at AS completed_at
+          // Same completion-time rule as changelog.ts: first status='done' row after the last
+          // non-done status row ('moved' included for historical Kanban-drag rows).
+          `WITH status_rows AS (
+             SELECT ta.task_id, ta.created_at, ta.payload->>'status' AS status
              FROM task_activity ta
              JOIN tasks t ON t.id = ta.task_id
              WHERE t.workspace_id = $1
                AND t.status = 'done'
-               AND ta.action IN ('updated', 'created')
-               AND (ta.payload->>'status') = 'done'
                AND t.deleted_at IS NULL
-             ORDER BY ta.task_id, ta.created_at DESC
+               AND ta.action IN ('updated', 'created', 'moved')
+               AND (ta.payload->>'status') IS NOT NULL
+           ),
+           last_reopen AS (
+             SELECT task_id, MAX(created_at) AS reopened_at
+             FROM status_rows
+             WHERE status <> 'done'
+             GROUP BY task_id
+           ),
+           done_times AS (
+             SELECT sr.task_id, MIN(sr.created_at) AS completed_at
+             FROM status_rows sr
+             LEFT JOIN last_reopen lr ON lr.task_id = sr.task_id
+             WHERE sr.status = 'done'
+               AND (lr.reopened_at IS NULL OR sr.created_at > lr.reopened_at)
+             GROUP BY sr.task_id
            )
            SELECT t.id, t.title, t.priority, dt.completed_at,
                   sp.name AS sprint_name, e.title AS epic_title
@@ -120,17 +135,34 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
         );
         result.changelog = rows;
       })(),
-      // Rollup-only (name/target/actual) — never expose individual entry descriptions or who
-      // logged them, since guest links are meant for external stakeholders, not internal spend detail.
+      // Rollup-only (name/target/actual/time_cost) — never expose individual entry descriptions or
+      // who logged them, since guest links are meant for external stakeholders, not internal spend
+      // detail. time_cost mirrors the internal Budgets page (budgets.ts GET /): billable logged
+      // time on the linked epic's/sprint's tasks, reported separately from manual entries.
       scopes.includes('budgets:read') && (async () => {
         const { rows } = await pool.query(
           `SELECT b.id, b.name, b.target_amount, b.currency, b.period_start, b.period_end, b.status,
-                  COALESCE(SUM(be.amount), 0)::numeric AS actual_amount
+                  COALESCE(be_agg.actual_amount, 0)::numeric AS actual_amount,
+                  COALESCE(tc.time_cost, 0)::numeric         AS time_cost
            FROM budgets b
-           LEFT JOIN budget_entries be ON be.budget_id = b.id
+           LEFT JOIN (
+             SELECT budget_id, SUM(amount) AS actual_amount
+             FROM budget_entries
+             WHERE workspace_id = $1
+             GROUP BY budget_id
+           ) be_agg ON be_agg.budget_id = b.id
+           LEFT JOIN LATERAL (
+             SELECT SUM((tl.minutes / 60.0) * tl.hourly_rate) AS time_cost
+             FROM time_logs tl
+             JOIN tasks t ON t.id = tl.task_id
+             WHERE t.workspace_id = b.workspace_id
+               AND tl.billable = true
+               AND tl.hourly_rate IS NOT NULL
+               AND ((b.epic_id IS NOT NULL AND t.epic_id = b.epic_id)
+                 OR (b.sprint_id IS NOT NULL AND t.sprint_id = b.sprint_id))
+           ) tc ON (b.epic_id IS NOT NULL OR b.sprint_id IS NOT NULL)
            WHERE b.workspace_id = $1
-           GROUP BY b.id
-           ORDER BY b.created_at DESC`,
+           ORDER BY b.created_at DESC LIMIT 200`,
           [wid],
         );
         result.budgets = rows;

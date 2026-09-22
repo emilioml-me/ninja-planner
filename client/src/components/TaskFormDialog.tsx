@@ -82,6 +82,8 @@ export interface Task {
   epic_id?: string | null;
   story_points?: number | null;
   checklist?: ChecklistItem[];
+  created_at?: string;
+  updated_at?: string;
 }
 
 interface DependencyTask { id: string; dependency_id: string; title: string; status: string; priority: string; }
@@ -224,13 +226,25 @@ function ChecklistTab({
 
 // ─── Comments tab ─────────────────────────────────────────────────────────────
 
-/** Extract @word tokens from text and match against member display names */
+/**
+ * Extract @token mentions from text and match them against member display names.
+ * Tokens are unicode-aware (\p{L}/\p{N}, so "@José" works) and must EXACTLY equal one of the
+ * name's whitespace-separated parts, or the whole name with spaces removed ("@MariaLopez").
+ * Previously a prefix match on any name part meant "@a" mentioned every member whose name had
+ * a part starting with "a".
+ */
 function parseMentions(text: string, members: WorkspaceMember[]): WorkspaceMember[] {
-  const words = Array.from(text.matchAll(/@(\w+)/g)).map((m) => m[1].toLowerCase());
+  const words = Array.from(text.matchAll(/@([\p{L}\p{N}_.'-]+)/gu))
+    .map((m) => m[1].replace(/[.'-]+$/u, '').toLocaleLowerCase())
+    .filter(Boolean);
   if (!words.length) return [];
-  return members.filter((m) =>
-    words.some((w) => m.display_name.toLowerCase().split(/\s+/).some((part) => part.startsWith(w))),
-  );
+  return members.filter((m) => {
+    const name = m.display_name.trim().toLocaleLowerCase();
+    if (!name) return false;
+    const parts = name.split(/\s+/u);
+    const joined = parts.join('');
+    return words.some((w) => w === joined || parts.includes(w));
+  });
 }
 
 function CommentsTab({ task, members }: { task: Task; members: WorkspaceMember[] }) {
@@ -376,6 +390,7 @@ function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
       setAddDir(null);
       setSearch('');
     },
+    onError: (err: Error) => toast({ title: 'Failed to add dependency', description: err.message, variant: 'destructive' }),
   });
 
   const removeMutation = useMutation({
@@ -533,6 +548,7 @@ function AttachmentsTab({ task }: { task: Task }) {
   const deleteMut = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${task.id}/attachments/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'attachments'] }),
+    onError: (err: Error) => toast({ title: 'Failed to delete attachment', description: err.message, variant: 'destructive' }),
   });
 
   const handleDownload = async (att: Attachment) => {
@@ -691,12 +707,13 @@ function TimeTab({ task }: { task: Task }) {
       qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] });
       setHours(''); setMins(''); setNote(''); setBillable(false); setRate('');
     },
-    onError: () => toast({ title: 'Failed to log time', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to log time', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${task.id}/time-logs/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] }),
+    onError: (err: Error) => toast({ title: 'Failed to delete time entry', description: err.message, variant: 'destructive' }),
   });
 
   const { data: budgetEntries = [] } = useQuery<BudgetEntryOption[]>({
@@ -718,14 +735,26 @@ function TimeTab({ task }: { task: Task }) {
     return h > 0 ? `${h}h ${rem > 0 ? `${rem}m` : ''}`.trim() : `${rem}m`;
   };
 
+  // The Input `min`/`max` attributes are advisory only — they don't block a typed or pasted
+  // out-of-range value in a React-controlled input. Validate explicitly (instead of silently
+  // clamping 300h down to 240h) and use the SAME parsed values for the disabled check and submit.
+  const parsedHours = hours.trim() === '' ? 0 : Number(hours);
+  const parsedMins  = mins.trim() === '' ? 0 : Number(mins);
+  const timeError =
+    !Number.isInteger(parsedHours) || parsedHours < 0 || parsedHours > 240
+      ? 'Hours must be a whole number from 0 to 240'
+      : !Number.isInteger(parsedMins) || parsedMins < 0 || parsedMins > 59
+        ? 'Minutes must be a whole number from 0 to 59'
+        : null;
+  const totalEntered = timeError ? 0 : parsedHours * 60 + parsedMins;
+
   const handleLog = () => {
-    // The Input `min`/`max` attributes are advisory only — they don't block a typed or pasted
-    // out-of-range value in a React-controlled input — so clamp explicitly before submitting.
-    const h = Math.min(240, Math.max(0, parseInt(hours || '0', 10) || 0));
-    const m = Math.min(59, Math.max(0, parseInt(mins || '0', 10) || 0));
-    const total = h * 60 + m;
+    if (timeError) return;
+    const total = totalEntered;
     if (total < 1) return;
-    const parsedRate = rate ? Math.max(0, Number(rate)) : null;
+    // Only admins may set a custom hourly rate (the server 403s a non-null rate from members,
+    // who get the default rate).
+    const parsedRate = isAdmin && rate ? Math.max(0, Number(rate)) : null;
     addMut.mutate({
       minutes: total,
       note: note.trim() || undefined,
@@ -770,11 +799,12 @@ function TimeTab({ task }: { task: Task }) {
           />
           <Button
             type="button" size="sm" onClick={handleLog}
-            disabled={addMut.isPending || (parseInt(hours || '0') * 60 + parseInt(mins || '0')) < 1}
+            disabled={addMut.isPending || !!timeError || totalEntered < 1}
           >
             <Plus className="h-3.5 w-3.5 mr-1" /> Log
           </Button>
         </div>
+        {timeError && <p className="text-xs text-destructive">{timeError}</p>}
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <input
@@ -784,7 +814,7 @@ function TimeTab({ task }: { task: Task }) {
             />
             Billable
           </label>
-          {billable && (
+          {billable && isAdmin && (
             <Input
               type="number" min={0} max={10000} step="0.01" placeholder="Hourly rate ($)"
               value={rate} onChange={(e) => setRate(e.target.value)}
@@ -872,6 +902,7 @@ function WatchersBar({ task }: { task: Task }) {
       ? apiRequest('DELETE', `/api/tasks/${task.id}/watchers`)
       : apiRequest('POST',   `/api/tasks/${task.id}/watchers`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'watchers'] }),
+    onError: (err: Error) => toast({ title: 'Failed to update watch status', description: err.message, variant: 'destructive' }),
   });
 
   const names = watchers
@@ -918,6 +949,7 @@ export function TaskFormDialog({
   const { userId } = useAuth();
   const { apiRequest } = useApiClient();
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
+  const [activeTab, setActiveTab] = useState('details');
 
   // Load available epics and sprints for the selectors
   const { data: epics = [] } = useQuery<Epic[]>({
@@ -975,6 +1007,7 @@ export function TaskFormDialog({
         start_date: task?.start_date ? task.start_date.substring(0, 10) : '',
       });
       setChecklist(task?.checklist ?? []);
+      setActiveTab('details');
     }
   }, [open, task, defaultStatus, form]);
 
@@ -1000,8 +1033,16 @@ export function TaskFormDialog({
     });
   };
 
+  // The footer "Update Task" button sits outside the details TabsContent, so a `form=` submit
+  // did nothing when another tab was active (the <form> isn't mounted then). Submit via
+  // react-hook-form directly and jump back to the details tab if validation fails so the
+  // field errors are visible.
+  const submitEdit = form.handleSubmit(handleSubmit, () => setActiveTab('details'));
+
   // ── Edit mode: tabbed layout ────────────────────────────────────────────────
-  if (task) {
+  // Keyed on task.id, not the task object: "From template" pre-fills pass a task with id ''
+  // which must open the CREATE form (and must not fire per-task requests with an empty id).
+  if (task?.id) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="sm:max-w-[580px] flex flex-col max-h-[90vh]">
@@ -1012,7 +1053,7 @@ export function TaskFormDialog({
 
           <WatchersBar task={task} />
 
-          <Tabs defaultValue="details" className="mt-1 flex flex-col flex-1 min-h-0">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-1 flex flex-col flex-1 min-h-0">
             <TabsList className="w-full shrink-0">
               <TabsTrigger value="details" className="flex-1">Details</TabsTrigger>
               <TabsTrigger value="checklist" className="flex-1 gap-1.5">
@@ -1042,7 +1083,7 @@ export function TaskFormDialog({
             {/* ── Details tab ─────────────────────────────────────────────── */}
             <TabsContent value="details" className="mt-4">
               <Form {...form}>
-                <form id="task-edit-form" onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4 pb-2">
+                <form id="task-edit-form" onSubmit={(e) => { e.preventDefault(); void submitEdit(); }} className="space-y-4 pb-2">
                   <FormField control={form.control} name="title" render={({ field }) => (
                     <FormItem>
                       <FormLabel>Title</FormLabel>
@@ -1231,17 +1272,22 @@ export function TaskFormDialog({
             </TabsContent>
 
             {/* ── Time tab ────────────────────────────────────────────────── */}
-            <TabsContent value="time" className="mt-4">
+            {/* forceMount: TimeTab/DependenciesTab/CommentsTab keep in-progress input in local
+                state. Without forceMount, Radix unmounts inactive TabsContent panels by default,
+                so switching to another tab and back (e.g. to check the checklist mid-comment)
+                silently discarded whatever the user had typed — Radix keeps the panel in the DOM
+                and toggles the `hidden` attribute instead. */}
+            <TabsContent value="time" className="mt-4" forceMount>
               <TimeTab task={task} />
             </TabsContent>
 
             {/* ── Dependencies tab ─────────────────────────────────────────── */}
-            <TabsContent value="deps" className="mt-4">
+            <TabsContent value="deps" className="mt-4" forceMount>
               <DependenciesTab task={task} allTasks={allTasks} />
             </TabsContent>
 
             {/* ── Comments tab ────────────────────────────────────────────── */}
-            <TabsContent value="comments" className="mt-4">
+            <TabsContent value="comments" className="mt-4" forceMount>
               <CommentsTab task={task} members={members} />
             </TabsContent>
 
@@ -1270,7 +1316,7 @@ export function TaskFormDialog({
 
           <DialogFooter className="shrink-0 border-t pt-4">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" form="task-edit-form" disabled={isPending}>
+            <Button type="button" onClick={() => void submitEdit()} disabled={isPending}>
               {isPending ? 'Saving...' : 'Update Task'}
             </Button>
           </DialogFooter>

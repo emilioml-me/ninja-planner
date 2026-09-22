@@ -81,7 +81,9 @@ export async function updateEpic(
   id: string,
   workspaceId: string,
   data: Partial<Pick<Epic, 'title' | 'description' | 'status' | 'color' | 'external_ref'>>,
-): Promise<Epic | null> {
+): Promise<(Epic & { prev_status: string }) | null> {
+  // prev_status is the status immediately before this update, read under a row lock in the
+  // same statement, so callers fire epic.completed only on a real transition.
   const fields: string[] = ['updated_at = now()'];
   const values: unknown[] = [];
   let i = 1;
@@ -92,9 +94,14 @@ export async function updateEpic(
     }
   }
   values.push(id, workspaceId);
-  const result = await pool.query<Epic>(
-    `UPDATE epics SET ${fields.join(', ')}
-     WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
+  const result = await pool.query<Epic & { prev_status: string }>(
+    `WITH prev AS (
+       SELECT id, status FROM epics WHERE id = $${i++} AND workspace_id = $${i} FOR UPDATE
+     )
+     UPDATE epics e SET ${fields.join(', ')}
+     FROM prev
+     WHERE e.id = prev.id
+     RETURNING e.*, prev.status AS prev_status`,
     values,
   );
   return result.rows[0] ?? null;

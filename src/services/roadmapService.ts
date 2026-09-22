@@ -82,11 +82,15 @@ export async function createRoadmapItem(
 
 const ROADMAP_UPDATABLE_COLUMNS = new Set(['title', 'description', 'phase', 'status', 'priority', 'external_ref']);
 
+/**
+ * Also returns the item's status immediately before this update (`prev_status`, read under a
+ * row lock in the same statement) so callers can fire side effects only on a real transition.
+ */
 export async function updateRoadmapItem(
   id: string,
   workspaceId: string,
   data: Partial<Pick<RoadmapItem, 'title' | 'description' | 'phase' | 'status' | 'priority' | 'external_ref'>>,
-): Promise<RoadmapItem | null> {
+): Promise<(RoadmapItem & { prev_status: string }) | null> {
   const fields: string[] = [];
   const values: unknown[] = [];
   let i = 1;
@@ -100,17 +104,42 @@ export async function updateRoadmapItem(
   if (fields.length === 0) return null;
 
   values.push(id, workspaceId);
-  const result = await pool.query<RoadmapItem>(
-    `UPDATE roadmap_items SET ${fields.join(', ')} WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
+  const result = await pool.query<RoadmapItem & { prev_status: string }>(
+    `WITH prev AS (
+       SELECT id, status FROM roadmap_items WHERE id = $${i++} AND workspace_id = $${i} FOR UPDATE
+     )
+     UPDATE roadmap_items ri SET ${fields.join(', ')}
+     FROM prev
+     WHERE ri.id = prev.id
+     RETURNING ri.*, prev.status AS prev_status`,
     values,
   );
   return result.rows[0] ?? null;
 }
 
 export async function deleteRoadmapItem(id: string, workspaceId: string): Promise<boolean> {
-  const result = await pool.query(
-    'DELETE FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
-    [id, workspaceId],
-  );
-  return (result.rowCount ?? 0) > 0;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'DELETE FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
+      [id, workspaceId],
+    );
+    // goal_links is polymorphic (entity_type: 'task' | 'roadmap_item') so it has no FK to
+    // roadmap_items — deleting the item without this left a permanent orphaned link row,
+    // returned forever by GET /api/goals/:id/links and rendered as a dead link by any consumer.
+    if ((result.rowCount ?? 0) > 0) {
+      await client.query(
+        `DELETE FROM goal_links WHERE entity_type = 'roadmap_item' AND entity_id = $1 AND workspace_id = $2`,
+        [id, workspaceId],
+      );
+    }
+    await client.query('COMMIT');
+    return (result.rowCount ?? 0) > 0;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }

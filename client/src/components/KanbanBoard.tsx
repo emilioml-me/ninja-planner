@@ -47,6 +47,11 @@ interface KanbanBoardProps {
   ) => void;
   onDeleteCard?: (cardId: string) => void;
   members?: WorkspaceMember[];
+  /**
+   * Unfiltered column contents. Pass this when `columns` is a filtered view so drag-and-drop
+   * positions are computed relative to every card in the column, not just the visible ones.
+   */
+  allColumns?: KanbanColumnData[];
 }
 
 const BASE_POSITION = 1024;
@@ -60,6 +65,7 @@ export function KanbanBoard({
   onReorder,
   onDeleteCard,
   members = [],
+  allColumns,
 }: KanbanBoardProps) {
   const [activeCard, setActiveCard] = useState<KanbanCard | null>(null);
 
@@ -82,66 +88,83 @@ export function KanbanBoard({
     if (!over || !onReorder || over.id === active.id) return;
 
     const cardId = active.id as string;
-    let targetColumnId = over.id as string;
+    const overId = over.id as string;
 
-    for (const col of columns) {
-      if (col.cards.some((c) => c.id === over.id)) {
-        targetColumnId = col.id;
-        break;
-      }
-    }
+    // Positions must be computed against the FULL (unfiltered) column lists — when the page
+    // filters cards (search/priority), computing neighbours from only the visible subset wrote
+    // positions that collided with / jumped over hidden cards and corrupted the column order.
+    const layout = allColumns ?? columns;
 
-    const targetColumn = columns.find((c) => c.id === targetColumnId);
-    const sourceColumn = columns.find((c) => c.cards.some((card) => card.id === cardId));
+    const sourceColumn = layout.find((c) => c.cards.some((card) => card.id === cardId));
+    const targetColumn =
+      layout.find((c) => c.id === overId) ??
+      layout.find((c) => c.cards.some((card) => card.id === overId));
     if (!targetColumn || !sourceColumn) return;
 
     const draggedCard = sourceColumn.cards.find((c) => c.id === cardId);
     if (!draggedCard) return;
 
-    const sortedTarget = [...targetColumn.cards]
-      .filter((c) => c.id !== cardId)
-      .sort((a, b) => a.position - b.position);
+    const byPosition = (a: KanbanCard, b: KanbanCard) => a.position - b.position;
+    const sameColumn = sourceColumn.id === targetColumn.id;
+    const fullTarget = [...targetColumn.cards].sort(byPosition);
+    // Target list WITH the dragged card removed — insertion indexes refer to this list.
+    const sortedTarget = fullTarget.filter((c) => c.id !== cardId);
+    const originalIndex = sameColumn ? fullTarget.findIndex((c) => c.id === cardId) : -1;
 
-    let targetIndex: number;
-    let newPosition: number;
-
-    if (over.id === targetColumnId) {
-      targetIndex = sortedTarget.length;
-      const maxPos = sortedTarget.length > 0 ? Math.max(...sortedTarget.map((c) => c.position)) : 0;
-      newPosition = maxPos + BASE_POSITION;
+    let insertIndex: number;
+    if (overId === targetColumn.id) {
+      // Dropped on the column body (empty area) — append at the end.
+      insertIndex = sortedTarget.length;
     } else {
-      const overCard = targetColumn.cards.find((c) => c.id === over.id);
-      if (!overCard || overCard.id === cardId) return;
-      targetIndex = sortedTarget.indexOf(overCard);
-      if (targetIndex === -1) return;
-
-      if (targetIndex === 0) {
-        newPosition = overCard.position >= MIN_BASE ? Math.floor(overCard.position / 2) : 0;
+      const overIndex = sortedTarget.findIndex((c) => c.id === overId);
+      if (overIndex === -1) return;
+      let placeAfter: boolean;
+      if (sameColumn) {
+        // Moving DOWN within a column: the sortable preview shows the card taking the over
+        // card's slot, i.e. landing AFTER it. Previously it was always inserted before the over
+        // card, so downward drops landed one slot short and "move down by one" was a no-op.
+        placeAfter = originalIndex < fullTarget.findIndex((c) => c.id === overId);
       } else {
-        const prevCard = sortedTarget[targetIndex - 1];
-        const gap = overCard.position - prevCard.position;
-        newPosition = gap >= MIN_GAP ? Math.floor((prevCard.position + overCard.position) / 2) : 0;
+        // Cross-column: place after the over card when the dragged card's centre is below the
+        // over card's centre.
+        const translated = active.rect.current.translated;
+        placeAfter = translated
+          ? translated.top + translated.height / 2 > over.rect.top + over.rect.height / 2
+          : false;
       }
+      insertIndex = placeAfter ? overIndex + 1 : overIndex;
     }
 
-    const needsResequence =
-      newPosition < MIN_BASE ||
-      (targetIndex > 0 &&
-        targetIndex < sortedTarget.length &&
-        sortedTarget[targetIndex].position - sortedTarget[targetIndex - 1].position < MIN_GAP);
+    // Same slot as before — nothing to do.
+    if (sameColumn && insertIndex === originalIndex) return;
+
+    const prevCard = insertIndex > 0 ? sortedTarget[insertIndex - 1] : undefined;
+    const nextCard = insertIndex < sortedTarget.length ? sortedTarget[insertIndex] : undefined;
+
+    let newPosition: number;
+    let needsResequence = false;
+    if (!prevCard && !nextCard) {
+      newPosition = BASE_POSITION;
+    } else if (!prevCard) {
+      newPosition = Math.floor(nextCard!.position / 2);
+      needsResequence = nextCard!.position < MIN_BASE;
+    } else if (!nextCard) {
+      newPosition = prevCard.position + BASE_POSITION;
+    } else {
+      const gap = nextCard.position - prevCard.position;
+      newPosition = Math.floor((prevCard.position + nextCard.position) / 2);
+      needsResequence = gap < MIN_GAP;
+    }
 
     let resequenceData: Array<{ id: string; position: number }> | undefined;
-
     if (needsResequence) {
       const reordered = [...sortedTarget];
-      reordered.splice(targetIndex, 0, draggedCard);
+      reordered.splice(insertIndex, 0, draggedCard);
       resequenceData = reordered.map((card, i) => ({ id: card.id, position: (i + 1) * BASE_POSITION }));
-      newPosition = (targetIndex + 1) * BASE_POSITION;
+      newPosition = (insertIndex + 1) * BASE_POSITION;
     }
 
-    if (targetColumnId !== sourceColumn.id || newPosition !== draggedCard.position) {
-      onReorder(cardId, targetColumnId, newPosition, resequenceData);
-    }
+    onReorder(cardId, targetColumn.id, newPosition, resequenceData);
   };
 
   return (

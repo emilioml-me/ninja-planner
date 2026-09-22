@@ -19,7 +19,9 @@ type FormFieldContextValue<
   TName extends FieldPath<TFieldValues> = FieldPath<TFieldValues>,
 > = { name: TName };
 
-const FormFieldContext = React.createContext<FormFieldContextValue>({} as FormFieldContextValue);
+// Default undefined (not {}) so using a form control outside <FormField> actually hits the
+// guard in useFormField instead of silently reading an undefined field name.
+const FormFieldContext = React.createContext<FormFieldContextValue | undefined>(undefined);
 
 const FormField = <
   TFieldValues extends FieldValues = FieldValues,
@@ -36,11 +38,11 @@ const useFormField = () => {
   const fieldContext = React.useContext(FormFieldContext);
   const itemContext = React.useContext(FormItemContext);
   const { getFieldState, formState } = useFormContext();
-  const fieldState = getFieldState(fieldContext.name, formState);
 
   if (!fieldContext) throw new Error('useFormField should be used within <FormField>');
 
-  const { id } = itemContext;
+  const fieldState = getFieldState(fieldContext.name, formState);
+  const id = itemContext?.id ?? String(fieldContext.name);
   return {
     id,
     name: fieldContext.name,
@@ -52,7 +54,7 @@ const useFormField = () => {
 };
 
 type FormItemContextValue = { id: string };
-const FormItemContext = React.createContext<FormItemContextValue>({} as FormItemContextValue);
+const FormItemContext = React.createContext<FormItemContextValue | undefined>(undefined);
 
 const FormItem = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => {

@@ -7,11 +7,11 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useApiClient } from '@/lib/api';
+import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
 
 interface SubscriptionStatus {
   active: boolean;
   plan: string | null;
-  code: string | null;
   expiresAt: string | null;
   adminOverride: boolean;
   reason?: string;
@@ -21,6 +21,9 @@ export default function Billing() {
   const { apiRequest } = useApiClient();
   const queryClient = useQueryClient();
   const [code, setCode] = useState('');
+  // Activation is admin-only on the server (403 otherwise) — don't offer the form to members.
+  const isAdmin = useIsAdmin();
+  const isAdminLoaded = useIsAdminLoaded();
 
   const { data: status, isLoading } = useQuery<SubscriptionStatus>({
     queryKey: ['/api/ninja-stack/status'],
@@ -35,7 +38,7 @@ export default function Billing() {
     },
   });
 
-  if (isLoading) {
+  if (isLoading || !isAdminLoaded) {
     return (
       <div className="p-6 max-w-xl">
         <div className="h-8 w-48 bg-muted rounded animate-pulse mb-4" />
@@ -91,8 +94,14 @@ export default function Billing() {
         )}
       </Card>
 
+      {!isAdmin && (!isActive || isExpired) && (
+        <p className="text-sm text-muted-foreground">
+          Ask a workspace admin to {isExpired ? 'renew' : 'activate'} the subscription.
+        </p>
+      )}
+
       {/* Activate / renew form */}
-      {(!isActive || isExpired) && (
+      {isAdmin && (!isActive || isExpired) && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">{isExpired ? 'Renew subscription' : 'Activate subscription'}</CardTitle>
@@ -144,7 +153,7 @@ export default function Billing() {
       )}
 
       {/* Already active: show code renewal option */}
-      {isActive && !isOverride && (
+      {isAdmin && isActive && !isOverride && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Update subscription code</CardTitle>

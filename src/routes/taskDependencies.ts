@@ -57,7 +57,8 @@ router.post('/', async (req, res, next) => {
 // DELETE /api/tasks/:taskId/dependencies/:id
 router.delete('/:id', async (req, res, next) => {
   try {
-    const removed = await removeDependency(req.params.id, req.workspace.id);
+    const { taskId } = req.params as Record<string, string>;
+    const removed = await removeDependency(req.params.id, req.workspace.id, taskId);
     if (!removed) {
       res.status(404).json({ error: 'Dependency not found' });
       return;

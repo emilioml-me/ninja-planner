@@ -1,7 +1,7 @@
-// GET /api/docs — Swagger UI (development only)
-// GET /api/docs/openapi.yaml — raw spec (always available)
+// GET /api/docs — Swagger UI (public, mounted before requireAuth in app.ts)
+// GET /api/docs/openapi.json — raw spec as JSON (public)
 import { Router }      from 'express';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import swaggerUi        from 'swagger-ui-express';
@@ -11,7 +11,10 @@ const router = Router();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Raw spec (JSON) ────────────────────────────────────────────────────────
-const specPath = join(__dirname, '../../openapi.yaml');
+// Dev (tsx): src/routes -> ../../openapi.yaml. Prod bundle: dist/index.js -> ../openapi.yaml (/app/openapi.yaml).
+const specPath =
+  [join(__dirname, '../../openapi.yaml'), join(__dirname, '../openapi.yaml'), join(process.cwd(), 'openapi.yaml')]
+    .find((p) => existsSync(p)) ?? join(process.cwd(), 'openapi.yaml');
 let spec: Record<string, unknown> | null = null;
 
 function loadSpec(): Record<string, unknown> {

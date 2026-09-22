@@ -13,8 +13,8 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Gauge, Pencil, Check, X } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Gauge, Pencil, Check, X, AlertTriangle } from 'lucide-react';
+import { cn, safeFormat } from '@/lib/utils';
 import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -116,6 +116,7 @@ function TimeReportTab() {
       hourly_rate: number | null; user_clerk_id: string; sprint_name: string | null; logged_at: string;
     }[];
     summary: { total_minutes: number; billable_minutes: number; billable_value: number };
+    truncated?: boolean;
   }>({
     queryKey: ['analytics', 'time-report', from, to],
     queryFn: () => {
@@ -128,6 +129,8 @@ function TimeReportTab() {
 
   const rows = data?.rows ?? [];
   const summary = data?.summary ?? { total_minutes: 0, billable_minutes: 0, billable_value: 0 };
+  const truncated = data?.truncated ?? false;
+  const rangeInvalid = !!from && !!to && from > to;
   const fmtHours = (m: number) => `${Math.floor(m / 60)}h ${m % 60}m`;
 
   return (
@@ -138,10 +141,24 @@ function TimeReportTab() {
             <label className="text-xs text-muted-foreground">{label as string}</label>
             <input type="date" value={val as string}
               onChange={(e) => (setter as (v: string) => void)(e.target.value)}
-              className="border rounded px-2 py-1 text-sm" />
+              className="border border-input rounded px-2 py-1 text-sm bg-background text-foreground" />
           </div>
         ))}
+        {(from || to) && (
+          <Button variant="ghost" size="sm" className="h-8" onClick={() => { setFrom(''); setTo(''); }}>
+            Clear
+          </Button>
+        )}
       </div>
+      {rangeInvalid && (
+        <p className="text-xs text-destructive">"From" must be on or before "To".</p>
+      )}
+      {truncated && (
+        <p className="flex items-center gap-1.5 text-xs text-yellow-700 dark:text-yellow-400">
+          <AlertTriangle className="h-3.5 w-3.5" />
+          Only the 1000 most recent entries are listed below; the totals include every entry in the range.
+        </p>
+      )}
 
       {isLoading ? (
         <Skeleton className="h-40 w-full" />
@@ -193,7 +210,7 @@ function TimeReportTab() {
                           )}
                         </td>
                         <td className="py-2 text-muted-foreground text-xs">
-                          {new Date(r.logged_at).toLocaleDateString()}
+                          {safeFormat(r.logged_at, 'MMM d, yyyy')}
                         </td>
                       </tr>
                     ))}
@@ -303,6 +320,18 @@ interface CapacityRow {
   assigned_points: number;
   task_count: number;
   capacity_points: number;
+  /** True when capacity_points comes from a per-sprint override (then sprint_id is set). */
+  is_override?: boolean;
+  sprint_id?: string | null;
+}
+
+const MAX_CAPACITY = 500;
+
+/** Parses the capacity input; null when it isn't a whole number in 0..MAX_CAPACITY. */
+function parseCapacity(val: string): number | null {
+  if (!/^\d+$/.test(val.trim())) return null;
+  const n = Number(val);
+  return n <= MAX_CAPACITY ? n : null;
 }
 
 function CapacityEditor({
@@ -310,6 +339,12 @@ function CapacityEditor({
 }: { current: number; onSave: (pts: number) => void }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(String(current));
+  const parsed = parseCapacity(val);
+  const save = () => {
+    if (parsed === null) return;
+    onSave(parsed);
+    setEditing(false);
+  };
 
   if (!editing) {
     return (
@@ -324,18 +359,19 @@ function CapacityEditor({
   return (
     <div className="flex items-center gap-1">
       <Input
-        type="number" min={0} max={500}
+        type="number" min={0} max={MAX_CAPACITY}
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        className="h-6 w-20 text-xs"
+        className={cn('h-6 w-20 text-xs', parsed === null && 'border-destructive')}
+        title={parsed === null ? `Enter a whole number from 0 to ${MAX_CAPACITY}` : undefined}
         autoFocus
         onKeyDown={(e) => {
-          if (e.key === 'Enter') { onSave(Math.max(0, parseInt(val) || 0)); setEditing(false); }
+          if (e.key === 'Enter') save();
           if (e.key === 'Escape') setEditing(false);
         }}
       />
-      <Button size="icon" variant="ghost" className="h-6 w-6"
-        onClick={() => { onSave(Math.max(0, parseInt(val) || 0)); setEditing(false); }}>
+      <Button size="icon" variant="ghost" className="h-6 w-6" disabled={parsed === null}
+        onClick={save}>
         <Check className="h-3 w-3 text-green-600" />
       </Button>
       <Button size="icon" variant="ghost" className="h-6 w-6"
@@ -361,23 +397,29 @@ function CapacityTab() {
     staleTime: 60_000,
   });
 
-  const capacityQueryKey = ['/api/tasks/capacity', sprintId || 'active'];
+  // Under the ['/api/tasks', ...] prefix so task mutations refresh it too.
+  const capacityQueryKey = ['/api/tasks', 'capacity', sprintId || 'active'];
   const { data: capacityRows = [], isLoading: capLoading } = useQuery<CapacityRow[]>({
     queryKey: capacityQueryKey,
     queryFn: () => apiRequest('GET', `/api/tasks/capacity${sprintId ? `?sprint_id=${sprintId}` : ''}`),
     staleTime: 60_000,
   });
 
+  // Edit the value being DISPLAYED: with a sprint selected that's the sprint override; on the
+  // "Active sprint" view it's the active sprint's override when one exists (row.is_override),
+  // otherwise the member's workspace default. Previously the active view always wrote the
+  // default, so editing a value that came from an override appeared to do nothing.
   const saveCapacity = useMutation({
-    mutationFn: ({ memberId, pts }: { memberId: string; pts: number }) =>
+    mutationFn: ({ memberId, pts, overrideSprintId }: { memberId: string; pts: number; overrideSprintId: string | null }) =>
       apiRequest('PUT', `/api/tasks/capacity/${memberId}`, {
-        capacity_points: pts,
-        ...(sprintId ? { sprint_id: sprintId } : {}),
+        capacity_points: Math.min(MAX_CAPACITY, Math.max(0, pts)),
+        ...(overrideSprintId ? { sprint_id: overrideSprintId } : {}),
       }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['/api/tasks/capacity'] });
-      toast({ title: sprintId ? 'Capacity override set for this sprint' : 'Default capacity updated' });
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['/api/tasks', 'capacity'] });
+      toast({ title: vars.overrideSprintId ? 'Capacity override set for this sprint' : 'Default capacity updated' });
     },
+    onError: (err: Error) => toast({ title: 'Failed to update capacity', description: err.message, variant: 'destructive' }),
   });
 
   const memberMap = Object.fromEntries(members.map((m) => [m.clerk_user_id, m]));
@@ -416,14 +458,17 @@ function CapacityTab() {
       ) : capacityRows.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <Gauge className="h-10 w-10 text-muted-foreground/30 mb-3" />
-          <p className="text-sm font-medium">No active sprint assignments</p>
-          <p className="text-xs text-muted-foreground mt-1">Assign tasks with story points to an active sprint to see capacity.</p>
+          <p className="text-sm font-medium">No {sprintId ? 'assignments in this sprint' : 'active sprint assignments'}</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Assign tasks with story points to {sprintId ? 'this' : 'an active'} sprint to see capacity.
+          </p>
         </div>
       ) : (
         <div className="space-y-4">
           {capacityRows.map((row) => {
             const member = memberMap[row.user_clerk_id];
-            const displayName = member?.display_name ?? row.user_clerk_id.slice(-8);
+            const displayName = member?.display_name ?? 'Former member';
+            const overrideSprintId = sprintId || (row.is_override ? row.sprint_id ?? null : null);
             const initials = displayName.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
             const pct = row.capacity_points > 0
               ? Math.min(Math.round((row.assigned_points / row.capacity_points) * 100), 100)
@@ -446,12 +491,17 @@ function CapacityTab() {
                         </span>
                       </div>
                       {isAdmin ? (
-                        <CapacityEditor
-                          current={row.capacity_points}
-                          onSave={(pts) => saveCapacity.mutate({ memberId: row.user_clerk_id, pts })}
-                        />
+                        <div className="flex items-center gap-2">
+                          <CapacityEditor
+                            current={row.capacity_points}
+                            onSave={(pts) => saveCapacity.mutate({ memberId: row.user_clerk_id, pts, overrideSprintId })}
+                          />
+                          {row.is_override && <span className="text-[10px] text-muted-foreground">(sprint override)</span>}
+                        </div>
                       ) : (
-                        <span className="text-xs text-muted-foreground">{row.capacity_points} pts capacity</span>
+                        <span className="text-xs text-muted-foreground">
+                          {row.capacity_points} pts capacity{row.is_override ? ' (sprint override)' : ''}
+                        </span>
                       )}
                     </div>
                   </div>
@@ -461,7 +511,9 @@ function CapacityTab() {
                       style={{ width: `${pct}%` }}
                     />
                   </div>
-                  <p className="text-xs text-muted-foreground">{row.task_count} task{row.task_count !== 1 ? 's' : ''} in active sprint</p>
+                  <p className="text-xs text-muted-foreground">
+                    {row.task_count} task{row.task_count !== 1 ? 's' : ''} in {sprintId ? 'selected' : 'active'} sprint
+                  </p>
                 </CardContent>
               </Card>
             );

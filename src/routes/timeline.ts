@@ -30,10 +30,17 @@ interface TimelineSprint {
   end_date: string | null;
 }
 
+const TASK_CAP = 500;
+
 // GET /api/timeline — tasks with at least one date, plus sprints
 router.get('/', async (req, res, next) => {
   try {
-    const tasksResult = await pool.query<TimelineTask>(
+    // Capped at TASK_CAP rows. The cap used to be applied after ORDER BY date ASC, which kept the
+    // OLDEST tasks and silently dropped current/future work once a workspace had enough history.
+    // Instead keep the TASK_CAP tasks whose date range is closest to today (distance 0 when the
+    // range spans today), then return them in chronological order. One extra row is fetched
+    // only to detect truncation exactly.
+    const tasksResult = await pool.query<TimelineTask & { sort_date: string }>(
       `SELECT
          t.id, t.title, t.status, t.priority,
          t.start_date::text, t.due_date::text,
@@ -41,7 +48,8 @@ router.get('/', async (req, res, next) => {
          wm.display_name                   AS assignee_name,
          sp.name                           AS sprint_name,
          e.title                           AS epic_title,
-         e.color                           AS epic_color
+         e.color                           AS epic_color,
+         COALESCE(t.start_date, t.due_date)::text AS sort_date
        FROM tasks t
        LEFT JOIN workspace_members wm ON wm.clerk_user_id = t.assignee_clerk_id AND wm.workspace_id = t.workspace_id
        LEFT JOIN sprints sp            ON sp.id = t.sprint_id
@@ -49,10 +57,25 @@ router.get('/', async (req, res, next) => {
        WHERE t.workspace_id = $1
          AND t.deleted_at IS NULL
          AND (t.start_date IS NOT NULL OR t.due_date IS NOT NULL)
-       ORDER BY COALESCE(t.start_date, t.due_date) ASC
-       LIMIT 500`,
-      [req.workspace.id],
+       ORDER BY
+         CASE
+           WHEN COALESCE(t.due_date, t.start_date) < CURRENT_DATE
+             THEN CURRENT_DATE - COALESCE(t.due_date, t.start_date)
+           WHEN COALESCE(t.start_date, t.due_date) > CURRENT_DATE
+             THEN COALESCE(t.start_date, t.due_date) - CURRENT_DATE
+           ELSE 0
+         END ASC,
+         t.id
+       LIMIT $2`,
+      [req.workspace.id, TASK_CAP + 1],
     );
+    const truncated = tasksResult.rows.length > TASK_CAP;
+    // Drop the farthest-from-today extra row (rows are in distance order), then re-sort
+    // chronologically for the chart.
+    const tasks = tasksResult.rows
+      .slice(0, TASK_CAP)
+      .sort((a, b) => (a.sort_date < b.sort_date ? -1 : a.sort_date > b.sort_date ? 1 : a.id.localeCompare(b.id)))
+      .map(({ sort_date: _sortDate, ...t }) => t);
 
     const sprintsResult = await pool.query<TimelineSprint>(
       `SELECT id, name, status, start_date::text, end_date::text
@@ -64,9 +87,9 @@ router.get('/', async (req, res, next) => {
     );
 
     res.json({
-      tasks:     tasksResult.rows,
+      tasks,
       sprints:   sprintsResult.rows,
-      truncated: tasksResult.rows.length === 500,  // M4: signal to UI if results were capped
+      truncated,  // M4: signal to UI that tasks far from today were left out
     });
   } catch (err) { next(err); }
 });

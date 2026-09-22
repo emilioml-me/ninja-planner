@@ -142,14 +142,16 @@ export default function Roadmap() {
     setOpen(true);
   };
 
+  type ItemPayload = Omit<FormData, 'external_ref'> & { external_ref?: string | null };
+
   const createMut = useMutation({
-    mutationFn: (d: FormData) => apiRequest('POST', '/api/roadmap', d),
+    mutationFn: (d: ItemPayload) => apiRequest('POST', '/api/roadmap', d),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/roadmap'] }); setOpen(false); toast({ title: 'Item created' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
   const updateMut = useMutation({
-    mutationFn: (d: FormData) => apiRequest('PATCH', `/api/roadmap/${editing!.id}`, d),
+    mutationFn: (d: ItemPayload) => apiRequest('PATCH', `/api/roadmap/${editing!.id}`, d),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/roadmap'] }); setOpen(false); setEditing(null); toast({ title: 'Item updated' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
@@ -218,17 +220,20 @@ export default function Roadmap() {
   };
 
   const handleSubmit = (d: FormData) => {
-    // Strip empty external_ref — backend rejects empty string as invalid URL
-    const payload: FormData = { ...d, external_ref: d.external_ref || undefined };
-    editing ? updateMut.mutate(payload) : createMut.mutate(payload);
+    // Backend rejects '' as an invalid URL. On edit a cleared link must be sent as null —
+    // undefined means "unchanged" on PATCH, so the old link would silently persist.
+    if (editing) updateMut.mutate({ ...d, external_ref: d.external_ref || null });
+    else createMut.mutate({ ...d, external_ref: d.external_ref || undefined });
   };
 
   const openShare = async () => {
     try {
       const existing = await apiRequest<{ token: string | null }>('GET', '/api/roadmap/share');
       setShareToken(existing.token);
-    } catch {}
-    setShareOpen(true);
+      setShareOpen(true);
+    } catch (e: unknown) {
+      toast({ title: 'Could not load share link', description: (e as Error).message, variant: 'destructive' });
+    }
   };
 
   const createShareLink = async () => {
@@ -245,14 +250,21 @@ export default function Roadmap() {
       await apiRequest('DELETE', '/api/roadmap/share');
       setShareToken(null);
       toast({ title: 'Share link revoked' });
-    } catch {}
+    } catch (e: unknown) {
+      toast({ title: 'Failed to revoke share link', description: (e as Error).message, variant: 'destructive' });
+    }
   };
 
-  const copyShareLink = () => {
+  const copyShareLink = async () => {
     if (!shareToken) return;
     const url = `${window.location.origin}/r/${shareToken}`;
-    navigator.clipboard.writeText(url);
-    toast({ title: 'Link copied!' });
+    // writeText rejects without a secure context / permission — don't claim success then.
+    try {
+      await navigator.clipboard.writeText(url);
+      toast({ title: 'Link copied!' });
+    } catch {
+      toast({ title: 'Could not copy link', description: 'Select the link and copy it manually.', variant: 'destructive' });
+    }
   };
 
   const allPhases = [...new Set(items.map((i) => i.phase).filter(Boolean))] as string[];
@@ -356,9 +368,11 @@ export default function Roadmap() {
                       <h3 className="font-semibold text-sm">{cfg.label}</h3>
                       <Badge variant={cfg.badge} className="text-xs">{col.length}</Badge>
                     </div>
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openCreate(status)}>
-                      <Plus className="h-3 w-3" />
-                    </Button>
+                    {isAdmin && (
+                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openCreate(status)}>
+                        <Plus className="h-3 w-3" />
+                      </Button>
+                    )}
                   </div>
 
                   <DndContext
@@ -374,13 +388,14 @@ export default function Roadmap() {
                             key={item.id}
                             item={item}
                             cfg={cfg}
+                            canDrag={isAdmin}
                             onEdit={isAdmin ? openEdit : undefined}
-                            onDelete={isAdmin ? (id) => deleteMut.mutate(id) : undefined}
+                            onDelete={isAdmin ? (id) => { if (confirm(`Delete "${item.title}"?`)) deleteMut.mutate(id); } : undefined}
                             onLinkTasks={setLinkTaskItem}
                             onCheckGithub={isAdmin ? (id) => checkGithubMut.mutate(id) : undefined}
                           />
                         ))}
-                        {col.length === 0 && (
+                        {col.length === 0 && isAdmin && (
                           <button
                             className="w-full rounded-lg border border-dashed border-muted-foreground/30 p-4 text-sm text-muted-foreground hover:border-muted-foreground/60 transition-colors"
                             onClick={() => openCreate(status)}
@@ -541,6 +556,7 @@ interface CardCfg {
 function SortableRoadmapCard({
   item,
   cfg,
+  canDrag,
   onEdit,
   onDelete,
   onLinkTasks,
@@ -548,12 +564,15 @@ function SortableRoadmapCard({
 }: {
   item: RoadmapItem;
   cfg: CardCfg;
+  canDrag: boolean;
   onEdit?: (item: RoadmapItem) => void;
   onDelete?: (id: string) => void;
   onLinkTasks: (item: RoadmapItem) => void;
   onCheckGithub?: (id: string) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
+  // Reordering is requireAdmin server-side — non-admins can't drag (the optimistic move would
+  // just be rolled back by a 403).
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id, disabled: !canDrag });
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -565,7 +584,7 @@ function SortableRoadmapCard({
       <RoadmapCardContent
         item={item}
         cfg={cfg}
-        dragHandleProps={{ ...attributes, ...listeners }}
+        dragHandleProps={canDrag ? { ...attributes, ...listeners } : undefined}
         onEdit={onEdit}
         onDelete={onDelete}
         onLinkTasks={onLinkTasks}
@@ -606,7 +625,7 @@ function RoadmapCardContent({
       <CardHeader className="p-3 pb-1">
         <div className="flex items-start justify-between gap-2">
           <div
-            className="cursor-grab active:cursor-grabbing touch-none flex-1"
+            className={cn('flex-1', dragHandleProps && 'cursor-grab active:cursor-grabbing touch-none')}
             {...dragHandleProps}
           >
             <CardTitle className="text-sm font-medium leading-snug">{item.title}</CardTitle>

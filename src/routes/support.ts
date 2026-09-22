@@ -72,8 +72,12 @@ router.post('/ticket', async (req, res, next) => {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({})) as { error?: string };
-      // H5: Normalize desk-ninja 5xx to 502 — don't leak internal topology to clients
-      const forwardStatus = response.status >= 500 ? 502 : response.status;
+      // H5: Normalize desk-ninja 5xx to 502 — don't leak internal topology to clients.
+      // L28: 401/403 from desk-ninja mean OUR service API key is bad/revoked — that's an upstream
+      // configuration failure, not the end user's auth problem (a forwarded 401 would also make
+      // the client think its own session expired), so it's a 502 too.
+      const upstreamAuthFailure = response.status === 401 || response.status === 403;
+      const forwardStatus = response.status >= 500 || upstreamAuthFailure ? 502 : response.status;
       return res.status(forwardStatus).json({ error: forwardStatus === 502 ? 'Support service error. Please try again.' : (err.error ?? 'Failed to create support ticket.') });
     }
 

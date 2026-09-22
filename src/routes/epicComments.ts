@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
-import { getEpicComments, createEpicComment, deleteEpicComment } from '../services/commentService.js';
+import { getEpicComments, createEpicComment } from '../services/commentService.js';
 import { createNotification } from '../services/notificationService.js';
 import { pool } from '../config/db.js';
 
@@ -9,7 +9,8 @@ const router = Router({ mergeParams: true }); // inherit :epicId from parent
 router.use(requireWorkspace);
 
 const createSchema = z.object({
-  body: z.string().min(1).max(5000),
+  // trim first so a whitespace-only comment is rejected rather than stored as a blank comment
+  body: z.string().trim().min(1).max(5000),
 });
 
 // GET /api/epics/:epicId/comments
@@ -64,8 +65,19 @@ router.post('/', async (req, res, next) => {
 // DELETE /api/epics/:epicId/comments/:commentId
 router.delete('/:commentId', async (req, res, next) => {
   try {
-    const deleted = await deleteEpicComment(req.params.commentId, req.auth.userId, req.workspace.id);
-    if (!deleted) {
+    // Matches the :epicId in the URL too (commentService.deleteEpicComment only checks the
+    // comment id + workspace), so the route can't delete a comment belonging to another epic.
+    const result = await pool.query(
+      `DELETE FROM epic_comments ec
+       USING epics e
+       WHERE ec.id = $1
+         AND ec.epic_id = $2
+         AND ec.author_clerk_id = $3
+         AND e.id = ec.epic_id
+         AND e.workspace_id = $4`,
+      [req.params.commentId, (req.params as Record<string, string>).epicId, req.auth.userId, req.workspace.id],
+    );
+    if ((result.rowCount ?? 0) === 0) {
       res.status(404).json({ error: 'Comment not found' });
       return;
     }

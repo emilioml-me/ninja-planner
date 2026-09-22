@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
+import { todayLocal, safeFormat } from '@/lib/utils';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -24,11 +25,19 @@ interface UseTemplateForm {
   onDone: () => void;
 }
 
+/** YYYY-MM-DD + n days, computed on the calendar date (no UTC/local shift). */
+function addDays(dateStr: string, n: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + n);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
 function UseTemplateDialog({ template, onDone }: UseTemplateForm) {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
-  const today = new Date().toISOString().split('T')[0];
+  // Local date — toISOString() is UTC and gives tomorrow for evening users west of UTC.
+  const today = todayLocal();
 
   const [name,      setName]      = useState(template.name);
   const [startDate, setStartDate] = useState(today);
@@ -37,11 +46,12 @@ function UseTemplateDialog({ template, onDone }: UseTemplateForm) {
     mutationFn: (data: { name: string; start_date: string }) =>
       apiRequest('POST', `/api/sprint-templates/${template.id}/use`, data),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['sprints'] });
+      // The Sprints page caches under ['/api/sprints'] (the old ['sprints'] key matched nothing).
+      qc.invalidateQueries({ queryKey: ['/api/sprints'] });
       toast({ title: 'Sprint created from template' });
       onDone();
     },
-    onError: () => toast({ title: 'Failed to create sprint', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create sprint', description: err.message, variant: 'destructive' }),
   });
 
   return (
@@ -53,19 +63,18 @@ function UseTemplateDialog({ template, onDone }: UseTemplateForm) {
       <div>
         <label className="text-sm font-medium">Start date</label>
         <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="mt-1" />
-        <p className="text-xs text-muted-foreground mt-1">
-          End date: {(() => {
-            const end = new Date(startDate);
-            end.setDate(end.getDate() + template.duration_days);
-            return end.toLocaleDateString();
-          })()}
-          {' '}({template.duration_days} days)
-        </p>
+        {startDate && (
+          <p className="text-xs text-muted-foreground mt-1">
+            {/* Matches the server: end = start + duration - 1 (a 14-day sprint ends on day 14). */}
+            End date: {safeFormat(addDays(startDate, template.duration_days - 1), 'MMM d, yyyy')}
+            {' '}({template.duration_days} days)
+          </p>
+        )}
       </div>
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onDone}>Cancel</Button>
         <Button onClick={() => mutation.mutate({ name, start_date: startDate })}
-          disabled={!name.trim() || mutation.isPending}>
+          disabled={!name.trim() || !startDate || mutation.isPending}>
           Create Sprint
         </Button>
       </div>
@@ -84,15 +93,18 @@ export default function SprintTemplates() {
   const [using,     setUsing]     = useState<Template | null>(null);
   const [newName,   setNewName]   = useState('');
   const [newGoal,   setNewGoal]   = useState('');
-  const [newDays,   setNewDays]   = useState(14);
+  // Kept as the raw input string so typing (e.g. clearing to type "21") doesn't snap to 14.
+  const [newDays,   setNewDays]   = useState('14');
+  const parsedDays = Number(newDays);
+  const daysValid = Number.isInteger(parsedDays) && parsedDays >= 1 && parsedDays <= 90;
 
   const dialogOpen = creating || !!editing;
-  const openCreate = () => { setEditing(null); setNewName(''); setNewGoal(''); setNewDays(14); setCreating(true); };
+  const openCreate = () => { setEditing(null); setNewName(''); setNewGoal(''); setNewDays('14'); setCreating(true); };
   const openEdit = (t: Template) => {
     setCreating(false);
     setNewName(t.name);
     setNewGoal(t.goal ?? '');
-    setNewDays(t.duration_days);
+    setNewDays(String(t.duration_days));
     setEditing(t);
   };
   const closeDialog = () => { setCreating(false); setEditing(null); };
@@ -105,34 +117,34 @@ export default function SprintTemplates() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['sprint-templates'] });
 
   const createMutation = useMutation({
-    mutationFn: (data: { name: string; goal?: string; duration_days: number }) =>
+    mutationFn: (data: { name: string; goal: string | null; duration_days: number }) =>
       apiRequest('POST', '/api/sprint-templates', data),
     onSuccess: () => {
       invalidate();
       setCreating(false);
       setNewName('');
       setNewGoal('');
-      setNewDays(14);
+      setNewDays('14');
       toast({ title: 'Template created' });
     },
-    onError: () => toast({ title: 'Failed to create template', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create template', description: err.message, variant: 'destructive' }),
   });
 
   const updateMutation = useMutation({
-    mutationFn: (data: { name: string; goal?: string; duration_days: number }) =>
+    mutationFn: (data: { name: string; goal: string | null; duration_days: number }) =>
       apiRequest('PATCH', `/api/sprint-templates/${editing!.id}`, data),
     onSuccess: () => {
       invalidate();
       closeDialog();
       toast({ title: 'Template updated' });
     },
-    onError: () => toast({ title: 'Failed to update template', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to update template', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/sprint-templates/${id}`),
     onSuccess: () => { invalidate(); toast({ title: 'Template deleted' }); },
-    onError: () => toast({ title: 'Failed to delete template', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to delete template', description: err.message, variant: 'destructive' }),
   });
 
   return (
@@ -166,18 +178,23 @@ export default function SprintTemplates() {
             <div>
               <label className="text-sm font-medium">Duration (days)</label>
               <Input type="number" min={1} max={90} value={newDays}
-                onChange={(e) => setNewDays(parseInt(e.target.value) || 14)} className="mt-1 w-28" />
+                onChange={(e) => setNewDays(e.target.value)} className="mt-1 w-28" />
+              {!daysValid && (
+                <p className="text-xs text-destructive mt-1">Enter a whole number of days between 1 and 90.</p>
+              )}
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={closeDialog}>Cancel</Button>
               <Button onClick={() => {
                 const data = {
                   name: newName,
-                  ...(newGoal.trim() ? { goal: newGoal } : {}),
-                  duration_days: newDays,
+                  // null (not omitted) so clearing the goal on edit actually persists.
+                  goal: newGoal.trim() ? newGoal : null,
+                  duration_days: parsedDays,
                 };
-                editing ? updateMutation.mutate(data) : createMutation.mutate(data);
-              }} disabled={!newName.trim() || createMutation.isPending || updateMutation.isPending}>
+                if (editing) updateMutation.mutate(data);
+                else createMutation.mutate(data);
+              }} disabled={!newName.trim() || !daysValid || createMutation.isPending || updateMutation.isPending}>
                 {editing ? 'Update Template' : 'Save Template'}
               </Button>
             </div>
@@ -215,25 +232,26 @@ export default function SprintTemplates() {
                 {t.goal && (
                   <p className="text-sm text-muted-foreground line-clamp-2 mb-3">{t.goal}</p>
                 )}
+                {/* /use is requireAdmin server-side, so the whole action row is admin-only. */}
+                {isAdmin && (
                 <div className="flex gap-2">
                   <Button size="sm" className="gap-1 flex-1"
                     onClick={() => setUsing(t)}>
                     <Play className="h-3.5 w-3.5" /> Use Template
                   </Button>
-                  {isAdmin && (
                     <>
                       <Button size="sm" variant="ghost" onClick={() => openEdit(t)}>
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
                       <Button size="sm" variant="ghost"
                         className="text-destructive hover:text-destructive"
-                        onClick={() => deleteMutation.mutate(t.id)}
+                        onClick={() => { if (confirm(`Delete template "${t.name}"?`)) deleteMutation.mutate(t.id); }}
                         disabled={deleteMutation.isPending}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </>
-                  )}
                 </div>
+                )}
               </CardContent>
             </Card>
           ))}

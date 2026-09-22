@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
+import { TASK_LIST_LIMIT } from '@/hooks/use-tasks';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Task {
@@ -43,31 +44,48 @@ export default function Calendar() {
   const prevMonth = () => { if (month === 0) { setMonth(11); setYear(y => y - 1); } else setMonth(m => m - 1); };
   const nextMonth = () => { if (month === 11) { setMonth(0); setYear(y => y + 1); } else setMonth(m => m + 1); };
 
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthStart = isoDate(year, month, 1);
+  const monthEnd = isoDate(year, month, daysInMonth);
+
+  // Only the visible month's tasks, filtered server-side by due date -- the unfiltered list is
+  // capped, so large workspaces silently lost tasks here. Keyed under ['/api/tasks', ...] so task
+  // mutations elsewhere invalidate it.
   const { data: tasks = [] } = useQuery<Task[]>({
-    queryKey: ['tasks'],
-    queryFn: () => apiRequest('GET', '/api/tasks'),
+    queryKey: ['/api/tasks', 'calendar', monthStart, monthEnd],
+    queryFn: () => apiRequest(
+      'GET',
+      `/api/tasks?due_after=${monthStart}&due_before=${monthEnd}&limit=${TASK_LIST_LIMIT}`,
+    ),
   });
+  const truncated = tasks.length >= TASK_LIST_LIMIT;
 
   const { data: sprints = [] } = useQuery<Sprint[]>({
-    queryKey: ['sprints'],
+    queryKey: ['/api/sprints'],
     queryFn: () => apiRequest('GET', '/api/sprints'),
   });
 
-  // Build a map: dateKey -> { tasks, sprintStarts, sprintEnds }
-  const firstDay = new Date(year, month, 1).getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  // Build a map: dateKey -> tasks due that day
 
   const tasksByDate = new Map<string, Task[]>();
   for (const t of tasks) {
     if (t.due_date && t.status !== 'done') {
-      if (!tasksByDate.has(t.due_date)) tasksByDate.set(t.due_date, []);
-      tasksByDate.get(t.due_date)!.push(t);
+      const key = t.due_date.substring(0, 10);
+      if (!tasksByDate.has(key)) tasksByDate.set(key, []);
+      tasksByDate.get(key)!.push(t);
     }
   }
 
-  const sprintRanges: { start: string; end: string; name: string; status: string }[] = sprints
+  const sprintRanges: { id: string; start: string; end: string; name: string; status: string }[] = sprints
     .filter((s) => s.start_date && s.end_date)
-    .map((s) => ({ start: s.start_date!, end: s.end_date!, name: s.name, status: s.status }));
+    .map((s) => ({
+      id: s.id,
+      start: s.start_date!.substring(0, 10),
+      end: s.end_date!.substring(0, 10),
+      name: s.name,
+      status: s.status,
+    }));
 
   function sprintsForDate(dateStr: string) {
     return sprintRanges.filter((s) => s.start <= dateStr && s.end >= dateStr);
@@ -95,6 +113,13 @@ export default function Calendar() {
           <Button variant="outline" size="icon" onClick={nextMonth}><ChevronRight className="h-4 w-4" /></Button>
         </div>
       </div>
+
+      {truncated && (
+        <p className="flex items-center gap-1.5 text-xs text-yellow-700 dark:text-yellow-400">
+          <AlertTriangle className="h-3.5 w-3.5" />
+          This month has more than {TASK_LIST_LIMIT} tasks with due dates; some are not shown.
+        </p>
+      )}
 
       <Card>
         <CardContent className="p-0">
@@ -136,7 +161,7 @@ export default function Calendar() {
 
                       {/* Sprint indicators */}
                       {daySprints.map((s) => (
-                        <div key={s.name}
+                        <div key={s.id}
                           className={cn(
                             'text-[10px] px-1 py-0.5 rounded mb-0.5 truncate',
                             s.status === 'active'

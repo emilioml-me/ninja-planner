@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin, ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
+import { assertLinkableToWorkspace } from '../services/taskService.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -13,10 +14,13 @@ router.use(requireWorkspace);
 // epic OR the linked sprint — if both were set it would union the two initiatives' tasks rather
 // than intersect them, silently changing what the number represents. Enforcing at most one link
 // here (matching what the create/edit UI already does) keeps that rollup unambiguous.
+// budgets.target_amount is NUMERIC(14,2): at most 12 integer digits.
+const TARGET_AMOUNT_MAX = 999_999_999_999.99;
+
 const budgetSchemaBase = z.object({
-  name:          z.string().min(1).max(255),
-  description:   z.string().max(2000).optional(),
-  target_amount: z.number().min(0),
+  name:          z.string().trim().min(1).max(255),
+  description:   z.preprocess((v) => (v === '' ? null : v), z.string().max(2000).nullable().optional()),
+  target_amount: z.number().min(0).max(TARGET_AMOUNT_MAX),
   currency:      z.string().length(3).default('USD'),
   period_start:  z.string().date().nullable().optional(),
   period_end:    z.string().date().nullable().optional(),
@@ -24,14 +28,19 @@ const budgetSchemaBase = z.object({
   epic_id:       z.string().uuid().nullable().optional(),
   sprint_id:     z.string().uuid().nullable().optional(),
 });
-const budgetSchema = budgetSchemaBase.refine(
-  (d) => !(d.epic_id && d.sprint_id),
-  { message: 'A budget can link to an epic or a sprint, not both', path: ['epic_id'] },
-);
+const budgetSchema = budgetSchemaBase
+  .refine(
+    (d) => !(d.epic_id && d.sprint_id),
+    { message: 'A budget can link to an epic or a sprint, not both', path: ['epic_id'] },
+  )
+  .refine(
+    (d) => !(d.period_start && d.period_end && d.period_start > d.period_end),
+    { message: 'period_start must be on or before period_end', path: ['period_end'] },
+  );
 
 const entrySchema = z.object({
   description: z.string().min(1).max(500),
-  amount:      z.number().max(1_000_000_000),  // L2: cap to prevent display overflows
+  amount:      z.number().min(0).max(1_000_000_000),  // L2: cap to prevent display overflows
   category:    z.string().max(100).optional(),
   entry_date:  z.string().date().nullable().optional(),
 });
@@ -45,13 +54,25 @@ router.get('/', async (req, res, next) => {
     // linked to an epic or sprint, it sums billable time already logged against that
     // initiative's tasks (minutes/60 * hourly_rate), giving a spend estimate that doesn't
     // require someone to also manually re-enter it as a budget entry.
+    //
+    // budget_entries is pre-aggregated into its own subquery (one row per budget_id) rather
+    // than LEFT JOINed directly — joining it straight to `b` before the LATERAL meant the
+    // LATERAL's correlated time_logs/tasks subquery re-ran once per budget_entries row for that
+    // budget (an N+1-within-a-single-statement pattern) before GROUP BY collapsed the
+    // duplicates. Pre-aggregating first means each of the two joins contributes at most one row
+    // per budget, so the LATERAL evaluates exactly once per budget and no GROUP BY is needed.
     const result = await pool.query(
       `SELECT b.*,
-              COALESCE(SUM(be.amount), 0)::numeric AS actual_amount,
-              COUNT(be.id)::int                    AS entry_count,
-              COALESCE(tc.time_cost, 0)::numeric   AS time_cost
+              COALESCE(be_agg.actual_amount, 0)::numeric AS actual_amount,
+              COALESCE(be_agg.entry_count, 0)::int       AS entry_count,
+              COALESCE(tc.time_cost, 0)::numeric         AS time_cost
        FROM   budgets b
-       LEFT JOIN budget_entries be ON be.budget_id = b.id
+       LEFT JOIN (
+         SELECT budget_id, SUM(amount) AS actual_amount, COUNT(*) AS entry_count
+         FROM budget_entries
+         WHERE workspace_id = $1
+         GROUP BY budget_id
+       ) be_agg ON be_agg.budget_id = b.id
        LEFT JOIN LATERAL (
          SELECT SUM((tl.minutes / 60.0) * tl.hourly_rate) AS time_cost
          FROM time_logs tl
@@ -63,7 +84,6 @@ router.get('/', async (req, res, next) => {
              OR (b.sprint_id IS NOT NULL AND t.sprint_id = b.sprint_id))
        ) tc ON (b.epic_id IS NOT NULL OR b.sprint_id IS NOT NULL)
        WHERE  b.workspace_id = $1
-       GROUP  BY b.id, tc.time_cost
        ORDER  BY b.created_at DESC`,
       [req.workspace.id],
     );
@@ -77,6 +97,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const parsed = budgetSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     const { name, description, target_amount, currency, period_start, period_end, status, epic_id, sprint_id } = parsed.data;
+    await assertLinkableToWorkspace('epics', epic_id, req.workspace.id);
+    await assertLinkableToWorkspace('sprints', sprint_id, req.workspace.id);
     const result = await pool.query(
       `INSERT INTO budgets (workspace_id, name, description, target_amount, currency, period_start, period_end, status, created_by, epic_id, sprint_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -92,23 +114,36 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = budgetSchemaBase.partial().safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-    if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
+    if (Object.values(parsed.data).every((v) => v === undefined)) { res.status(400).json({ error: 'No fields to update' }); return; }
 
-    if (parsed.data.epic_id !== undefined || parsed.data.sprint_id !== undefined) {
-      const current = await pool.query<{ epic_id: string | null; sprint_id: string | null }>(
-        'SELECT epic_id, sprint_id FROM budgets WHERE id = $1 AND workspace_id = $2',
-        [req.params.id, req.workspace.id],
-      );
-      if (current.rows.length === 0) { res.status(404).json({ error: 'Budget not found' }); return; }
-      const effectiveEpicId   = parsed.data.epic_id   !== undefined ? parsed.data.epic_id   : current.rows[0].epic_id;
-      const effectiveSprintId = parsed.data.sprint_id !== undefined ? parsed.data.sprint_id : current.rows[0].sprint_id;
-      if (effectiveEpicId && effectiveSprintId) {
-        res.status(400).json({ error: 'A budget can link to an epic or a sprint, not both' });
-        return;
-      }
+    // Cross-field rules (one link at most, period_start <= period_end) must hold for the
+    // resulting row, so a partial PATCH is checked against the stored values.
+    const current = await pool.query<{ epic_id: string | null; sprint_id: string | null; period_start: string | null; period_end: string | null }>(
+      `SELECT epic_id, sprint_id,
+              to_char(period_start, 'YYYY-MM-DD') AS period_start,
+              to_char(period_end,   'YYYY-MM-DD') AS period_end
+       FROM budgets WHERE id = $1 AND workspace_id = $2`,
+      [req.params.id, req.workspace.id],
+    );
+    if (current.rows.length === 0) { res.status(404).json({ error: 'Budget not found' }); return; }
+    const cur = current.rows[0];
+    const effectiveEpicId   = parsed.data.epic_id   !== undefined ? parsed.data.epic_id   : cur.epic_id;
+    const effectiveSprintId = parsed.data.sprint_id !== undefined ? parsed.data.sprint_id : cur.sprint_id;
+    if (effectiveEpicId && effectiveSprintId) {
+      res.status(400).json({ error: 'A budget can link to an epic or a sprint, not both' });
+      return;
     }
+    const effectiveStart = parsed.data.period_start !== undefined ? parsed.data.period_start : cur.period_start;
+    const effectiveEnd   = parsed.data.period_end   !== undefined ? parsed.data.period_end   : cur.period_end;
+    if (effectiveStart && effectiveEnd && effectiveStart > effectiveEnd) {
+      res.status(400).json({ error: 'period_start must be on or before period_end' });
+      return;
+    }
+    if (parsed.data.epic_id !== undefined) await assertLinkableToWorkspace('epics', parsed.data.epic_id, req.workspace.id);
+    if (parsed.data.sprint_id !== undefined) await assertLinkableToWorkspace('sprints', parsed.data.sprint_id, req.workspace.id);
 
     // H2: explicit allowlist prevents future mass-assignment if schema expands
+    // undefined = unchanged; null = clear (description, period dates, epic/sprint links).
     const ALLOWED_COLUMNS = new Set<string>(['name','description','target_amount','currency','period_start','period_end','status','epic_id','sprint_id']);
     const fields = parsed.data;
     const setClauses: string[] = [];

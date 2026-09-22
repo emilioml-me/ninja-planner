@@ -82,10 +82,12 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
     const data = { ...parsed.data };
     if (data.external_ref !== undefined) data.external_ref = data.external_ref || null;
-    const epic = await updateEpic(req.params.id, req.workspace.id, data);
-    if (!epic) { res.status(404).json({ error: 'Epic not found' }); return; }
+    const updated = await updateEpic(req.params.id, req.workspace.id, data);
+    if (!updated) { res.status(404).json({ error: 'Epic not found' }); return; }
+    const { prev_status: prevStatus, ...epic } = updated;
     fireWebhooks(req.workspace.id, 'epic.updated', { epic });
-    if (parsed.data.status === 'completed') {
+    // Only on the transition into 'completed' — re-saving a completed epic must not re-fire.
+    if (epic.status === 'completed' && prevStatus !== 'completed') {
       dispatchAutomations({
         type: 'epic.completed',
         workspaceId: req.workspace.id,

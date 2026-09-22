@@ -25,11 +25,27 @@ export function safeFormat(
     const d =
       typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
         ? new Date(value + 'T00:00:00')
-        : new Date(value as string | Date);
+        : typeof value === 'string'
+          ? parseTimestamp(value)
+          : value;
     return dateFnsFormat(d, fmt);
   } catch {
     return fallback;
   }
+}
+
+/**
+ * Parses a timestamp string, including Postgres `timestamptz::text` output such as
+ * "2026-09-22 14:03:11.123+00" (space separator, short "+00" offset), which `new Date()` does
+ * not reliably accept in every browser. Returns an Invalid Date (never throws) when unparseable.
+ */
+export function parseTimestamp(value: string): Date {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|[+-]\d{2}(?::?\d{2})?)?$/i.exec(value.trim());
+  if (!m) return new Date(value);
+  let offset = m[3] ?? '';
+  if (/^[+-]\d{2}$/.test(offset)) offset += ':00';
+  else if (/^[+-]\d{4}$/.test(offset)) offset = `${offset.slice(0, 3)}:${offset.slice(3)}`;
+  return new Date(`${m[1]}T${m[2]}${offset}`);
 }
 
 /**
@@ -68,7 +84,7 @@ export function safeFromNow(
 ): string {
   if (value == null || value === '') return '';
   try {
-    return dateFnsFDTN(new Date(value as string | Date), opts);
+    return dateFnsFDTN(typeof value === 'string' ? parseTimestamp(value) : value, opts);
   } catch {
     return '';
   }

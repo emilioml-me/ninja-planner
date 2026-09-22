@@ -27,8 +27,8 @@ interface SeoHeadProps {
 }
 
 // ─── CONFIGURE THESE PER APP ─────────────────────────────────────────────────
-const APP_NAME = "Plan Ninja";
-const APP_URL = "https://plan-ninja.com";
+const APP_NAME = "Ninja Planner";
+const APP_URL = "https://ninja-planner.com";
 const DEFAULT_OG_IMAGE = "https://r2.ninja-stack.com/plan-ninja/og-image.png";
 const TWITTER_HANDLE = "@ninjastackHQ";
 // ─────────────────────────────────────────────────────────────────────────────

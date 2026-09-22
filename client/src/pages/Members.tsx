@@ -67,13 +67,15 @@ export default function Members() {
       toast({ title: 'Member removed' });
       setConfirmRemoveId(null);
     },
-    onError: () => {
-      toast({ title: 'Failed to remove member', variant: 'destructive' });
+    onError: (err: Error) => {
+      toast({ title: 'Failed to remove member', description: err.message, variant: 'destructive' });
       setConfirmRemoveId(null);
     },
   });
 
-  const confirmTarget = members.find((m) => m.id === confirmRemoveId);
+  // confirmRemoveId holds the member's Clerk user id — the server's DELETE matches on
+  // clerk_user_id, not the workspace_members row uuid.
+  const confirmTarget = members.find((m) => m.clerk_user_id === confirmRemoveId);
 
   const roleMutation = useMutation({
     mutationFn: ({ clerkUserId, role }: { clerkUserId: string; role: 'org:member' | 'viewer' }) =>
@@ -127,12 +129,20 @@ export default function Members() {
                 const isSelf = member.clerk_user_id === userId;
                 const abbr = initials(member.clerk_user_id);
                 const isOwnerOrAdmin = rKey === 'owner' || rKey === 'admin';
+                // Stats are self-or-admin on the server (403 otherwise) — only make rows
+                // clickable where the dialog can actually load.
+                const canViewStats = isSelf || isAdmin;
 
                 return (
                   <li
                     key={member.id}
-                    className="flex items-center gap-4 px-6 py-4 hover:bg-muted/40 transition-colors cursor-pointer"
-                    onClick={() => setStatsTarget({ clerkUserId: member.clerk_user_id, name: member.display_name, imageUrl: member.image_url })}
+                    className={cn(
+                      'flex items-center gap-4 px-6 py-4 transition-colors',
+                      canViewStats && 'hover:bg-muted/40 cursor-pointer',
+                    )}
+                    onClick={canViewStats
+                      ? () => setStatsTarget({ clerkUserId: member.clerk_user_id, name: member.display_name, imageUrl: member.image_url })
+                      : undefined}
                   >
                     <Avatar className="h-9 w-9">
                       {member.image_url && <AvatarImage src={member.image_url} alt={member.display_name} />}
@@ -175,7 +185,7 @@ export default function Members() {
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
-                        onClick={(e) => { e.stopPropagation(); setConfirmRemoveId(member.id); }}
+                        onClick={(e) => { e.stopPropagation(); setConfirmRemoveId(member.clerk_user_id); }}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -383,6 +393,7 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
   const generateMut = useMutation({
     mutationFn: () => apiRequest<{ token: string; expires_at: string }>('POST', '/api/workspaces/me/invites'),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/workspaces/me/invites/active'] }),
+    onError: (err: Error) => toast({ title: 'Failed to generate invite link', description: err.message, variant: 'destructive' }),
   });
 
   const revokeMut = useMutation({
@@ -391,6 +402,7 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
       qc.invalidateQueries({ queryKey: ['/api/workspaces/me/invites/active'] });
       toast({ title: 'Invite link revoked' });
     },
+    onError: (err: Error) => toast({ title: 'Failed to revoke invite link', description: err.message, variant: 'destructive' }),
   });
 
   const inviteUrl = active
@@ -399,7 +411,10 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
 
   const copyLink = () => {
     if (!inviteUrl) return;
-    navigator.clipboard.writeText(inviteUrl).then(() => toast({ title: 'Link copied!' }));
+    navigator.clipboard.writeText(inviteUrl).then(
+      () => toast({ title: 'Link copied!' }),
+      () => toast({ title: 'Could not copy link', description: 'Copy it manually from the field.', variant: 'destructive' }),
+    );
   };
 
   const expiresLabel = active

@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
+import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
 import { safeFormat } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
@@ -62,9 +62,11 @@ const ALL_EVENTS = [
   'goal.completed',
 ] as const;
 
+// At least one event is required (the server rejects an empty list — an endpoint with no events
+// receives nothing).
 const createSchema = z.object({
   url: z.string().url('Must be a valid URL').max(2048),
-  events: z.array(z.string()).default([]),
+  events: z.array(z.string()).min(1, 'Select at least one event'),
 });
 type CreateData = z.infer<typeof createSchema>;
 
@@ -123,7 +125,7 @@ function DeliveryLog({ endpointId }: { endpointId: string }) {
                     </TableCell>
                     <TableCell className="text-xs py-2">{d.http_status ?? '—'}</TableCell>
                     <TableCell className="text-xs py-2">
-                      {d.delivered_at ? format(new Date(d.delivered_at), 'MMM d HH:mm') : '—'}
+                      {d.delivered_at ? safeFormat(d.delivered_at, 'MMM d HH:mm') : '—'}
                     </TableCell>
                     <TableCell className="text-xs text-destructive max-w-48 truncate py-2">
                       {d.error ?? '—'}
@@ -148,7 +150,12 @@ export default function Webhooks() {
   const [open, setOpen] = useState(false);
   const [newSecret, setNewSecret] = useState<string | null>(null);
   const [secretCopied, setSecretCopied] = useState(false);
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copyResetTimer.current) clearTimeout(copyResetTimer.current); }, []);
   const [secretRevealed, setSecretRevealed] = useState(false);
+  // Add/toggle/delete and the delivery log are admin-only server-side (403 otherwise).
+  const isAdmin = useIsAdmin();
+  const isAdminLoaded = useIsAdminLoaded();
 
   const { data: endpoints = [], isLoading } = useQuery<WebhookEndpoint[]>({
     queryKey: ['/api/webhooks'],
@@ -185,11 +192,24 @@ export default function Webhooks() {
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
-  const copySecret = () => {
+  const copySecret = async () => {
     if (!newSecret) return;
-    navigator.clipboard.writeText(newSecret);
+    try {
+      await navigator.clipboard.writeText(newSecret);
+    } catch {
+      // Clipboard API unavailable (insecure context / permission denied) — let the user copy manually.
+      setSecretRevealed(true);
+      toast({ title: 'Could not copy', description: 'Select the secret and copy it manually.', variant: 'destructive' });
+      return;
+    }
     setSecretCopied(true);
-    setTimeout(() => setSecretCopied(false), 2000);
+    if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+    copyResetTimer.current = setTimeout(() => setSecretCopied(false), 2000);
+  };
+
+  const confirmDelete = (ep: WebhookEndpoint) => {
+    if (!window.confirm(`Delete the webhook endpoint ${ep.url}? Its delivery log will be deleted too.`)) return;
+    deleteMut.mutate(ep.id);
   };
 
   return (
@@ -201,9 +221,11 @@ export default function Webhooks() {
             Receive HTTP POST notifications when events happen in your workspace.
           </p>
         </div>
-        <Button size="sm" className="gap-2" onClick={() => { form.reset(); setOpen(true); }}>
-          <Plus className="h-4 w-4" /> Add Endpoint
-        </Button>
+        {isAdminLoaded && isAdmin && (
+          <Button size="sm" className="gap-2" onClick={() => { form.reset(); setOpen(true); }}>
+            <Plus className="h-4 w-4" /> Add Endpoint
+          </Button>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
@@ -212,7 +234,11 @@ export default function Webhooks() {
         ) : endpoints.length === 0 ? (
           <div className="text-center py-16 text-muted-foreground text-sm">
             <p className="font-medium">No webhook endpoints yet</p>
-            <p className="mt-1 text-xs">Add an endpoint to start receiving event notifications.</p>
+            <p className="mt-1 text-xs">
+              {isAdmin
+                ? 'Add an endpoint to start receiving event notifications.'
+                : 'Ask a workspace admin to add an endpoint.'}
+            </p>
           </div>
         ) : (
           endpoints.map((ep) => (
@@ -223,6 +249,8 @@ export default function Webhooks() {
                     <CardTitle className="text-sm font-mono truncate">{ep.url}</CardTitle>
                     <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                       {ep.events.length === 0 ? (
+                        <Badge variant="destructive" className="text-xs">No events — receives nothing</Badge>
+                      ) : ep.events.length === ALL_EVENTS.length ? (
                         <Badge variant="secondary" className="text-xs">All events</Badge>
                       ) : (
                         ep.events.map((ev) => (
@@ -231,6 +259,7 @@ export default function Webhooks() {
                       )}
                     </div>
                   </div>
+                  {isAdmin && (
                   <div className="flex items-center gap-1 shrink-0">
                     <Button
                       variant="ghost"
@@ -240,6 +269,8 @@ export default function Webhooks() {
                         ep.active ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground',
                       )}
                       title={ep.active ? 'Disable endpoint' : 'Enable endpoint'}
+                      aria-label={ep.active ? 'Disable endpoint' : 'Enable endpoint'}
+                      disabled={toggleMut.isPending}
                       onClick={() => toggleMut.mutate({ id: ep.id, active: !ep.active })}
                     >
                       <Power className="h-4 w-4" />
@@ -248,11 +279,15 @@ export default function Webhooks() {
                       variant="ghost"
                       size="icon"
                       className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={() => deleteMut.mutate(ep.id)}
+                      title="Delete endpoint"
+                      aria-label="Delete endpoint"
+                      disabled={deleteMut.isPending}
+                      onClick={() => confirmDelete(ep)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
+                  )}
                 </div>
               </CardHeader>
               <CardContent className="px-4 pb-3 pt-0">
@@ -263,16 +298,23 @@ export default function Webhooks() {
                     {ep.active ? 'Active' : 'Disabled'}
                   </span>
                 </p>
-                <DeliveryLog endpointId={ep.id} />
+                {isAdmin && <DeliveryLog endpointId={ep.id} />}
               </CardContent>
             </Card>
           ))
         )}
       </div>
 
-      {/* Signing-secret reveal dialog — shown once after creation */}
-      <Dialog open={!!newSecret} onOpenChange={(v) => { if (!v) setNewSecret(null); }}>
-        <DialogContent className="sm:max-w-md">
+      {/* Signing-secret reveal dialog — shown once after creation. Not dismissable by outside
+          click / Escape / close button: the secret can never be retrieved again, so the user must
+          explicitly acknowledge with "I've saved it". */}
+      <Dialog open={!!newSecret}>
+        <DialogContent
+          className="sm:max-w-md"
+          hideCloseButton
+          onInteractOutside={(e) => e.preventDefault()}
+          onEscapeKeyDown={(e) => e.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>Save your signing secret</DialogTitle>
             <DialogDescription>
@@ -296,7 +338,7 @@ export default function Webhooks() {
             >
               {secretRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </Button>
-            <Button size="icon" variant="outline" onClick={copySecret} title="Copy">
+            <Button size="icon" variant="outline" onClick={() => { void copySecret(); }} title="Copy">
               {secretCopied
                 ? <CheckCircle2 className="h-4 w-4 text-green-500" />
                 : <Copy className="h-4 w-4" />}
@@ -334,9 +376,20 @@ export default function Webhooks() {
                 name="events"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Events</FormLabel>
+                    <div className="flex items-center justify-between gap-2">
+                      <FormLabel>Events</FormLabel>
+                      <button
+                        type="button"
+                        className="text-xs text-primary hover:underline"
+                        onClick={() =>
+                          field.onChange(field.value.length === ALL_EVENTS.length ? [] : [...ALL_EVENTS])
+                        }
+                      >
+                        {field.value.length === ALL_EVENTS.length ? 'Clear all' : 'Select all'}
+                      </button>
+                    </div>
                     <FormDescription className="text-xs">
-                      Leave all unchecked to receive every event type.
+                      Select at least one event. New event types added later are not subscribed automatically.
                     </FormDescription>
                     <div className="grid grid-cols-2 gap-2 pt-1">
                       {ALL_EVENTS.map((ev) => (

@@ -74,9 +74,9 @@ type BudgetForm = z.infer<typeof budgetSchema>;
 
 const entrySchema = z.object({
   description: z.string().min(1, 'Required').max(500),
-  amount:      z.coerce.number({ invalid_type_error: 'Must be a number' }),
+  amount:      z.coerce.number({ invalid_type_error: 'Must be a number' }).min(0, 'Must be ≥ 0'),
   category:    z.string().max(100).optional(),
-  entry_date:  z.string().optional(),
+  entry_date:  z.string().min(1, 'Required'),
 });
 type EntryForm = z.infer<typeof entrySchema>;
 
@@ -267,6 +267,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
       entryForm.reset({ description: '', amount: 0, category: '', entry_date: todayLocal() });
       toast({ title: 'Expense added' });
     },
+    onError: (err: Error) => toast({ title: 'Failed to add expense', description: err.message, variant: 'destructive' }),
   });
 
   const deleteEntry = useMutation({
@@ -275,6 +276,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
       qc.invalidateQueries({ queryKey: ['/api/budgets', budget.id, 'entries'] });
       qc.invalidateQueries({ queryKey: ['/api/budgets'] });
     },
+    onError: (err: Error) => toast({ title: 'Failed to delete expense', description: err.message, variant: 'destructive' }),
   });
 
   const target = Number(budget.target_amount);
@@ -331,10 +333,13 @@ function BudgetDetail({ budget }: { budget: Budget }) {
           )}
 
           <div className="flex gap-2">
-            <Button type="button" size="sm" variant="outline" className="h-7 text-xs gap-1"
-              onClick={() => setAddOpen(true)}>
-              <Plus className="h-3 w-3" /> Add expense
-            </Button>
+            {/* The server rejects entries on closed budgets (400), so don't offer the action. */}
+            {budget.status !== 'closed' && (
+              <Button type="button" size="sm" variant="outline" className="h-7 text-xs gap-1"
+                onClick={() => setAddOpen(true)}>
+                <Plus className="h-3 w-3" /> Add expense
+              </Button>
+            )}
             {entries.length > 0 && (
               <Button type="button" size="sm" variant="ghost" className="h-7 text-xs gap-1"
                 onClick={() => downloadCsv(`budget-${budget.name.replace(/\s+/g, '-')}.csv`,
@@ -347,7 +352,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
             )}
           </div>
 
-          {addOpen && (
+          {addOpen && budget.status !== 'closed' && (
             <Form {...entryForm}>
               <form onSubmit={entryForm.handleSubmit((d) => addEntry.mutate(d))}
                 className="border rounded-md p-3 space-y-3">
@@ -362,7 +367,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
                   <FormField control={entryForm.control} name="amount" render={({ field }) => (
                     <FormItem>
                       <FormLabel className="text-xs">Amount ({budget.currency})</FormLabel>
-                      <FormControl><Input type="number" step="0.01" className="h-7 text-xs" {...field} /></FormControl>
+                      <FormControl><Input type="number" min={0} step="0.01" className="h-7 text-xs" {...field} /></FormControl>
                       <FormMessage />
                     </FormItem>
                   )} />
@@ -375,7 +380,8 @@ function BudgetDetail({ budget }: { budget: Budget }) {
                   <FormField control={entryForm.control} name="entry_date" render={({ field }) => (
                     <FormItem className="col-span-2">
                       <FormLabel className="text-xs">Date</FormLabel>
-                      <FormControl><Input type="date" className="h-7 text-xs" {...field} /></FormControl>
+                      <FormControl><Input type="date" required className="h-7 text-xs" {...field} /></FormControl>
+                      <FormMessage />
                     </FormItem>
                   )} />
                 </div>
@@ -406,7 +412,7 @@ function BudgetDetail({ budget }: { budget: Budget }) {
                   {(e.created_by === userId || isAdmin) && (
                     <Button type="button" variant="ghost" size="icon"
                       className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
-                      onClick={() => deleteEntry.mutate(e.id)}>
+                      onClick={() => { if (confirm(`Delete expense "${e.description}"?`)) deleteEntry.mutate(e.id); }}>
                       <Trash2 className="h-3 w-3 text-muted-foreground" />
                     </Button>
                   )}
@@ -436,11 +442,13 @@ export default function Budgets() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/budgets'] });
 
-  // Strip empty period strings — backend z.string().date() rejects "". NONE sentinel maps to null.
+  // Empty period strings map to null (backend z.string().date() rejects "", and undefined would
+  // mean "unchanged" on PATCH, so clearing a date would never persist). NONE sentinel maps to null.
   const sanitize = (d: BudgetForm) => ({
     ...d,
-    period_start: d.period_start || undefined,
-    period_end:   d.period_end   || undefined,
+    description:  d.description?.trim() ? d.description : null,
+    period_start: d.period_start || null,
+    period_end:   d.period_end   || null,
     epic_id:      d.epic_id === NONE ? null : d.epic_id,
     sprint_id:    d.sprint_id === NONE ? null : d.sprint_id,
   });
@@ -463,9 +471,18 @@ export default function Budgets() {
     onError: () => toast({ title: 'Failed to delete budget', variant: 'destructive' }),
   });
 
-  const totalTarget = budgets.reduce((s, b) => s + Number(b.target_amount), 0);
-  const totalActual = budgets.reduce((s, b) => s + Number(b.actual_amount), 0);
-  const currency = budgets[0]?.currency ?? 'USD';
+  // Totals are grouped per currency (summing USD + MXN into one number is meaningless) and only
+  // cover active budgets — closed budgets are finished and would skew "Remaining".
+  const activeBudgets = budgets.filter((b) => b.status !== 'closed');
+  const totalsByCurrency = Array.from(
+    activeBudgets.reduce((m, b) => {
+      const t = m.get(b.currency) ?? { target: 0, actual: 0 };
+      t.target += Number(b.target_amount);
+      t.actual += Number(b.actual_amount);
+      m.set(b.currency, t);
+      return m;
+    }, new Map<string, { target: number; actual: number }>()),
+  );
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
@@ -485,30 +502,39 @@ export default function Budgets() {
       </div>
 
       {/* Summary */}
-      {budgets.length > 0 && (
-        <div className="grid grid-cols-3 gap-4">
-          <Card>
-            <CardContent className="pt-4 pb-3">
-              <p className="text-xs text-muted-foreground">Total Target</p>
-              <p className="text-lg font-bold">{fmt(totalTarget, currency)}</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4 pb-3">
-              <p className="text-xs text-muted-foreground">Total Spent</p>
-              <p className={cn('text-lg font-bold', totalActual > totalTarget && 'text-destructive')}>
-                {fmt(totalActual, currency)}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4 pb-3">
-              <p className="text-xs text-muted-foreground">Remaining</p>
-              <p className={cn('text-lg font-bold', totalActual > totalTarget && 'text-destructive')}>
-                {fmt(Math.max(totalTarget - totalActual, 0), currency)}
-              </p>
-            </CardContent>
-          </Card>
+      {totalsByCurrency.length > 0 && (
+        <div className="space-y-1">
+          <div className="grid grid-cols-3 gap-4">
+            <Card>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-xs text-muted-foreground">Total Target</p>
+                {totalsByCurrency.map(([cur, t]) => (
+                  <p key={cur} className="text-lg font-bold">{fmt(t.target, cur)}</p>
+                ))}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-xs text-muted-foreground">Total Spent</p>
+                {totalsByCurrency.map(([cur, t]) => (
+                  <p key={cur} className={cn('text-lg font-bold', t.actual > t.target && 'text-destructive')}>
+                    {fmt(t.actual, cur)}
+                  </p>
+                ))}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-xs text-muted-foreground">Remaining</p>
+                {totalsByCurrency.map(([cur, t]) => (
+                  <p key={cur} className={cn('text-lg font-bold', t.actual > t.target && 'text-destructive')}>
+                    {fmt(Math.max(t.target - t.actual, 0), cur)}
+                  </p>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
+          <p className="text-xs text-muted-foreground">Totals cover active budgets only, per currency.</p>
         </div>
       )}
 

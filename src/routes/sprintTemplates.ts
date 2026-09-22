@@ -99,9 +99,11 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
     if (tpl.length === 0) { res.status(404).json({ error: 'Template not found' }); return; }
     const t = tpl[0];
 
+    // end = start + duration - 1 (inclusive range). Pure UTC date arithmetic on the
+    // 'YYYY-MM-DD' string so the result can't shift a day with the server's local timezone.
     const startDate = parsed.data.start_date ?? new Date().toISOString().split('T')[0];
-    const end = new Date(startDate);
-    end.setDate(end.getDate() + t.duration_days - 1);
+    const end = new Date(`${startDate}T00:00:00Z`);
+    end.setUTCDate(end.getUTCDate() + t.duration_days - 1);
     const endDate = end.toISOString().split('T')[0];
 
     const name = parsed.data.name ?? t.name;

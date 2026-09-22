@@ -50,7 +50,10 @@ export function CustomFieldsSection({
     queryFn: () => apiRequest<FieldDef[]>('GET', `/api/custom-fields?entity_type=${entityType}`),
   });
 
-  const { data: values = [] } = useQuery<FieldValue[]>({
+  // No `= []` default here: a fresh array literal on every render made the effect below fire
+  // on every render, resetting the draft (and wiping whatever the user was typing) in a loop.
+  // Depend on the query data identity, which only changes when the fetched values change.
+  const { data: values } = useQuery<FieldValue[]>({
     queryKey: [valuesPath],
     queryFn: () => apiRequest<FieldValue[]>('GET', valuesPath),
     enabled: defs.length > 0,
@@ -59,9 +62,15 @@ export function CustomFieldsSection({
   const [draft, setDraft] = useState<Record<string, string>>({});
 
   useEffect(() => {
+    if (!values) return;
     const next: Record<string, string> = {};
     for (const v of values) {
-      next[v.field_def_id] = v.value_text ?? (v.value_number != null ? String(v.value_number) : '') ?? v.value_date ?? '';
+      // The old chain — `value_text ?? (value_number != null ? String(...) : '') ?? value_date`
+      // — could never reach value_date: the middle ternary always evaluates to a STRING ('' when
+      // value_number is null), and '' isn't nullish, so `?? value_date` never fires. Date-type
+      // fields (stored in value_date, leaving value_text/value_number null) rendered as an empty
+      // draft, and saving without noticing would silently overwrite the stored date with null.
+      next[v.field_def_id] = v.value_text ?? (v.value_number != null ? String(v.value_number) : null) ?? (v.value_date ? v.value_date.slice(0, 10) : null) ?? '';
     }
     setDraft(next);
   }, [values]);

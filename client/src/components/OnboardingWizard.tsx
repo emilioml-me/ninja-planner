@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { useUser } from '@clerk/clerk-react';
+import { useEffect, useState } from 'react';
+import { useAuth, useUser } from '@clerk/clerk-react';
+import { useLocation } from 'wouter';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -17,19 +18,37 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-const STORAGE_KEY = 'ninja-planner:onboarded';
+/** Pre-per-user flag: one value for the whole browser, regardless of user or workspace. */
+const LEGACY_STORAGE_KEY = 'ninja-planner:onboarded';
 
+/**
+ * The "onboarded" flag is scoped to user + workspace (org) so a second person signing in on the
+ * same browser, or the same person joining another workspace, still gets the wizard.
+ */
 export function useOnboarding() {
-  const [open, setOpen] = useState(() => {
+  const { userId, orgId, isLoaded } = useAuth();
+  const storageKey = isLoaded && userId && orgId ? `ninja-planner:onboarded:${orgId}:${userId}` : null;
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!storageKey) { setOpen(false); return; }
     try {
-      return !localStorage.getItem(STORAGE_KEY);
+      // Migrate the old browser-wide flag to the current user/workspace so existing users
+      // aren't shown the wizard again.
+      if (localStorage.getItem(LEGACY_STORAGE_KEY)) {
+        localStorage.setItem(storageKey, '1');
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      }
+      setOpen(!localStorage.getItem(storageKey));
     } catch {
-      return false;
+      setOpen(false);
     }
-  });
+  }, [storageKey]);
 
   const complete = () => {
-    try { localStorage.setItem(STORAGE_KEY, '1'); } catch { /* noop */ }
+    if (storageKey) {
+      try { localStorage.setItem(storageKey, '1'); } catch { /* noop */ }
+    }
     setOpen(false);
   };
 
@@ -52,6 +71,7 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
   const { apiRequest } = useApiClient();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
   const [step, setStep] = useState(0);
   const [taskTitle, setTaskTitle] = useState('');
 
@@ -69,6 +89,9 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
   });
 
   const handleCreateTask = () => {
+    // Enter key and button share this handler -- ignore repeats while the create is in flight
+    // (pressing Enter twice previously created the task twice).
+    if (createMutation.isPending) return;
     if (!taskTitle.trim()) { setStep(2); return; }
     createMutation.mutate({
       title: taskTitle.trim(),
@@ -177,21 +200,18 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
             <div>
               <h2 className="text-xl font-bold">Invite your team</h2>
               <p className="text-sm text-muted-foreground mt-1">
-                Team members are managed through your organisation in Clerk.
-                Invite them there and they'll appear in Ninja Planner automatically.
+                Create an invite link on the <strong>Team</strong> page and share it. Teammates use it to
+                join this workspace and can then be assigned tasks.
               </p>
             </div>
-            <div className="rounded-lg bg-muted/50 p-4 text-sm text-left space-y-1">
-              <p className="font-medium">How to invite teammates:</p>
-              <ol className="list-decimal list-inside space-y-1 text-muted-foreground text-xs">
-                <li>Open the Clerk organisation switcher (top-left of most Clerk apps)</li>
-                <li>Go to <strong>Manage Organisation → Members</strong></li>
-                <li>Send email invites — they'll see Ninja Planner on sign-in</li>
-              </ol>
+            <div className="flex flex-col gap-2">
+              <Button className="w-full gap-2" onClick={() => { onComplete(); navigate('/members'); }}>
+                Invite teammates <Users className="h-4 w-4" />
+              </Button>
+              <Button variant="outline" className="w-full gap-2" onClick={onComplete}>
+                Open dashboard <Rocket className="h-4 w-4" />
+              </Button>
             </div>
-            <Button className="w-full gap-2" onClick={onComplete}>
-              Open dashboard <Rocket className="h-4 w-4" />
-            </Button>
           </div>
         )}
       </DialogContent>

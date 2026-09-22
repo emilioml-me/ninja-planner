@@ -3,9 +3,10 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install deps first (layer-cached until package.json changes)
-COPY package.json ./
-RUN npm install
+# Install deps first (layer-cached until package.json / lockfile change).
+# npm ci installs exactly what package-lock.json pins (reproducible builds).
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # Config files needed by both vite and tsc
 COPY tsconfig.json ./
@@ -32,14 +33,17 @@ FROM node:20-alpine AS production
 WORKDIR /app
 
 # Production-only deps
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # Compiled app (server + client bundle)
 COPY --from=builder /app/dist ./dist
 
-# SQL migration files (read at runtime by dist/migrate.js)
+# SQL migration files (read at runtime by dist/scripts/migrate.js)
 COPY migrations ./migrations
+
+# OpenAPI spec served by /api/docs (read at runtime from the app root)
+COPY openapi.yaml ./openapi.yaml
 
 # Startup script
 COPY entrypoint.sh ./entrypoint.sh

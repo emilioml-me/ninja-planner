@@ -19,16 +19,72 @@ const defSchema = z.object({
 const valueSchema = z.object({
   field_def_id: z.string().uuid(),
   value_text:   z.string().max(2000).nullable().optional(),
-  value_number: z.number().nullable().optional(),
-  value_date:   z.string().nullable().optional(),
+  value_number: z.number().finite().nullable().optional(),
+  value_date:   z.string().date().nullable().optional(),
 });
+
+type ValueEntry = z.infer<typeof valueSchema>;
+type FieldDefRow = { id: string; field_type: string; options: string[] | null };
+type NormalizedValue = { field_def_id: string; value_text: string | null; value_number: number | null; value_date: string | null };
+
+/**
+ * Dedupes entries by field_def_id (last one wins - a multi-row upsert with the same conflict key
+ * twice would fail with "ON CONFLICT DO UPDATE command cannot affect row a second time") and
+ * validates each value against its field definition's type, keeping only the column that type
+ * uses. Returns an error message string on the first invalid value.
+ */
+function normalizeValues(entries: ValueEntry[], defs: Map<string, FieldDefRow>): NormalizedValue[] | string {
+  const byDef = new Map<string, ValueEntry>();
+  for (const e of entries) byDef.set(e.field_def_id, e);
+
+  const out: NormalizedValue[] = [];
+  for (const e of byDef.values()) {
+    const def = defs.get(e.field_def_id)!;
+    const row: NormalizedValue = { field_def_id: e.field_def_id, value_text: null, value_number: null, value_date: null };
+    switch (def.field_type) {
+      case 'number':
+        row.value_number = e.value_number ?? null;
+        break;
+      case 'date':
+        row.value_date = e.value_date ?? null;
+        break;
+      case 'url': {
+        const v = e.value_text?.trim() || null;
+        if (v !== null) {
+          let ok = false;
+          try { const u = new URL(v); ok = u.protocol === 'http:' || u.protocol === 'https:'; } catch { ok = false; }
+          if (!ok) return `Field ${e.field_def_id}: value must be an http(s) URL`;
+        }
+        row.value_text = v;
+        break;
+      }
+      case 'select': {
+        const v = e.value_text ?? null;
+        if (v !== null && v !== '' && !(def.options ?? []).includes(v)) {
+          return `Field ${e.field_def_id}: value must be one of the field's options`;
+        }
+        row.value_text = v === '' ? null : v;
+        break;
+      }
+      default: // text
+        row.value_text = e.value_text ?? null;
+    }
+    out.push(row);
+  }
+  return out;
+}
 
 // ── Field definitions ─────────────────────────────────────────────────────────
 
 // GET /api/custom-fields?entity_type=task|client
 router.get('/', async (req, res, next) => {
   try {
-    const entityType = typeof req.query.entity_type === 'string' ? req.query.entity_type : undefined;
+    const rawEntityType = req.query.entity_type;
+    if (rawEntityType !== undefined && rawEntityType !== 'task' && rawEntityType !== 'client') {
+      res.status(400).json({ error: 'entity_type must be task or client' });
+      return;
+    }
+    const entityType = rawEntityType as string | undefined;
     const conditions = ['workspace_id = $1'];
     const values: unknown[] = [req.workspace.id];
     if (entityType) { conditions.push(`entity_type = $${values.length + 1}`); values.push(entityType); }
@@ -69,6 +125,22 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = defSchema.partial().safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+
+    // Changing field_type once values exist would leave them stored in the wrong column /
+    // failing the new type's rules, so it is only allowed on a field with no values yet.
+    if (parsed.data.field_type !== undefined) {
+      const current = await pool.query<{ field_type: string; has_values: boolean }>(
+        `SELECT field_type,
+                EXISTS (SELECT 1 FROM custom_field_values v WHERE v.field_def_id = d.id) AS has_values
+         FROM custom_field_defs d WHERE d.id = $1 AND d.workspace_id = $2`,
+        [req.params.id, req.workspace.id],
+      );
+      if (current.rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
+      if (current.rows[0].field_type !== parsed.data.field_type && current.rows[0].has_values) {
+        res.status(409).json({ error: 'Cannot change the type of a field that already has values' });
+        return;
+      }
+    }
 
     const fields: string[] = [];
     const values: unknown[] = [];
@@ -117,7 +189,7 @@ router.get('/values/:taskId', async (req, res, next) => {
       `SELECT cfv.*, cfd.name, cfd.field_type, cfd.options
        FROM custom_field_values cfv
        JOIN custom_field_defs cfd ON cfd.id = cfv.field_def_id
-       WHERE cfv.task_id = $1 AND cfv.workspace_id = $2`,
+       WHERE cfv.task_id = $1 AND cfv.workspace_id = $2 AND cfd.entity_type = 'task'`,
       [req.params.taskId, req.workspace.id],
     );
     res.json(rows);
@@ -140,7 +212,7 @@ router.put('/values/:taskId', async (req, res, next) => {
     );
     if (taskCheck.rows.length === 0) { res.status(404).json({ error: 'Task not found' }); return; }
 
-    const parsedEntries: z.infer<typeof valueSchema>[] = [];
+    const parsedEntries: ValueEntry[] = [];
     for (const entry of entries) {
       const parsed = valueSchema.safeParse(entry);
       if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -149,20 +221,26 @@ router.put('/values/:taskId', async (req, res, next) => {
     if (parsedEntries.length === 0) { res.json([]); return; }
 
     // One query for all field_def_ids instead of one existence-check per entry.
+    // entity_type = 'task' matters here: without it, a 'client'-type field definition's id
+    // could be attached to a task's values, corrupting the entity-type invariant (the
+    // client-scoped value routes below correctly filter by entity_type = 'client' — this was
+    // the one write path that didn't apply the equivalent filter).
     const fieldDefIds = [...new Set(parsedEntries.map((e) => e.field_def_id))];
-    const defResult = await pool.query<{ id: string }>(
-      'SELECT id FROM custom_field_defs WHERE id = ANY($1::uuid[]) AND workspace_id = $2',
+    const defResult = await pool.query<FieldDefRow>(
+      `SELECT id, field_type, options FROM custom_field_defs WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND entity_type = 'task'`,
       [fieldDefIds, req.workspace.id],
     );
-    const validDefIds = new Set(defResult.rows.map((r) => r.id));
-    const missing = fieldDefIds.find((id) => !validDefIds.has(id));
+    const defs = new Map(defResult.rows.map((r) => [r.id, r]));
+    const missing = fieldDefIds.find((id) => !defs.has(id));
     if (missing) { res.status(404).json({ error: `Field ${missing} not found` }); return; }
+    const normalized = normalizeValues(parsedEntries, defs);
+    if (typeof normalized === 'string') { res.status(400).json({ error: normalized }); return; }
 
     // One multi-row upsert instead of one round-trip per entry.
     const columnsPerRow = 6;
-    const valueRows = parsedEntries.map((e) => [
+    const valueRows = normalized.map((e) => [
       e.field_def_id, req.params.taskId, req.workspace.id,
-      e.value_text ?? null, e.value_number ?? null, e.value_date ?? null,
+      e.value_text, e.value_number, e.value_date,
     ]);
     const placeholders = valueRows
       .map((_, r) => `(${Array.from({ length: columnsPerRow }, (_, c) => `$${r * columnsPerRow + c + 1}`).join(',')})`)
@@ -200,7 +278,7 @@ router.get('/values/client/:clientId', async (req, res, next) => {
       `SELECT cfv.*, cfd.name, cfd.field_type, cfd.options
        FROM custom_field_values cfv
        JOIN custom_field_defs cfd ON cfd.id = cfv.field_def_id
-       WHERE cfv.client_id = $1 AND cfv.workspace_id = $2`,
+       WHERE cfv.client_id = $1 AND cfv.workspace_id = $2 AND cfd.entity_type = 'client'`,
       [req.params.clientId, req.workspace.id],
     );
     res.json(rows);
@@ -221,7 +299,7 @@ router.put('/values/client/:clientId', async (req, res, next) => {
     );
     if (clientCheck.rows.length === 0) { res.status(404).json({ error: 'Client not found' }); return; }
 
-    const parsedEntries: z.infer<typeof valueSchema>[] = [];
+    const parsedEntries: ValueEntry[] = [];
     for (const entry of entries) {
       const parsed = valueSchema.safeParse(entry);
       if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -230,18 +308,20 @@ router.put('/values/client/:clientId', async (req, res, next) => {
     if (parsedEntries.length === 0) { res.json([]); return; }
 
     const fieldDefIds = [...new Set(parsedEntries.map((e) => e.field_def_id))];
-    const defResult = await pool.query<{ id: string }>(
-      `SELECT id FROM custom_field_defs WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND entity_type = 'client'`,
+    const defResult = await pool.query<FieldDefRow>(
+      `SELECT id, field_type, options FROM custom_field_defs WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND entity_type = 'client'`,
       [fieldDefIds, req.workspace.id],
     );
-    const validDefIds = new Set(defResult.rows.map((r) => r.id));
-    const missing = fieldDefIds.find((id) => !validDefIds.has(id));
+    const defs = new Map(defResult.rows.map((r) => [r.id, r]));
+    const missing = fieldDefIds.find((id) => !defs.has(id));
     if (missing) { res.status(404).json({ error: `Field ${missing} not found` }); return; }
+    const normalized = normalizeValues(parsedEntries, defs);
+    if (typeof normalized === 'string') { res.status(400).json({ error: normalized }); return; }
 
     const columnsPerRow = 6;
-    const valueRows = parsedEntries.map((e) => [
+    const valueRows = normalized.map((e) => [
       e.field_def_id, req.params.clientId, req.workspace.id,
-      e.value_text ?? null, e.value_number ?? null, e.value_date ?? null,
+      e.value_text, e.value_number, e.value_date,
     ]);
     const placeholders = valueRows
       .map((_, r) => `(${Array.from({ length: columnsPerRow }, (_, c) => `$${r * columnsPerRow + c + 1}`).join(',')})`)

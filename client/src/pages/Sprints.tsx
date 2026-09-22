@@ -3,7 +3,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
@@ -25,7 +24,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, BarChart2, Download, MoveRight, TrendingDown, ClipboardCheck, Sparkles } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
-import { cn } from '@/lib/utils';
+import { cn, safeFormat } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 import {
@@ -105,8 +104,15 @@ export default function Sprints() {
   };
 
   const saveMutation = useMutation({
-    mutationFn: (data: FormData) => {
-      const payload = { ...data, goal: data.goal || undefined, start_date: data.start_date || undefined, end_date: data.end_date || undefined };
+    mutationFn: async (data: FormData): Promise<{ sprint: Sprint; incomplete_count: number } | Sprint> => {
+      // Cleared optional fields are sent as null: undefined means "unchanged" on PATCH, so a
+      // cleared goal/date would silently persist.
+      const payload = {
+        ...data,
+        goal: data.goal?.trim() ? data.goal : null,
+        start_date: data.start_date || null,
+        end_date: data.end_date || null,
+      };
       return editing
         ? apiRequest<{ sprint: Sprint; incomplete_count: number }>('PATCH', `/api/sprints/${editing.id}`, payload)
         : apiRequest<Sprint>('POST', '/api/sprints', payload);
@@ -116,13 +122,14 @@ export default function Sprints() {
       setOpen(false);
       toast({ title: editing ? 'Sprint updated' : 'Sprint created' });
       // If completing a sprint with incomplete tasks, show the close prompt
-      if (editing && variables.status === 'completed') {
-        const { sprint, incomplete_count } = result as { sprint: Sprint; incomplete_count: number };
+      if (editing && variables.status === 'completed' && 'incomplete_count' in result) {
+        const { sprint, incomplete_count } = result;
         if (incomplete_count > 0) {
           setClosePrompt({ sprint, incompleteCount: incomplete_count });
         }
       }
     },
+    onError: (e: Error) => toast({ title: editing ? 'Failed to update sprint' : 'Failed to create sprint', description: e.message, variant: 'destructive' }),
   });
 
   const moveToBacklogMut = useMutation({
@@ -142,6 +149,7 @@ export default function Sprints() {
       setDeleteTarget(null);
       toast({ title: 'Sprint deleted' });
     },
+    onError: (e: Error) => toast({ title: 'Failed to delete sprint', description: e.message, variant: 'destructive' }),
   });
 
   const toggleExpand = (id: string) => {
@@ -219,9 +227,10 @@ export default function Sprints() {
                         {sprint.goal && <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">{sprint.goal}</p>}
                         {(sprint.start_date || sprint.end_date) && (
                           <p className="text-xs text-muted-foreground mt-0.5">
-                            {sprint.start_date && format(new Date(sprint.start_date), 'MMM d')}
+                            {/* Date-only values parsed as LOCAL dates (new Date('YYYY-MM-DD') is UTC midnight). */}
+                            {sprint.start_date && safeFormat(sprint.start_date.substring(0, 10), 'MMM d')}
                             {sprint.start_date && sprint.end_date && ' → '}
-                            {sprint.end_date && format(new Date(sprint.end_date), 'MMM d, yyyy')}
+                            {sprint.end_date && safeFormat(sprint.end_date.substring(0, 10), 'MMM d, yyyy')}
                           </p>
                         )}
                       </div>
@@ -233,7 +242,7 @@ export default function Sprints() {
                           <Button variant="ghost" size="icon" className="h-7 w-7"><MoreVertical className="h-3.5 w-3.5" /></Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => openEdit(sprint)}><Pencil className="h-3.5 w-3.5 mr-2" />Edit</DropdownMenuItem>
+                          {isAdmin && <DropdownMenuItem onClick={() => openEdit(sprint)}><Pencil className="h-3.5 w-3.5 mr-2" />Edit</DropdownMenuItem>}
                           <DropdownMenuItem onClick={() => exportSprint(sprint)}><Download className="h-3.5 w-3.5 mr-2" />Export CSV</DropdownMenuItem>
                           {isAdmin && <DropdownMenuItem className="text-destructive" onClick={() => setDeleteTarget(sprint)}><Trash2 className="h-3.5 w-3.5 mr-2" />Delete</DropdownMenuItem>}
                         </DropdownMenuContent>
@@ -250,7 +259,7 @@ export default function Sprints() {
                 {isExpanded && (
                   <CardContent className="pt-0 px-4 pb-4 space-y-4">
                     {sprint.status !== 'planning' && <BurndownChart sprintId={sprint.id} />}
-                    <SprintTaskList sprintId={sprint.id} memberMap={memberMap} />
+                    <SprintTaskList sprintId={sprint.id} memberMap={memberMap} canRemove={isAdmin} />
                     {sprint.status !== 'planning' && <AiSummary sprintId={sprint.id} />}
                     {sprint.status === 'completed' && (
                       <RetroSection sprint={sprint} isAdmin={isAdmin} />
@@ -579,9 +588,15 @@ function BurndownChart({ sprintId }: { sprintId: string }) {
 // ─── Velocity Chart ───────────────────────────────────────────────────────────
 
 function VelocityChart({ sprints }: { sprints: Sprint[] }) {
-  const last = sprints.slice(-8); // last 8 completed sprints
-  const maxDone = Math.max(...last.map((s) => s.done_tasks), 1);
-  const maxTotal = Math.max(...last.map((s) => s.total_tasks), 1);
+  // The API orders sprints newest-first, so slice(-8) used to pick the OLDEST 8. Sort
+  // chronologically (by end, else start date) and keep the newest 8, oldest on the left.
+  const sortKey = (s: Sprint) => (s.end_date ?? s.start_date ?? '').substring(0, 10);
+  const last = [...sprints].sort((a, b) => sortKey(a).localeCompare(sortKey(b))).slice(-8);
+  // One shared scale for both bars (and the average line) — separate done/total maxima made a
+  // fully-completed sprint's done bar look taller than its own total bar.
+  const maxVal = Math.max(...last.map((s) => Math.max(s.done_tasks, s.total_tasks)), 1);
+  const maxDone = maxVal;
+  const maxTotal = maxVal;
   const chartHeight = 100;
   const barWidth = 24;
   const gap = 12;
@@ -698,9 +713,10 @@ const STATUS_COLORS: Record<string, string> = {
   blocked:     'bg-red-100 text-red-700',
 };
 
-function SprintTaskList({ sprintId, memberMap }: { sprintId: string; memberMap: Record<string, { display_name: string }> }) {
+function SprintTaskList({ sprintId, memberMap, canRemove }: { sprintId: string; memberMap: Record<string, { display_name: string }>; canRemove: boolean }) {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
+  const { toast } = useToast();
   const { data: tasks = [], isLoading } = useQuery<SprintTask[]>({
     queryKey: ['/api/sprints', sprintId, 'tasks'],
     queryFn: () => apiRequest('GET', `/api/sprints/${sprintId}/tasks`),
@@ -713,6 +729,7 @@ function SprintTaskList({ sprintId, memberMap }: { sprintId: string; memberMap: 
       qc.invalidateQueries({ queryKey: ['/api/sprints'] });
       qc.invalidateQueries({ queryKey: ['/api/tasks'] });
     },
+    onError: (e: Error) => toast({ title: 'Failed to remove task from sprint', description: e.message, variant: 'destructive' }),
   });
 
   if (isLoading) return <Skeleton className="h-10 w-full" />;
@@ -731,12 +748,16 @@ function SprintTaskList({ sprintId, memberMap }: { sprintId: string; memberMap: 
               {memberMap[task.assignee_clerk_id]?.display_name?.split(' ')[0] ?? '—'}
             </span>
           )}
-          <Button
-            variant="ghost" size="icon" className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-            onClick={() => removeMutation.mutate(task.id)}
-          >
-            <X className="h-3 w-3 text-muted-foreground" />
-          </Button>
+          {/* Removing a task from a sprint is requireAdmin server-side. */}
+          {canRemove && (
+            <Button
+              variant="ghost" size="icon" className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+              onClick={() => removeMutation.mutate(task.id)}
+              aria-label="Remove from sprint"
+            >
+              <X className="h-3 w-3 text-muted-foreground" />
+            </Button>
+          )}
         </div>
       ))}
     </div>

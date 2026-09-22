@@ -11,15 +11,27 @@ const router = Router();
 
 // ─── Shared: enrich members with Clerk display names ─────────────────────────
 
+// Clerk's getUserList caps `userId` at 100 entries per call — a single unbatched call silently
+// dropped anyone past the 100th member (they'd fall back to their raw Clerk user ID instead of
+// their real name) for any workspace larger than that. Chunking covers the full member list
+// regardless of workspace size (bounded by getMembersForWorkspace's own LIMIT 500).
+const CLERK_LOOKUP_CHUNK_SIZE = 100;
+
 async function enrichMembers(members: Awaited<ReturnType<typeof getMembersForWorkspace>>) {
   if (members.length === 0) return [];
   try {
-    const result = await clerkClient.users.getUserList({
-      userId: members.map((m) => m.clerk_user_id),
-      limit: 100,
-    });
+    const chunks: (typeof members)[] = [];
+    for (let i = 0; i < members.length; i += CLERK_LOOKUP_CHUNK_SIZE) {
+      chunks.push(members.slice(i, i + CLERK_LOOKUP_CHUNK_SIZE));
+    }
+    const results = await Promise.all(
+      chunks.map((chunk) =>
+        clerkClient.users.getUserList({ userId: chunk.map((m) => m.clerk_user_id), limit: CLERK_LOOKUP_CHUNK_SIZE }),
+      ),
+    );
+    const users = results.flatMap((r) => r.data);
     return members.map((m) => {
-      const u = result.data.find((u) => u.id === m.clerk_user_id);
+      const u = users.find((u) => u.id === m.clerk_user_id);
       const name = u
         ? [u.firstName, u.lastName].filter(Boolean).join(' ') ||
           u.emailAddresses[0]?.emailAddress ||
@@ -61,10 +73,17 @@ router.get('/:id/members', requireWorkspace, async (req, res, next) => {
   }
 });
 
-// GET /api/workspaces/me/members/:clerkUserId/stats
+// GET /api/workspaces/me/members/:clerkUserId/stats  — self or admin only
 router.get('/me/members/:clerkUserId/stats', requireWorkspace, async (req, res, next) => {
   try {
     const { clerkUserId } = req.params;
+
+    // Unlike role-change/removal, this had no boundary at all — any member could pull any other
+    // member's productivity stats just by knowing their Clerk id.
+    if (clerkUserId !== req.auth.userId && !ADMIN_ROLES.has(req.auth.memberRole ?? '')) {
+      res.status(403).json({ error: 'Can only view your own stats' });
+      return;
+    }
 
     // Verify the user is a member of this workspace
     const memberCheck = await pool.query<{ id: string }>(

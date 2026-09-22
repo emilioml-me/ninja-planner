@@ -66,49 +66,79 @@ export async function addDependency(
   workspaceId: string,
   createdBy: string,
 ): Promise<TaskDependency | null> {
-  // Verify both tasks belong to workspace
-  const check = await pool.query<{ id: string }>(
-    `SELECT id FROM tasks WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND deleted_at IS NULL`,
-    [[blockingTaskId, blockedTaskId], workspaceId],
-  );
-  if (check.rows.length < 2) return null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  // Cycle check: walk the full existing graph forward from blockedTaskId (following
-  // blocking_task_id → blocked_task_id edges) and see whether blockingTaskId is reachable.
-  // If it is, adding blockingTaskId → blockedTaskId would close a loop somewhere down the
-  // chain (not just a direct A→B/B→A reversal, which is all the old check looked for —
-  // A blocks B, B blocks C, then C blocks A used to sail through undetected).
-  const cycle = await pool.query(
-    `WITH RECURSIVE reachable(task_id) AS (
-       SELECT $1::uuid AS task_id
-       UNION
-       SELECT td.blocked_task_id
-       FROM task_dependencies td
-       JOIN reachable r ON td.blocking_task_id = r.task_id
-       WHERE td.workspace_id = $2
-     )
-     SELECT 1 FROM reachable WHERE task_id = $3 LIMIT 1`,
-    [blockedTaskId, workspaceId, blockingTaskId],
-  );
-  if (cycle.rows.length > 0) return null; // would create a cycle
+    // Serializes every concurrent addDependency call for this workspace against each other —
+    // without it, two requests creating opposite-direction edges between the same two tasks
+    // (or any pair that closes a longer cycle) could each run the cycle check before either's
+    // INSERT commits, both see no cycle, and both succeed, producing a real cycle that this
+    // whole mechanism exists to prevent. Released automatically on commit/rollback.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [workspaceId]);
 
-  const result = await pool.query<TaskDependency>(
-    `INSERT INTO task_dependencies (workspace_id, blocking_task_id, blocked_task_id, created_by)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (blocking_task_id, blocked_task_id) DO NOTHING
-     RETURNING *`,
-    [workspaceId, blockingTaskId, blockedTaskId, createdBy],
-  );
-  return result.rows[0] ?? null;
+    // Verify both tasks belong to workspace
+    const check = await client.query<{ id: string }>(
+      `SELECT id FROM tasks WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND deleted_at IS NULL`,
+      [[blockingTaskId, blockedTaskId], workspaceId],
+    );
+    if (check.rows.length < 2) {
+      await client.query('COMMIT');
+      return null;
+    }
+
+    // Cycle check: walk the full existing graph forward from blockedTaskId (following
+    // blocking_task_id → blocked_task_id edges) and see whether blockingTaskId is reachable.
+    // If it is, adding blockingTaskId → blockedTaskId would close a loop somewhere down the
+    // chain (not just a direct A→B/B→A reversal, which is all the old check looked for —
+    // A blocks B, B blocks C, then C blocks A used to sail through undetected).
+    const cycle = await client.query(
+      `WITH RECURSIVE reachable(task_id) AS (
+         SELECT $1::uuid AS task_id
+         UNION
+         SELECT td.blocked_task_id
+         FROM task_dependencies td
+         JOIN reachable r ON td.blocking_task_id = r.task_id
+         WHERE td.workspace_id = $2
+       )
+       SELECT 1 FROM reachable WHERE task_id = $3 LIMIT 1`,
+      [blockedTaskId, workspaceId, blockingTaskId],
+    );
+    if (cycle.rows.length > 0) {
+      await client.query('COMMIT');
+      return null; // would create a cycle
+    }
+
+    const result = await client.query<TaskDependency>(
+      `INSERT INTO task_dependencies (workspace_id, blocking_task_id, blocked_task_id, created_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (blocking_task_id, blocked_task_id) DO NOTHING
+       RETURNING *`,
+      [workspaceId, blockingTaskId, blockedTaskId, createdBy],
+    );
+    await client.query('COMMIT');
+    return result.rows[0] ?? null;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function removeDependency(
   id: string,
   workspaceId: string,
+  taskId: string,
 ): Promise<boolean> {
+  // Scoped by taskId (either side of the edge) in addition to id + workspace_id — previously
+  // any workspace member could delete any dependency edge in the workspace by id alone, as long
+  // as they could observe/guess it via a different task's URL, not just via the task the edge
+  // actually involves.
   const result = await pool.query(
-    'DELETE FROM task_dependencies WHERE id = $1 AND workspace_id = $2',
-    [id, workspaceId],
+    `DELETE FROM task_dependencies
+     WHERE id = $1 AND workspace_id = $2 AND (blocking_task_id = $3 OR blocked_task_id = $3)`,
+    [id, workspaceId, taskId],
   );
   return (result.rowCount ?? 0) > 0;
 }

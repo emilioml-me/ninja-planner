@@ -97,8 +97,11 @@ export function AppSidebar({ onClose }: AppSidebarProps) {
       <nav className="flex-1 py-4 space-y-1 px-2 overflow-y-auto">
         {NAV.map(({ href, label, icon: Icon }) => {
           const active = location === href || (href !== '/' && location.startsWith(href));
+          // asChild: without it, wouter v3's <Link> wraps children in its OWN <a>, so the
+          // literal <a> below became a real <a> nested inside another <a> in the live DOM —
+          // invalid markup that can double-announce to screen readers.
           return (
-            <Link key={href} href={href} onClick={onClose}>
+            <Link key={href} href={href} onClick={onClose} asChild>
               <a
                 className={cn(
                   'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',

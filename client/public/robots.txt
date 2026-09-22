@@ -10,18 +10,26 @@ Disallow: /invite/
 Disallow: /forgot-password
 Disallow: /reset-password
 
-# App / dashboard routes — behind auth, no SEO value
-Disallow: /dashboard/
+# App / dashboard routes — behind auth, no SEO value (no trailing slash so e.g.
+# /dashboard itself is covered, not only /dashboard/...)
+Disallow: /dashboard
 Disallow: /my-tasks
 Disallow: /tasks
+Disallow: /calendar
+Disallow: /analytics
 Disallow: /revenue
 Disallow: /roadmap
 Disallow: /reviews
 Disallow: /workload
 Disallow: /goals
 Disallow: /sprints
+Disallow: /sprint-templates
 Disallow: /epics
+Disallow: /epic-templates
 Disallow: /budgets
+Disallow: /clients
+Disallow: /meeting-notes
+Disallow: /automations
 Disallow: /changelog
 Disallow: /timeline
 Disallow: /members
@@ -30,8 +38,11 @@ Disallow: /webhooks
 Disallow: /settings/
 Disallow: /admin/
 
+# Token-based guest links (private, per-recipient)
+Disallow: /g/
+
 # API routes
 Disallow: /api/
 
 # Sitemap location
-Sitemap: https://plan-ninja.com/sitemap.xml
+Sitemap: https://ninja-planner.com/sitemap.xml

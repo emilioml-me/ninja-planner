@@ -23,13 +23,19 @@ export async function sendEmail(opts: {
     return;
   }
   try {
-    await resend.emails.send({
+    // Resend v6 does not throw on API errors — it resolves { data, error }. Check `error`
+    // explicitly, otherwise rejected sends (bad from-domain, invalid recipient, rate limit)
+    // are silently treated as delivered.
+    const { error } = await resend.emails.send({
       from: FROM_ADDRESS,
       to: opts.to,
       subject: opts.subject,
       html: opts.html,
       text: opts.text,
     });
+    if (error) {
+      logger.error({ err: error, to: opts.to, subject: opts.subject }, 'resend email rejected');
+    }
   } catch (err) {
     logger.error({ err, to: opts.to, subject: opts.subject }, 'resend email failed');
   }
@@ -140,6 +146,34 @@ export async function sendCommentMentionEmail(opts: {
     subject: `${opts.commenter} mentioned you on "${opts.taskTitle}"`,
     html: layout('You Were Mentioned', body),
     text: `${opts.commenter} mentioned you on "${opts.taskTitle}": ${preview}\n\nOpen: ${opts.workspaceUrl}/tasks`,
+  });
+}
+
+export async function sendCommentAddedEmail(opts: {
+  to: string;
+  recipientName: string;
+  commenter: string;
+  taskTitle: string;
+  commentBody: string;
+  workspaceUrl: string;
+}): Promise<void> {
+  const preview = opts.commentBody.length > 200
+    ? opts.commentBody.slice(0, 197) + '…'
+    : opts.commentBody;
+  const body = `
+    <h2>New comment on a task</h2>
+    <p>Hi ${escHtml(opts.recipientName)},</p>
+    <p><strong>${escHtml(opts.commenter)}</strong> commented on <strong>"${escHtml(opts.taskTitle)}"</strong>:</p>
+    <blockquote style="margin:0 0 16px;padding:12px 16px;background:#f4f4f5;border-left:3px solid #18181b;border-radius:4px;font-size:14px;color:#3f3f46;">
+      ${escHtml(preview)}
+    </blockquote>
+    <a href="${escHtml(safeHref(opts.workspaceUrl))}/tasks" class="cta">View Comment</a>
+  `;
+  await sendEmail({
+    to: opts.to,
+    subject: `${opts.commenter} commented on "${opts.taskTitle}"`,
+    html: layout('New Comment', body),
+    text: `${opts.commenter} commented on "${opts.taskTitle}": ${preview}\n\nOpen: ${opts.workspaceUrl}/tasks`,
   });
 }
 

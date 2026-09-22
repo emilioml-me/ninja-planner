@@ -27,8 +27,10 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Plus, MoreVertical, Pencil, Trash2, Users } from 'lucide-react';
+import { Plus, MoreVertical, Pencil, Trash2, Users, RefreshCw } from 'lucide-react';
 import { CustomFieldsSection } from '@/components/CustomFieldsSection';
+import { useIsAdmin } from '@/hooks/use-is-admin';
+import { cn } from '@/lib/utils';
 
 interface Client {
   id: string;
@@ -108,14 +110,18 @@ export default function Clients() {
     setOpen(true);
   };
 
+  type ClientPayload = Omit<FormData, 'contact_name' | 'contact_email' | 'notes'> & {
+    contact_name?: string | null; contact_email?: string | null; notes?: string | null;
+  };
+
   const createMut = useMutation({
-    mutationFn: (d: FormData) => apiRequest('POST', '/api/clients', d),
+    mutationFn: (d: ClientPayload) => apiRequest('POST', '/api/clients', d),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/clients'] }); setOpen(false); toast({ title: 'Client created' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
   const updateMut = useMutation({
-    mutationFn: (d: FormData) => apiRequest('PATCH', `/api/clients/${editing!.id}`, d),
+    mutationFn: (d: ClientPayload) => apiRequest('PATCH', `/api/clients/${editing!.id}`, d),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/clients'] }); setOpen(false); setEditing(null); toast({ title: 'Client updated' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
@@ -126,9 +132,34 @@ export default function Clients() {
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
+  const isAdmin = useIsAdmin();
+  const syncMut = useMutation({
+    mutationFn: () => apiRequest<{ synced: number }>('POST', '/api/integrations/sync-clients'),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['/api/clients'] });
+      toast({ title: `Synced ${data.synced} client${data.synced === 1 ? '' : 's'} from CRM` });
+    },
+    onError: (e: Error) => toast({ title: 'CRM sync failed', description: e.message, variant: 'destructive' }),
+  });
+
   const handleSubmit = (d: FormData) => {
-    const payload = { ...d, contact_email: d.contact_email || undefined };
-    editing ? updateMut.mutate(payload) : createMut.mutate(payload);
+    if (editing) {
+      // PATCH treats undefined as "unchanged", so cleared optional fields must be sent as null
+      // or the old value silently persists.
+      updateMut.mutate({
+        ...d,
+        contact_name:  d.contact_name?.trim() ? d.contact_name : null,
+        contact_email: d.contact_email || null,
+        notes:         d.notes?.trim() ? d.notes : null,
+      });
+    } else {
+      createMut.mutate({
+        ...d,
+        contact_name:  d.contact_name?.trim() ? d.contact_name : undefined,
+        contact_email: d.contact_email || undefined,
+        notes:         d.notes?.trim() ? d.notes : undefined,
+      });
+    }
   };
 
   const activeClients = clients.filter((c) => c.stage === 'active');
@@ -139,9 +170,23 @@ export default function Clients() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-6 py-4 border-b">
         <h1 className="text-xl font-semibold">Clients</h1>
-        <Button size="sm" className="gap-2" onClick={openCreate}>
-          <Plus className="h-4 w-4" /> Add Client
-        </Button>
+        <div className="flex items-center gap-2">
+          {isAdmin && (
+            <Button
+              size="sm" variant="outline" className="gap-2"
+              disabled={syncMut.isPending}
+              onClick={() => syncMut.mutate()}
+              title="Pull the latest client roster from this workspace's linked crm-ninja account"
+            >
+              <RefreshCw className={cn('h-4 w-4', syncMut.isPending && 'animate-spin')} /> Sync from CRM
+            </Button>
+          )}
+          {isAdmin && (
+            <Button size="sm" className="gap-2" onClick={openCreate}>
+              <Plus className="h-4 w-4" /> Add Client
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -206,6 +251,7 @@ export default function Clients() {
                       <TableCell className="text-right">{fmt(c.mrr)}</TableCell>
                       <TableCell className="text-muted-foreground text-sm max-w-48 truncate">{c.notes}</TableCell>
                       <TableCell>
+                        {isAdmin && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button variant="ghost" size="icon" className="h-8 w-8">
@@ -218,12 +264,13 @@ export default function Clients() {
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               className="text-destructive"
-                              onClick={() => deleteMut.mutate(c.id)}
+                              onClick={() => { if (confirm(`Delete client "${c.name}"?`)) deleteMut.mutate(c.id); }}
                             >
                               <Trash2 className="h-4 w-4 mr-2" /> Delete
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -282,7 +329,7 @@ export default function Clients() {
                 <FormField control={form.control} name="mrr" render={({ field }) => (
                   <FormItem>
                     <FormLabel>MRR ($)</FormLabel>
-                    <FormControl><Input type="number" min="0" step="50" {...field} /></FormControl>
+                    <FormControl><Input type="number" min="0" step="0.01" {...field} /></FormControl>
                     <FormMessage />
                   </FormItem>
                 )} />

@@ -7,6 +7,7 @@ import { useAuth } from '@clerk/clerk-react';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMembers } from '@/hooks/use-members';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -209,6 +210,7 @@ function EpicComments({ epicId }: { epicId: string }) {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
+  const { displayName, initials: memberInitials } = useMembers();
   const [draft, setDraft] = useState('');
 
   const { data: comments = [] } = useQuery<EpicComment[]>({
@@ -228,6 +230,7 @@ function EpicComments({ epicId }: { epicId: string }) {
   const deleteMut = useMutation({
     mutationFn: (commentId: string) => apiRequest('DELETE', `/api/epics/${epicId}/comments/${commentId}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/epics', epicId, 'comments'] }),
+    onError: (e: Error) => toast({ title: 'Failed to delete comment', description: e.message, variant: 'destructive' }),
   });
 
   const handleSend = () => {
@@ -248,7 +251,7 @@ function EpicComments({ epicId }: { epicId: string }) {
         ) : (
           comments.map((c) => {
             const isOwn = c.author_clerk_id === userId;
-            const initials = c.author_clerk_id.slice(-2).toUpperCase();
+            const initials = memberInitials(c.author_clerk_id);
             return (
               <div key={c.id} className="flex items-start gap-2 group">
                 <Avatar className="h-6 w-6 shrink-0 mt-0.5">
@@ -256,7 +259,7 @@ function EpicComments({ epicId }: { epicId: string }) {
                 </Avatar>
                 <div className="flex-1 min-w-0 bg-muted/40 rounded-lg px-3 py-2">
                   <div className="flex items-baseline justify-between gap-2">
-                    <span className="text-xs font-medium">{isOwn ? 'You' : `User ${initials}`}</span>
+                    <span className="text-xs font-medium">{isOwn ? 'You' : displayName(c.author_clerk_id)}</span>
                     <span className="text-[10px] text-muted-foreground shrink-0">
                       {safeFromNow(c.created_at, { addSuffix: true })}
                     </span>
@@ -267,7 +270,7 @@ function EpicComments({ epicId }: { epicId: string }) {
                   <Button
                     variant="ghost" size="icon"
                     className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5"
-                    onClick={() => deleteMut.mutate(c.id)}
+                    onClick={() => { if (confirm('Delete this comment?')) deleteMut.mutate(c.id); }}
                   >
                     <Trash2 className="h-3 w-3" />
                   </Button>
@@ -331,23 +334,79 @@ const formSchema = z.object({
 });
 type FormData = z.infer<typeof formSchema>;
 
+// Read/discuss view reachable by every member (card click). Comments, the retrospective and the
+// AI summary previously lived only inside the admin-only Edit dialog, so non-admins couldn't
+// reach them at all.
+function EpicDetailDialog({
+  epic, onOpenChange, isAdmin,
+}: {
+  epic: Epic | null;
+  onOpenChange: (v: boolean) => void;
+  isAdmin: boolean;
+}) {
+  const pct = epic && epic.total_tasks > 0 ? Math.round((epic.done_tasks / epic.total_tasks) * 100) : 0;
+  return (
+    <Dialog open={!!epic} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[520px] max-h-[90vh] overflow-y-auto">
+        {epic && (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Layers className="h-4 w-4 shrink-0" style={{ color: epic.color }} />
+                {epic.title}
+              </DialogTitle>
+              <DialogDescription>
+                {(STATUS_META[epic.status] ?? STATUS_META.active).label}
+                {' · '}{epic.done_tasks} / {epic.total_tasks} tasks ({pct}%)
+                {epic.total_points > 0 && ` · ${epic.done_points} / ${epic.total_points} pts`}
+              </DialogDescription>
+            </DialogHeader>
+            {epic.description && (
+              <p className="text-sm text-muted-foreground whitespace-pre-wrap">{epic.description}</p>
+            )}
+            {epic.external_ref && (
+              <a
+                href={epic.external_ref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+              >
+                <ExternalLink className="h-3 w-3" />
+                {externalRefLabel(epic.external_ref)}
+              </a>
+            )}
+            <Progress value={pct} className="h-1.5" />
+            <EpicAiSummary epicId={epic.id} />
+            <EpicRetro epicId={epic.id} isAdmin={isAdmin} />
+            <EpicComments epicId={epic.id} />
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function EpicFormDialog({
-  open, onOpenChange, epic, onSave, isPending, isAdmin,
+  open, onOpenChange, epic, onSave, isPending,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   epic?: Epic | null;
   onSave: (data: FormData) => void;
   isPending?: boolean;
-  isAdmin?: boolean;
 }) {
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
     defaultValues: {
-      title:       epic?.title ?? '',
-      description: epic?.description ?? '',
-      status:      (epic?.status ?? 'active') as FormData['status'],
-      color:       epic?.color ?? '#6366f1',
+      title:        epic?.title ?? '',
+      description:  epic?.description ?? '',
+      status:       (epic?.status ?? 'active') as FormData['status'],
+      color:        epic?.color ?? '#6366f1',
+      // Missing here previously (only set by the reset-on-open effect below) meant the
+      // external_ref input was uncontrolled on first mount, then flipped to controlled the
+      // moment the effect ran — React's "changing an uncontrolled input to be controlled"
+      // warning on every dialog open.
+      external_ref: epic?.external_ref ?? '',
     },
   });
 
@@ -448,16 +507,6 @@ function EpicFormDialog({
             </DialogFooter>
           </form>
         </Form>
-
-        {/* Comments only make sense once the epic exists (mirrors task comments requiring a
-            real task id — there's nothing to attach a comment to before the first save). */}
-        {epic && (
-          <>
-            <EpicAiSummary epicId={epic.id} />
-            <EpicRetro epicId={epic.id} isAdmin={!!isAdmin} />
-            <EpicComments epicId={epic.id} />
-          </>
-        )}
       </DialogContent>
     </Dialog>
   );
@@ -471,6 +520,7 @@ export default function Epics() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Epic | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Epic | null>(null);
+  const [viewingId, setViewingId] = useState<string | null>(null);
 
   const { data: epics = [], isLoading } = useQuery<Epic[]>({
     queryKey: ['/api/epics'],
@@ -497,6 +547,9 @@ export default function Epics() {
     onError:   () => toast({ title: 'Failed to delete epic', variant: 'destructive' }),
   });
 
+  // Track the viewed epic by id so the detail dialog reflects refetched progress/status.
+  const viewing = viewingId ? epics.find((e) => e.id === viewingId) ?? null : null;
+
   const active    = epics.filter((e) => e.status === 'active');
   const completed = epics.filter((e) => e.status === 'completed');
   const archived  = epics.filter((e) => e.status === 'archived');
@@ -513,7 +566,14 @@ export default function Epics() {
               : 0;
             const { label: statusLabel, variant } = STATUS_META[epic.status] ?? STATUS_META.active;
             return (
-              <Card key={epic.id} className="relative overflow-hidden">
+              <Card
+                key={epic.id}
+                className="relative overflow-hidden cursor-pointer hover:border-primary/40 transition-colors"
+                role="button"
+                tabIndex={0}
+                onClick={() => setViewingId(epic.id)}
+                onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setViewingId(epic.id); } }}
+              >
                 {/* Color stripe */}
                 <div className="absolute top-0 left-0 right-0 h-1" style={{ backgroundColor: epic.color }} />
                 <CardHeader className="pt-4 pb-2 flex flex-row items-start justify-between gap-2">
@@ -524,6 +584,9 @@ export default function Epics() {
                   <div className="flex items-center gap-1.5 shrink-0">
                     <Badge variant={variant} className="text-[10px] px-1.5">{statusLabel}</Badge>
                     {isAdmin && (
+                      // React events bubble through portals, so menu-item clicks would also hit
+                      // the card's onClick (opening the detail view) without this.
+                      <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" className="h-6 w-6">
@@ -542,6 +605,7 @@ export default function Epics() {
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
+                      </div>
                     )}
                   </div>
                 </CardHeader>
@@ -555,6 +619,7 @@ export default function Epics() {
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                      onClick={(e) => e.stopPropagation()}
                     >
                       <ExternalLink className="h-3 w-3" />
                       {externalRefLabel(epic.external_ref)}
@@ -657,6 +722,12 @@ export default function Epics() {
         epic={editing}
         onSave={(d) => updateMutation.mutate(d)}
         isPending={updateMutation.isPending}
+      />
+
+      {/* Detail / discussion view (all members) */}
+      <EpicDetailDialog
+        epic={viewing}
+        onOpenChange={(v) => { if (!v) setViewingId(null); }}
         isAdmin={isAdmin}
       />
 

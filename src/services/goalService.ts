@@ -76,7 +76,7 @@ export async function getGoalById(id: string, workspaceId: string): Promise<Goal
 
 export async function createGoal(
   workspaceId: string,
-  data: { title: string; description?: string; due_date?: string },
+  data: { title: string; description?: string | null; due_date?: string | null },
   createdBy: string,
 ): Promise<Goal> {
   const result = await pool.query<Goal>(
@@ -93,7 +93,9 @@ export async function updateGoal(
   id: string,
   workspaceId: string,
   data: Partial<Pick<Goal, 'title' | 'description' | 'status' | 'due_date'>>,
-): Promise<Goal | null> {
+): Promise<(Goal & { prev_status: string }) | null> {
+  // prev_status is the status immediately before this update, read under a row lock in the
+  // same statement, so callers fire goal.completed only on a real transition.
   const fields: string[] = [];
   const values: unknown[] = [];
   let i = 1;
@@ -105,8 +107,14 @@ export async function updateGoal(
   }
   if (fields.length === 0) return null;
   values.push(id, workspaceId);
-  const result = await pool.query<Goal>(
-    `UPDATE goals SET ${fields.join(', ')} WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
+  const result = await pool.query<Goal & { prev_status: string }>(
+    `WITH prev AS (
+       SELECT id, status FROM goals WHERE id = $${i++} AND workspace_id = $${i} FOR UPDATE
+     )
+     UPDATE goals g SET ${fields.join(', ')}
+     FROM prev
+     WHERE g.id = prev.id
+     RETURNING g.*, prev.status AS prev_status`,
     values,
   );
   return result.rows[0] ?? null;
@@ -143,15 +151,18 @@ export async function addGoalLink(
     'SELECT id FROM goals WHERE id = $1 AND workspace_id = $2',
     [goalId, workspaceId],
   );
-  if (goalCheck.rows.length === 0) throw new Error('Goal not found');
+  // status: 404 so the central error handler returns a 404 with this message instead of a 500.
+  if (goalCheck.rows.length === 0) throw Object.assign(new Error('Goal not found'), { status: 404 });
 
   // Tenant-isolation guard: the linked entity must belong to the same workspace as the goal.
   if (entityType === 'task') {
     const taskCheck = await pool.query(
-      'SELECT id FROM tasks WHERE id = $1 AND workspace_id = $2',
+      'SELECT id FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
       [entityId, workspaceId],
     );
-    if (taskCheck.rows.length === 0) throw new Error('Task not found in this workspace');
+    if (taskCheck.rows.length === 0) {
+      throw Object.assign(new Error('Task not found in this workspace'), { status: 404 });
+    }
   }
 
   const result = await pool.query<GoalLink>(
@@ -228,18 +239,19 @@ async function _notifyGoalMilestone(
   // so this guard is what makes repeated re-checks idempotent instead of re-notifying forever.
   // The email send below is gated on the same guard (via rowCount) so it doesn't re-fire
   // independently of the in-app notification.
+  //
+  // Backed by a real unique index (migration 050) rather than a plain WHERE NOT EXISTS — two
+  // concurrent transactions both evaluating NOT EXISTS as true before either commits used to be
+  // able to double-insert (and double-email) the same milestone. ON CONFLICT DO NOTHING makes
+  // the second writer lose atomically instead of racing on a read.
   const inserted = await pool.query(
     `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
      SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
      WHERE NOT EXISTS (
-       SELECT 1 FROM notifications
-       WHERE workspace_id = $1 AND recipient_clerk_id = $2
-         AND type = 'goal_milestone' AND body = $4
-     )
-     AND NOT EXISTS (
        SELECT 1 FROM notification_preferences
        WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'goal_milestone' AND enabled = false
-     )`,
+     )
+     ON CONFLICT (workspace_id, recipient_clerk_id, body) WHERE type = 'goal_milestone' DO NOTHING`,
     [workspaceId, goal.created_by, title, dedupBody],
   );
   if ((inserted.rowCount ?? 0) === 0) return;

@@ -1,10 +1,11 @@
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useUser } from '@clerk/clerk-react';
-import { format, isBefore, isToday, startOfDay } from 'date-fns';
-import { safeFormat, localDateOnly } from '@/lib/utils';
+import { format, startOfDay, differenceInCalendarDays } from 'date-fns';
+import { safeFormat, localDateOnly, todayLocal } from '@/lib/utils';
 import { Link } from 'wouter';
 import { useApiClient } from '@/lib/api';
+import { useTaskList } from '@/hooks/use-tasks';
 import { useIntegrationsSummary } from '@/hooks/use-integrations';
 import { StatCard } from '@/components/StatCard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -45,14 +46,6 @@ import {
 import { cn } from '@/lib/utils';
 
 // ─── Types (minimal, inlined) ─────────────────────────────────────────────────
-
-interface Task {
-  id: string;
-  title: string;
-  status: string;
-  priority: string;
-  due_date: string | null;
-}
 
 interface RevenueTarget {
   id: string;
@@ -179,12 +172,10 @@ export default function Dashboard() {
         toast({ title: 'No overdue tasks', description: 'All tasks are on track!' });
       }
     },
+    onError: (err: Error) => toast({ title: 'Overdue alert failed', description: err.message, variant: 'destructive' }),
   });
 
-  const { data: tasks = [],   isLoading: tLoading } = useQuery<Task[]>({
-    queryKey: ['/api/tasks'],
-    queryFn: () => apiRequest<Task[]>('GET', '/api/tasks'),
-  });
+  const { tasks, isLoading: tLoading, truncated: tasksTruncated, total: totalTasks } = useTaskList();
 
   const { data: revenue = [], isLoading: rLoading } = useQuery<RevenueTarget[]>({
     queryKey: ['/api/revenue'],
@@ -221,15 +212,22 @@ export default function Dashboard() {
 
   const now = new Date();
   const todayStart = startOfDay(now);
+  const today = todayLocal();
+
+  // Compare LOCAL calendar days (YYYY-MM-DD strings). Previously "needs attention" required
+  // due_date + 23:59:59 <= now, which excluded every task due today until midnight, so the
+  // "Due Today" count was always 0.
+  const dueDay = (t: { due_date: string | null }) => (t.due_date ? t.due_date.substring(0, 10) : null);
+  const isOverdueTask = (t: { due_date: string | null }) => { const d = dueDay(t); return d !== null && d < today; };
 
   const needsAttention = tasks.filter((t) => {
-    if (t.status === 'done' || !t.due_date) return false;
-    const due = new Date(t.due_date + 'T23:59:59');
-    return due <= now; // overdue OR end of today
-  }).sort((a, b) => new Date(a.due_date!).getTime() - new Date(b.due_date!).getTime());
+    if (t.status === 'done') return false;
+    const d = dueDay(t);
+    return d !== null && d <= today; // overdue OR due today
+  }).sort((a, b) => dueDay(a)!.localeCompare(dueDay(b)!));
 
-  const overdueCount  = needsAttention.filter((t) => isBefore(new Date(t.due_date! + 'T23:59:59'), todayStart)).length;
-  const dueTodayCount = needsAttention.filter((t) => isToday(localDateOnly(t.due_date!))).length;
+  const overdueCount  = needsAttention.filter(isOverdueTask).length;
+  const dueTodayCount = needsAttention.filter((t) => dueDay(t) === today).length;
   const inProgress    = tasks.filter((t) => t.status === 'in_progress').length;
 
   // ── Derived: revenue (current month) ───────────────────────────────────────
@@ -251,7 +249,7 @@ export default function Dashboard() {
   // ── Derived: last review ────────────────────────────────────────────────────
 
   const lastReview = [...reviews]
-    .sort((a, b) => new Date(b.week_start).getTime() - new Date(a.week_start).getTime())[0] ?? null;
+    .sort((a, b) => String(b.week_start).localeCompare(String(a.week_start)))[0] ?? null;
 
   // ── Derived: goals ──────────────────────────────────────────────────────────
 
@@ -263,8 +261,10 @@ export default function Dashboard() {
   const sprintPct = activeSprint && activeSprint.total_tasks > 0
     ? Math.round((activeSprint.done_tasks / activeSprint.total_tasks) * 100)
     : 0;
+  // end_date is a date-only 'YYYY-MM-DD' -- parse as LOCAL midnight (new Date('YYYY-MM-DD') is
+  // UTC midnight and shifted the count by a day for users west of UTC) and count calendar days.
   const sprintDaysLeft = activeSprint?.end_date
-    ? Math.max(0, Math.ceil((new Date(activeSprint.end_date).getTime() - now.getTime()) / 86_400_000))
+    ? Math.max(0, differenceInCalendarDays(localDateOnly(activeSprint.end_date.substring(0, 10)), todayStart))
     : null;
 
   const isLoading = tLoading || rLoading || rmLoading || rvLoading;
@@ -314,39 +314,47 @@ export default function Dashboard() {
             />
           </div>
         )}
+        {tasksTruncated && (
+          <p className="flex items-center gap-1.5 text-xs text-yellow-700 dark:text-yellow-400">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Task counts are based on {tasks.length} of {Math.max(totalTasks, tasks.length)} tasks and may be incomplete.
+          </p>
+        )}
 
         {/* ── Integration stat cards (only shown when configured) ─────── */}
-        {integrations && (
-          <>
+        {/* Each integration card is shown independently -- helpdesk/schedule were previously
+            nested inside the CRM check and never rendered for workspaces without CRM. */}
+        {integrations && (integrations.crm.configured || integrations.helpdesk.configured || integrations.schedule.configured) && (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {integrations.crm.configured && (
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                <StatCard
-                  label="Active Clients"
-                  value={integrations.crm.data ? String(integrations.crm.data.activeClients) : '—'}
-                  icon={<Users className="h-4 w-4 text-blue-500" />}
-                />
-                <StatCard
-                  label="MRR"
-                  value={integrations.crm.data ? `$${integrations.crm.data.totalMRR.toLocaleString()}` : '—'}
-                  icon={<TrendingUp className="h-4 w-4 text-blue-500" />}
-                />
-                {integrations.helpdesk.configured && (
-                  <StatCard
-                    label="Open Tickets"
-                    value={integrations.helpdesk.data ? String(integrations.helpdesk.data.openTickets) : '—'}
-                    icon={<HeadphonesIcon className={cn('h-4 w-4', integrations.helpdesk.data?.urgentTickets ? 'text-destructive' : 'text-orange-500')} />}
-                  />
-                )}
-                {integrations.schedule.configured && (
-                  <StatCard
-                    label="Appointments Today"
-                    value={integrations.schedule.data ? String(integrations.schedule.data.todayCount) : '—'}
-                    icon={<CalendarDays className="h-4 w-4 text-purple-500" />}
-                  />
-                )}
-              </div>
+              <StatCard
+                label="Active Clients"
+                value={integrations.crm.data ? String(integrations.crm.data.activeClients) : '—'}
+                icon={<Users className="h-4 w-4 text-blue-500" />}
+              />
             )}
-          </>
+            {integrations.crm.configured && (
+              <StatCard
+                label="MRR"
+                value={integrations.crm.data ? `$${integrations.crm.data.totalMRR.toLocaleString()}` : '—'}
+                icon={<TrendingUp className="h-4 w-4 text-blue-500" />}
+              />
+            )}
+            {integrations.helpdesk.configured && (
+              <StatCard
+                label="Open Tickets"
+                value={integrations.helpdesk.data ? String(integrations.helpdesk.data.openTickets) : '—'}
+                icon={<HeadphonesIcon className={cn('h-4 w-4', integrations.helpdesk.data?.urgentTickets ? 'text-destructive' : 'text-orange-500')} />}
+              />
+            )}
+            {integrations.schedule.configured && (
+              <StatCard
+                label="Appointments Today"
+                value={integrations.schedule.data ? String(integrations.schedule.data.todayCount) : '—'}
+                icon={<CalendarDays className="h-4 w-4 text-purple-500" />}
+              />
+            )}
+          </div>
         )}
 
         {/* ── Middle row ──────────────────────────────────────────────────── */}
@@ -376,7 +384,7 @@ export default function Dashboard() {
               ) : (
                 <div className="space-y-1">
                   {needsAttention.slice(0, 7).map((task) => {
-                    const isOverdue = isBefore(new Date(task.due_date! + 'T23:59:59'), todayStart);
+                    const isOverdue = isOverdueTask(task);
                     return (
                       <div
                         key={task.id}
@@ -413,10 +421,8 @@ export default function Dashboard() {
                 </div>
               )}
               <Separator className="mt-4 mb-3" />
-              <Link href="/tasks">
-                <a className="text-xs text-primary hover:underline flex items-center gap-1">
+              <Link href="/tasks" className="text-xs text-primary hover:underline flex items-center gap-1">
                   Go to task board <ArrowRight className="h-3 w-3" />
-                </a>
               </Link>
             </CardContent>
           </Card>
@@ -454,10 +460,8 @@ export default function Dashboard() {
                 ) : (
                   <div className="py-3 text-center">
                     <p className="text-sm text-muted-foreground">No target set for {format(now, 'MMMM')}.</p>
-                    <Link href="/revenue">
-                      <a className="text-xs text-primary hover:underline mt-1 inline-flex items-center gap-1">
+                    <Link href="/revenue" className="text-xs text-primary hover:underline mt-1 inline-flex items-center gap-1">
                         Add one <ArrowRight className="h-3 w-3" />
-                      </a>
                     </Link>
                   </div>
                 )}
@@ -503,10 +507,8 @@ export default function Dashboard() {
                 ) : (
                   <div className="py-3 text-center">
                     <p className="text-sm text-muted-foreground">No reviews yet.</p>
-                    <Link href="/reviews">
-                      <a className="text-xs text-primary hover:underline mt-1 inline-flex items-center gap-1">
+                    <Link href="/reviews" className="text-xs text-primary hover:underline mt-1 inline-flex items-center gap-1">
                         Start this week's review <ArrowRight className="h-3 w-3" />
-                      </a>
                     </Link>
                   </div>
                 )}
@@ -563,10 +565,8 @@ export default function Dashboard() {
               </div>
             )}
             <Separator className="mt-4 mb-3" />
-            <Link href="/roadmap">
-              <a className="text-xs text-primary hover:underline flex items-center gap-1">
+            <Link href="/roadmap" className="text-xs text-primary hover:underline flex items-center gap-1">
                 Open roadmap <ArrowRight className="h-3 w-3" />
-              </a>
             </Link>
           </CardContent>
         </Card>
@@ -606,10 +606,8 @@ export default function Dashboard() {
                     <p className="text-xs text-muted-foreground">+{activeGoals.length - 4} more</p>
                   )}
                   <Separator className="mt-2 mb-1" />
-                  <Link href="/goals">
-                    <a className="text-xs text-primary hover:underline flex items-center gap-1">
+                  <Link href="/goals" className="text-xs text-primary hover:underline flex items-center gap-1">
                       View all goals <ArrowRight className="h-3 w-3" />
-                    </a>
                   </Link>
                 </CardContent>
               </Card>
@@ -654,10 +652,8 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <Separator className="mt-1 mb-1" />
-                  <Link href="/sprints">
-                    <a className="text-xs text-primary hover:underline flex items-center gap-1">
+                  <Link href="/sprints" className="text-xs text-primary hover:underline flex items-center gap-1">
                       View sprint <ArrowRight className="h-3 w-3" />
-                    </a>
                   </Link>
                 </CardContent>
               </Card>
@@ -704,15 +700,13 @@ export default function Dashboard() {
                 </div>
                 {webhookHealth.last_delivered_at && (
                   <span className="text-xs text-muted-foreground">
-                    {format(new Date(webhookHealth.last_delivered_at), 'MMM d, HH:mm')}
+                    {safeFormat(webhookHealth.last_delivered_at, 'MMM d, HH:mm')}
                   </span>
                 )}
               </div>
               <Separator className="mt-4 mb-3" />
-              <Link href="/webhooks">
-                <a className="text-xs text-primary hover:underline flex items-center gap-1">
+              <Link href="/webhooks" className="text-xs text-primary hover:underline flex items-center gap-1">
                   Manage webhooks <ArrowRight className="h-3 w-3" />
-                </a>
               </Link>
             </CardContent>
           </Card>

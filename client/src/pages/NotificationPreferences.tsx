@@ -3,6 +3,7 @@ import { useApiClient } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Bell } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 
 const TYPE_LABELS: Record<string, { label: string; hint: string }> = {
   comment_added:    { label: 'Comments',            hint: 'New comments on tasks and epics you\'re involved in' },
@@ -20,8 +21,9 @@ const TYPE_LABELS: Record<string, { label: string; hint: string }> = {
 export default function NotificationPreferences() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
+  const { toast } = useToast();
 
-  const { data: prefs, isLoading } = useQuery<Record<string, boolean>>({
+  const { data: prefs, isLoading, isError, error, refetch } = useQuery<Record<string, boolean>>({
     queryKey: ['notification-preferences'],
     queryFn: () => apiRequest('GET', '/api/notifications/preferences'),
   });
@@ -35,8 +37,9 @@ export default function NotificationPreferences() {
       qc.setQueryData(['notification-preferences'], (old?: Record<string, boolean>) => ({ ...old, [type]: enabled }));
       return { prev };
     },
-    onError: (_err, _vars, ctx) => {
+    onError: (err: Error, _vars, ctx) => {
       if (ctx?.prev) qc.setQueryData(['notification-preferences'], ctx.prev);
+      toast({ title: 'Failed to save preference', description: err.message, variant: 'destructive' });
     },
     onSettled: () => qc.invalidateQueries({ queryKey: ['notification-preferences'] }),
   });
@@ -53,6 +56,17 @@ export default function NotificationPreferences() {
 
       {isLoading ? (
         <div className="space-y-3">{[1,2,3,4].map((i) => <Skeleton key={i} className="h-14 w-full" />)}</div>
+      ) : isError ? (
+        // Don't render every toggle as "enabled" when we simply failed to load the real values.
+        <Card>
+          <CardContent className="py-6 text-center space-y-2">
+            <p className="text-sm font-medium text-destructive">Failed to load your notification preferences</p>
+            <p className="text-xs text-muted-foreground">{(error as Error | null)?.message}</p>
+            <button type="button" className="text-xs text-primary hover:underline" onClick={() => refetch()}>
+              Try again
+            </button>
+          </CardContent>
+        </Card>
       ) : (
         <Card>
           <CardContent className="p-0 divide-y">

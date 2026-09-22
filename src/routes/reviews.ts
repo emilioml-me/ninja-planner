@@ -19,15 +19,29 @@ import { pool } from '../config/db.js';
 const router = Router();
 router.use(requireWorkspace);
 
+// Weekly reviews are keyed by the Monday that starts the week.
+const weekStartSchema = z.string().date().refine(
+  (v) => new Date(`${v}T00:00:00Z`).getUTCDay() === 1,
+  { message: 'week_start must be a Monday' },
+);
+
 const createSchema = z.object({
-  week_start:    z.string().date(),
-  wins:          z.string().optional(),
-  blockers:      z.string().optional(),
-  focus_next:    z.string().optional(),
+  week_start:    weekStartSchema,
+  wins:          z.string().max(10000).optional(),
+  blockers:      z.string().max(10000).optional(),
+  focus_next:    z.string().max(10000).optional(),
   health_score:  z.number().int().min(1).max(5).optional(),
 });
 
-const updateSchema = createSchema.omit({ week_start: true }).partial();
+// Text fields and health_score accept null so they can be cleared; week_start is editable
+// (still must be a Monday; moving onto a week the author already reviewed -> 409).
+const updateSchema = z.object({
+  week_start:    weekStartSchema.optional(),
+  wins:          z.string().max(10000).nullable().optional(),
+  blockers:      z.string().max(10000).nullable().optional(),
+  focus_next:    z.string().max(10000).nullable().optional(),
+  health_score:  z.number().int().min(1).max(5).nullable().optional(),
+});
 
 // GET /api/reviews
 router.get('/', async (req, res, next) => {
@@ -55,6 +69,7 @@ router.post('/', async (req, res, next) => {
       `:clipboard: *Weekly review submitted* for week of ${review.week_start}${score}\n` +
       (review.wins     ? `*Wins:* ${review.wins.slice(0, 200)}\n`     : '') +
       (review.blockers ? `*Blockers:* ${review.blockers.slice(0, 200)}` : ''),
+      req.workspace.id,
     );
 
     fireWebhooks(req.workspace.id, 'review.submitted', { review });
@@ -80,9 +95,10 @@ router.post('/', async (req, res, next) => {
 
     res.status(201).json(review);
   } catch (err) {
-    // Unique constraint violation (duplicate week_start for workspace)
+    // Unique constraint violation — reviews are per member: UNIQUE (workspace_id, week_start,
+    // created_by) since migration 052, so this means the caller already reviewed this week.
     if ((err as { code?: string }).code === '23505') {
-      res.status(409).json({ error: 'A review for this week already exists' });
+      res.status(409).json({ error: 'You already submitted a review for this week. Edit it instead.' });
       return;
     }
     next(err);
@@ -133,6 +149,10 @@ router.patch('/:id', async (req, res, next) => {
     }
     res.json(review);
   } catch (err) {
+    if ((err as { code?: string }).code === '23505') {
+      res.status(409).json({ error: 'The author already has a review for that week' });
+      return;
+    }
     next(err);
   }
 });

@@ -1,9 +1,14 @@
 // External REST API — authenticated via API key (Bearer np_...) instead of Clerk session
 // Mount: /api/external (before requireAuth in app.ts)
-import { Router } from 'express';
+import { Router, type Request } from 'express';
+import { createHash } from 'crypto';
 import { z } from 'zod';
 import { pool } from '../config/db.js';
 import { apiKeyAuth, apiKeyAuthLimiter, requireScope } from '../middleware/apiKeyAuth.js';
+import { createTask, updateTaskWithPrevState, logTaskActivity } from '../services/taskService.js';
+import { runTaskStatusEffects } from '../services/taskStatusEffects.js';
+import { fireWebhooks } from '../services/webhookService.js';
+import { dispatchAutomations } from '../services/automationService.js';
 
 const router = Router();
 router.use(apiKeyAuthLimiter, apiKeyAuth);
@@ -26,6 +31,25 @@ router.get('/tasks', requireScope('tasks:read'), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Actor recorded for writes made through an API key (tasks.created_by and
+// task_activity.actor_clerk_id are NOT NULL; the insert previously omitted created_by, so every
+// POST /api/external/tasks failed with a 500). Uses the key's id when available so activity is
+// attributable to a specific key.
+async function apiKeyActor(req: Request): Promise<string> {
+  const keyId = (req.apiKey as { id?: string } | undefined)?.id;
+  if (keyId) return `apikey:${keyId}`;
+  const header = req.headers['authorization'] ?? '';
+  const key = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (key) {
+    const { rows } = await pool.query<{ id: string }>(
+      'SELECT id FROM api_keys WHERE key_hash = $1 AND workspace_id = $2',
+      [createHash('sha256').update(key).digest('hex'), req.workspace.id],
+    );
+    if (rows[0]) return `apikey:${rows[0].id}`;
+  }
+  return 'apikey';
+}
+
 // POST /api/external/tasks  [tasks:write]
 router.post('/tasks', requireScope('tasks:write'), async (req, res, next) => {
   try {
@@ -33,18 +57,25 @@ router.post('/tasks', requireScope('tasks:write'), async (req, res, next) => {
       title:    z.string().min(1).max(500),
       status:   z.enum(STATUS).default('todo'),
       priority: z.enum(PRIORITY).default('medium'),
-      due_date: z.string().nullable().optional(),
+      due_date: z.string().date().nullable().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-    const { title, status, priority, due_date } = parsed.data;
-    const { rows } = await pool.query(
-      `INSERT INTO tasks (workspace_id, title, status, priority, due_date)
-       VALUES ($1,$2,$3,$4,$5)
-       RETURNING id, title, status, priority, due_date, created_at`,
-      [req.workspace.id, title, status, priority, due_date ?? null],
-    );
-    res.status(201).json(rows[0]);
+    const actor = await apiKeyActor(req);
+    const task = await createTask(req.workspace.id, parsed.data, actor);
+    await logTaskActivity(task.id, actor, 'created', { status: task.status, source: 'api' });
+    fireWebhooks(req.workspace.id, 'task.created', { task });
+    dispatchAutomations({
+      type: 'task.created',
+      workspaceId: req.workspace.id,
+      taskId: task.id,
+      assigneeId: task.assignee_clerk_id,
+      title: task.title,
+    }).catch(() => {});
+    res.status(201).json({
+      id: task.id, title: task.title, status: task.status, priority: task.priority,
+      due_date: task.due_date, created_at: task.created_at,
+    });
   } catch (err) { next(err); }
 });
 
@@ -55,32 +86,38 @@ router.patch('/tasks/:id', requireScope('tasks:write'), async (req, res, next) =
       title:    z.string().min(1).max(500).optional(),
       status:   z.enum(STATUS).optional(),
       priority: z.enum(PRIORITY).optional(),
-      due_date: z.string().nullable().optional(),
+      due_date: z.string().date().nullable().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+    if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
 
-    const fields: string[] = [];
-    const values: unknown[] = [];
-    let i = 1;
-    const ALLOWED = ['title', 'status', 'priority', 'due_date'] as const;
-    for (const key of ALLOWED) {
-      if (key in parsed.data) {
-        fields.push(`${key} = $${i++}`);
-        values.push((parsed.data as Record<string, unknown>)[key] ?? null);
-      }
+    // Same locked read-then-update + transition side effects as PATCH /api/tasks/:id, so an
+    // API-driven completion spawns the next recurring instance, fires task.completed, runs
+    // automations and goal milestones, and shows up in burndown/changelog.
+    const result = await updateTaskWithPrevState(req.params.id, req.workspace.id, parsed.data);
+    if (!result) { res.status(404).json({ error: 'Task not found' }); return; }
+    const { task, prevStatus } = result;
+    const actor = await apiKeyActor(req);
+
+    const statusChanged = await runTaskStatusEffects({
+      workspaceId: req.workspace.id,
+      actorUserId: actor,
+      task,
+      prevStatus,
+      newStatus: task.status,
+      source: 'external',
+      activityPayload: parsed.data as Record<string, unknown>,
+    });
+    if (!statusChanged) {
+      await logTaskActivity(task.id, actor, 'updated', parsed.data as Record<string, unknown>);
+      fireWebhooks(req.workspace.id, 'task.updated', { task });
     }
-    if (fields.length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
-    values.push(req.params.id, req.workspace.id);
 
-    const { rows } = await pool.query(
-      `UPDATE tasks SET ${fields.join(', ')}, updated_at = now()
-       WHERE id = $${i++} AND workspace_id = $${i} AND deleted_at IS NULL
-       RETURNING id, title, status, priority, due_date, updated_at`,
-      values,
-    );
-    if (rows.length === 0) { res.status(404).json({ error: 'Task not found' }); return; }
-    res.json(rows[0]);
+    res.json({
+      id: task.id, title: task.title, status: task.status, priority: task.priority,
+      due_date: task.due_date, updated_at: task.updated_at,
+    });
   } catch (err) { next(err); }
 });
 

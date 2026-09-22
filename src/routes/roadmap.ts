@@ -115,19 +115,23 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
       res.status(400).json({ error: 'No fields to update' });
       return;
     }
-    const item = await updateRoadmapItem(req.params.id, req.workspace.id, parsed.data);
-    if (!item) {
+    const updated = await updateRoadmapItem(req.params.id, req.workspace.id, parsed.data);
+    if (!updated) {
       res.status(404).json({ error: 'Roadmap item not found' });
       return;
     }
+    const { prev_status: prevStatus, ...item } = updated;
     res.json(item);
 
-    // Phase 6 — Roadmap → GTD Capture: when an item moves to "building" (in-progress),
-    // push it to the ninja-task GTD inbox for every non-guest workspace member.
+    // Phase 6 — Roadmap → GTD Capture: when an item TRANSITIONS to "building" (in-progress),
+    // push it to the ninja-task GTD inbox for every participating workspace member (viewers are
+    // read-only and excluded). Gated on the actual status change so re-saving a building item
+    // (title/description edits) doesn't re-push it to everyone's inbox.
     // Fire-and-forget; response has already been sent above.
-    if (parsed.data.status === 'building' && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
+    if (item.status === 'building' && prevStatus !== 'building'
+        && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
       pool.query<{ clerk_user_id: string }>(
-        "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role != 'guest'",
+        "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role <> 'viewer'",
         [req.workspace.id],
       ).then(async (membersResult) => {
         const { captureToNinjaTaskGtd } = await import("../integrations/ninjatask.js");
@@ -280,7 +284,11 @@ router.post('/:id/check-github-status', requireAdmin, async (req, res, next) => 
 
     let updated = null;
     if (issue.state === 'closed' && item.status !== 'live' && item.status !== 'archived') {
-      updated = await updateRoadmapItem(req.params.id, req.workspace.id, { status: 'live' });
+      const result = await updateRoadmapItem(req.params.id, req.workspace.id, { status: 'live' });
+      if (result) {
+        const { prev_status: _prevStatus, ...rest } = result;
+        updated = rest;
+      }
     }
 
     res.json({ github_state: issue.state, item: updated ?? item });

@@ -2,7 +2,10 @@ import * as React from 'react';
 import type { ToastActionElement, ToastProps } from '@/components/ui/toast';
 
 const TOAST_LIMIT = 1;
-const TOAST_REMOVE_DELAY = 1000000;
+// Leftover shadcn/ui boilerplate default (~16.7 min) — a dismissed toast stayed in memoryState
+// (just invisible, since TOAST_LIMIT caps the array at 1) for that long before actually being
+// spliced out. 5s is enough for the dismiss animation to finish before cleanup.
+const TOAST_REMOVE_DELAY = 5000;
 
 type ToasterToast = ToastProps & {
   id: string;

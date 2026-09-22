@@ -1,7 +1,6 @@
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { format } from 'date-fns';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,7 +12,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Plus, MoreVertical, Calendar, AlertCircle, Trash2, Clock, CheckSquare2 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, safeFormat } from '@/lib/utils';
 import type { KanbanCard } from './KanbanBoard';
 import { type WorkspaceMember } from '@/hooks/use-members';
 
@@ -78,30 +77,34 @@ function SortableCard({
             {!isOverdue && (card.priority === 'urgent' || card.priority === 'high') && (
               <AlertCircle className="h-4 w-4 text-orange-500 flex-shrink-0" />
             )}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6 opacity-0 group-hover:opacity-100"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <MoreVertical className="h-3 w-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteCard?.(card.id);
-                  }}
-                  className="text-destructive"
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            {/* Delete is admin-only (the parent passes onDeleteCard only for admins); the
+                parent page asks for confirmation before actually deleting. */}
+            {onDeleteCard && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <MoreVertical className="h-3 w-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteCard?.(card.id);
+                    }}
+                    className="text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Delete
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </div>
 
@@ -117,7 +120,7 @@ function SortableCard({
                 className={cn('text-xs gap-1', isOverdue && 'border-destructive text-destructive')}
               >
                 <Calendar className="h-3 w-3" />
-                {format(new Date(card.due_date), 'MMM d')}
+                {safeFormat(card.due_date, 'MMM d')}
               </Badge>
             )}
             {card.tags.map((tag) => (

@@ -13,15 +13,16 @@ import { fireWebhooks } from '../services/webhookService.js';
 const router = Router();
 router.use(requireWorkspace);
 
+// description / due_date accept null so the client can clear them; undefined = unchanged.
 const createSchema = z.object({
   title:        z.string().min(1).max(500),
-  description:  z.string().optional(),
+  description:  z.string().max(5000).nullable().optional(),
   due_date:     z.string().date().nullable().optional(),
 });
 
 const updateSchema = z.object({
   title:        z.string().min(1).max(500).optional(),
-  description:  z.string().optional(),
+  description:  z.string().max(5000).nullable().optional(),
   status:       z.enum(['active', 'completed', 'cancelled']).optional(),
   due_date:     z.string().date().nullable().optional(),
 });
@@ -62,9 +63,11 @@ router.patch('/:id', async (req, res, next) => {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
-    const goal = await updateGoal(req.params.id, req.workspace.id, parsed.data);
-    if (!goal) { res.status(404).json({ error: 'Goal not found' }); return; }
-    if (parsed.data.status === 'completed') {
+    const updated = await updateGoal(req.params.id, req.workspace.id, parsed.data);
+    if (!updated) { res.status(404).json({ error: 'Goal not found' }); return; }
+    const { prev_status: prevStatus, ...goal } = updated;
+    // Only on the transition into 'completed' — re-saving a completed goal must not re-fire.
+    if (goal.status === 'completed' && prevStatus !== 'completed') {
       fireWebhooks(req.workspace.id, 'goal.completed', { goal });
       dispatchAutomations({
         type: 'goal.completed',

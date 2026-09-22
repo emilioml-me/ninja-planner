@@ -38,7 +38,10 @@ vi.mock('../services/emailService.js', () => ({
 vi.mock('../services/notificationService.js', () => ({
   createNotification: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock('../services/webhookService.js', () => ({
+// Partial mock: keep the module's other exports (e.g. ALL_EVENTS, imported at load time by
+// routes/webhook-endpoints.ts) and only stub the network side effect.
+vi.mock('../services/webhookService.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/webhookService.js')>()),
   fireWebhooks: vi.fn().mockResolvedValue(undefined),
 }));
 

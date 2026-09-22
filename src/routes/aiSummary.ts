@@ -6,21 +6,30 @@ import { pool } from '../config/db.js';
 const router = Router({ mergeParams: true });
 router.use(requireWorkspace);
 
-const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://10.10.2.20:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'qwen2.5:14b';
+// OLLAMA_URL empty/unset => AI summaries are disabled (503). No hard-coded fallback host:
+// a baked-in private IP silently sent workspace data to whatever answered at that address.
+// Read per request (not at import) so it reflects env loaded after module evaluation.
+function getOllamaConfig(): { url: string; model: string } | null {
+  const url = process.env.OLLAMA_URL?.trim();
+  if (!url) return null;
+  return { url: url.replace(/\/+$/, ''), model: process.env.OLLAMA_MODEL?.trim() || 'qwen2.5:14b' };
+}
 
 /**
  * M1: Sanitize user-controlled strings before injection into the LLM prompt.
  * Strips newlines (which can be used to inject new prompt lines) and truncates.
  */
 function sanitizeForPrompt(s: string, maxLen = 200): string {
-  return s.replace(/[\r\n\t]+/g, ' ').replace(/["""''`]/g, "'").slice(0, maxLen);
+  return s.replace(/[\r\n\t]+/g, ' ').replace(/["'`\u201C\u201D\u2018\u2019]/g, "'").slice(0, maxLen);
 }
 
-// 5 AI requests per minute per IP — Ollama holds each request for up to 30 s
+// 5 AI requests per minute per user — Ollama holds each request for up to 30 s
 const aiLimiter = rateLimit({
   windowMs: 60_000,
   max: 5,
+  // Per user, not per IP: users behind one office NAT shouldn't share a 5/min budget, and one
+  // user can't dodge the limit by switching networks. Always authenticated on this router.
+  keyGenerator: (req) => `ai-summary:${req.auth?.userId ?? req.ip}`,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many AI summary requests, please try again later' },
@@ -29,6 +38,11 @@ const aiLimiter = rateLimit({
 // POST /api/sprints/:sprintId/ai-summary
 router.post('/', aiLimiter, async (req, res, next) => {
   try {
+    const ollama = getOllamaConfig();
+    if (!ollama) {
+      res.status(503).json({ error: 'AI summaries are not enabled on this server' });
+      return;
+    }
     const { sprintId } = req.params as Record<string, string>;
     // Load sprint + task breakdown
     const sprintResult = await pool.query<{
@@ -102,10 +116,10 @@ router.post('/', aiLimiter, async (req, res, next) => {
 ${JSON.stringify(sprintData, null, 2)}`;
 
     // Call Ollama (non-streaming)
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/generate`, {
+    const ollamaRes = await fetch(`${ollama.url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: OLLAMA_MODEL, prompt, stream: false }),
+      body: JSON.stringify({ model: ollama.model, prompt, stream: false }),
       signal: AbortSignal.timeout(30_000),
     });
 

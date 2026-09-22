@@ -25,6 +25,18 @@ interface CapacityRow {
   assigned_points: number;
   task_count: number;
   capacity_points: number;
+  /** True when capacity_points comes from a per-sprint override (then sprint_id is set). */
+  is_override?: boolean;
+  sprint_id?: string | null;
+}
+
+const MAX_CAPACITY = 500;
+
+/** Parses the capacity input; null when it isn't a whole number in 0..MAX_CAPACITY. */
+function parseCapacity(val: string): number | null {
+  if (!/^\d+$/.test(val.trim())) return null;
+  const n = Number(val);
+  return n <= MAX_CAPACITY ? n : null;
 }
 
 const STATUS_META: Record<string, { label: string; color: string }> = {
@@ -40,6 +52,12 @@ function CapacityEditor({
 }: { clerkId: string; current: number; onSave: (pts: number) => void }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(String(current));
+  const parsed = parseCapacity(val);
+  const save = () => {
+    if (parsed === null) return;
+    onSave(parsed);
+    setEditing(false);
+  };
 
   if (!editing) {
     return (
@@ -54,18 +72,19 @@ function CapacityEditor({
   return (
     <div className="flex items-center gap-1">
       <Input
-        type="number" min={0} max={500}
+        type="number" min={0} max={MAX_CAPACITY}
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        className="h-6 w-20 text-xs"
+        className={cn('h-6 w-20 text-xs', parsed === null && 'border-destructive')}
+        title={parsed === null ? `Enter a whole number from 0 to ${MAX_CAPACITY}` : undefined}
         autoFocus
         onKeyDown={(e) => {
-          if (e.key === 'Enter') { onSave(Math.max(0, parseInt(val) || 0)); setEditing(false); }
+          if (e.key === 'Enter') save();
           if (e.key === 'Escape') setEditing(false);
         }}
       />
-      <Button size="icon" variant="ghost" className="h-6 w-6"
-        onClick={() => { onSave(Math.max(0, parseInt(val) || 0)); setEditing(false); }}>
+      <Button size="icon" variant="ghost" className="h-6 w-6" disabled={parsed === null}
+        onClick={save}>
         <Check className="h-3 w-3 text-green-600" />
       </Button>
       <Button size="icon" variant="ghost" className="h-6 w-6"
@@ -82,26 +101,34 @@ export default function Workload() {
   const { toast } = useToast();
   const isAdmin = useIsAdmin();
 
+  // Keys live under the ['/api/tasks', ...] prefix so every task mutation's
+  // invalidateQueries({ queryKey: ['/api/tasks'] }) also refreshes these views.
   const { data: rows = [], isLoading: rowsLoading } = useQuery<WorkloadRow[]>({
-    queryKey: ['/api/tasks/workload'],
+    queryKey: ['/api/tasks', 'workload'],
     queryFn: () => apiRequest('GET', '/api/tasks/workload'),
     staleTime: 60_000,
   });
   const { data: capacityRows = [], isLoading: capLoading } = useQuery<CapacityRow[]>({
-    queryKey: ['/api/tasks/capacity'],
+    queryKey: ['/api/tasks', 'capacity', 'active'],
     queryFn: () => apiRequest('GET', '/api/tasks/capacity'),
     staleTime: 60_000,
   });
   const { members, isLoading: membersLoading } = useMembers();
   const isLoading = rowsLoading || membersLoading;
 
+  // Edits the value being DISPLAYED: when the shown capacity is a per-sprint override, update
+  // that override (sprint_id) instead of silently writing the workspace default underneath it.
   const saveCapacity = useMutation({
-    mutationFn: ({ memberId, pts }: { memberId: string; pts: number }) =>
-      apiRequest('PUT', `/api/tasks/capacity/${memberId}`, { capacity_points: pts }),
+    mutationFn: ({ memberId, pts, sprintId }: { memberId: string; pts: number; sprintId?: string | null }) =>
+      apiRequest('PUT', `/api/tasks/capacity/${memberId}`, {
+        capacity_points: Math.min(MAX_CAPACITY, Math.max(0, pts)),
+        ...(sprintId ? { sprint_id: sprintId } : {}),
+      }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['/api/tasks/capacity'] });
+      qc.invalidateQueries({ queryKey: ['/api/tasks', 'capacity'] });
       toast({ title: 'Capacity updated' });
     },
+    onError: (err: Error) => toast({ title: 'Failed to update capacity', description: err.message, variant: 'destructive' }),
   });
 
   // Pivot workload rows
@@ -111,19 +138,21 @@ export default function Workload() {
     return acc;
   }, {});
 
-  const memberIds = Object.keys(byMember).sort((a, b) => {
-    const totalA = Object.values(byMember[a]).reduce((s, n) => s + n, 0);
-    const totalB = Object.values(byMember[b]).reduce((s, n) => s + n, 0);
-    return totalB - totalA;
-  });
+  // Workload = OPEN work. The endpoint counts all-time done tasks too, which previously
+  // dominated both the bar widths and the sort order; done is shown as a side note instead.
+  const openTotal = (counts: Record<string, number>) =>
+    Object.entries(counts).reduce((sum, [status, n]) => (status === 'done' ? sum : sum + n), 0);
 
-  const maxTotal = memberIds.reduce((max, id) => {
-    const total = Object.values(byMember[id]).reduce((s, n) => s + n, 0);
-    return Math.max(max, total);
-  }, 1);
+  const memberIds = Object.keys(byMember)
+    .filter((id) => openTotal(byMember[id]) > 0)
+    .sort((a, b) => openTotal(byMember[b]) - openTotal(byMember[a]));
+
+  const maxTotal = memberIds.reduce((max, id) => Math.max(max, openTotal(byMember[id])), 1);
+  const OPEN_STATUSES = STATUS_ORDER.filter((st) => st !== 'done');
 
   const memberMap = Object.fromEntries(members.map((m) => [m.clerk_user_id, m]));
-  const capMap = Object.fromEntries(capacityRows.map((r) => [r.user_clerk_id, r]));
+  // Tasks can still be assigned to someone who has left the workspace.
+  const nameFor = (clerkId: string) => memberMap[clerkId]?.display_name ?? 'Former member';
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
@@ -150,7 +179,7 @@ export default function Workload() {
         <TabsContent value="workload" className="mt-4">
           {/* Legend */}
           <div className="flex flex-wrap gap-3 mb-5">
-            {STATUS_ORDER.map((s) => {
+            {OPEN_STATUSES.map((s) => {
               const meta = STATUS_META[s];
               return (
                 <div key={s} className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -176,15 +205,14 @@ export default function Workload() {
           ) : memberIds.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <BarChart2 className="h-10 w-10 text-muted-foreground/30 mb-3" />
-              <p className="text-sm font-medium">No assigned tasks yet</p>
+              <p className="text-sm font-medium">No open assigned tasks</p>
             </div>
           ) : (
             <div className="space-y-5">
               {memberIds.map((clerkId) => {
                 const statusCounts = byMember[clerkId];
-                const total = Object.values(statusCounts).reduce((s, n) => s + n, 0);
-                const member = memberMap[clerkId];
-                const displayName = member?.display_name ?? clerkId.slice(-8);
+                const total = openTotal(statusCounts);
+                const displayName = nameFor(clerkId);
                 const initials = displayName.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
 
                 return (
@@ -194,10 +222,10 @@ export default function Workload() {
                         <AvatarFallback className="text-[10px] bg-muted">{initials}</AvatarFallback>
                       </Avatar>
                       <span className="text-sm font-medium flex-1 min-w-0 truncate">{displayName}</span>
-                      <Badge variant="secondary" className="text-xs shrink-0">{total} task{total !== 1 ? 's' : ''}</Badge>
+                      <Badge variant="secondary" className="text-xs shrink-0">{total} open task{total !== 1 ? 's' : ''}</Badge>
                     </div>
                     <div className="flex h-5 rounded-md overflow-hidden gap-px bg-muted">
-                      {STATUS_ORDER.map((status) => {
+                      {OPEN_STATUSES.map((status) => {
                         const count = statusCounts[status] ?? 0;
                         if (count === 0) return null;
                         const pct = (count / maxTotal) * 100;
@@ -248,8 +276,7 @@ export default function Workload() {
           ) : (
             <div className="space-y-4">
               {capacityRows.map((row) => {
-                const member = memberMap[row.user_clerk_id];
-                const displayName = member?.display_name ?? row.user_clerk_id.slice(-8);
+                const displayName = nameFor(row.user_clerk_id);
                 const initials = displayName.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
                 const pct = row.capacity_points > 0
                   ? Math.min(Math.round((row.assigned_points / row.capacity_points) * 100), 100)
@@ -272,13 +299,22 @@ export default function Workload() {
                             </span>
                           </div>
                           {isAdmin ? (
-                            <CapacityEditor
-                              clerkId={row.user_clerk_id}
-                              current={row.capacity_points}
-                              onSave={(pts) => saveCapacity.mutate({ memberId: row.user_clerk_id, pts })}
-                            />
+                            <div className="flex items-center gap-2">
+                              <CapacityEditor
+                                clerkId={row.user_clerk_id}
+                                current={row.capacity_points}
+                                onSave={(pts) => saveCapacity.mutate({
+                                  memberId: row.user_clerk_id,
+                                  pts,
+                                  sprintId: row.is_override ? row.sprint_id : null,
+                                })}
+                              />
+                              {row.is_override && <span className="text-[10px] text-muted-foreground">(sprint override)</span>}
+                            </div>
                           ) : (
-                            <span className="text-xs text-muted-foreground">{row.capacity_points} pts capacity</span>
+                            <span className="text-xs text-muted-foreground">
+                              {row.capacity_points} pts capacity{row.is_override ? ' (sprint override)' : ''}
+                            </span>
                           )}
                         </div>
                       </div>

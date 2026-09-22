@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useAuth, SignIn } from '@clerk/clerk-react';
+import { useEffect, useRef, useState } from 'react';
+import { useAuth, useClerk, SignIn } from '@clerk/clerk-react';
 import { useApiClient } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -19,6 +19,7 @@ interface AcceptResult {
 
 export default function AcceptInvite({ token }: { token: string }) {
   const { isLoaded, isSignedIn } = useAuth();
+  const clerk = useClerk();
   const { apiRequest } = useApiClient();
 
   const [info, setInfo] = useState<InviteInfo | null>(null);
@@ -26,6 +27,10 @@ export default function AcceptInvite({ token }: { token: string }) {
   const [accepting, setAccepting] = useState(false);
   const [accepted, setAccepted] = useState<AcceptResult | null>(null);
   const [acceptError, setAcceptError] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
 
   // Load invite info (public endpoint — no auth needed)
   useEffect(() => {
@@ -51,16 +56,40 @@ export default function AcceptInvite({ token }: { token: string }) {
     return () => controller.abort();
   }, [token]);
 
+  // The server adds the user to the Clerk organization on accept, but the session token still
+  // carries the previously active org (or none) — every workspace route resolves the workspace
+  // from that org claim, so switch the active org before entering the app.
+  const openWorkspace = async (clerkOrgId: string) => {
+    setSwitching(true);
+    setSwitchError(null);
+    try {
+      // Refresh the user's membership list so Clerk knows about the org we were just added to.
+      await clerk.user?.reload();
+      await clerk.setActive({ organization: clerkOrgId });
+      window.location.href = '/dashboard';
+    } catch {
+      if (mounted.current) {
+        setSwitchError('Could not switch to the workspace. Please try again, or pick it from the organization switcher.');
+        setSwitching(false);
+      }
+    }
+  };
+
   const handleAccept = async () => {
     setAccepting(true);
     setAcceptError(null);
     try {
       const result = await apiRequest<AcceptResult>('POST', `/api/invites/token/${token}/accept`);
+      // Guards against setState after unmount — e.g. the user clicks Accept then immediately
+      // navigates away before the POST resolves. Matches the AbortController pattern already
+      // used for the invite-info fetch effect above.
+      if (!mounted.current) return;
       setAccepted(result);
+      void openWorkspace(result.clerk_org_id);
     } catch (e: unknown) {
-      setAcceptError(e instanceof Error ? e.message : 'Failed to accept invite');
+      if (mounted.current) setAcceptError(e instanceof Error ? e.message : 'Failed to accept invite');
     } finally {
-      setAccepting(false);
+      if (mounted.current) setAccepting(false);
     }
   };
 
@@ -105,8 +134,10 @@ export default function AcceptInvite({ token }: { token: string }) {
                 : `You've joined ${info!.workspace_name}. You can now access the workspace.`}
             </CardDescription>
           </CardHeader>
-          <CardFooter className="justify-center">
-            <Button onClick={() => window.location.href = '/dashboard'}>
+          <CardFooter className="flex-col gap-2 justify-center">
+            {switchError && <p className="text-sm text-destructive text-center">{switchError}</p>}
+            <Button onClick={() => openWorkspace(accepted.clerk_org_id)} disabled={switching}>
+              {switching ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               Open workspace
             </Button>
           </CardFooter>
@@ -123,7 +154,7 @@ export default function AcceptInvite({ token }: { token: string }) {
           <Users className="h-10 w-10 text-primary mx-auto mb-2" />
           <CardTitle>You're invited!</CardTitle>
           <CardDescription>
-            Join <strong>{info!.workspace_name}</strong> on Plan Ninja
+            Join <strong>{info!.workspace_name}</strong> on Ninja Planner
           </CardDescription>
         </CardHeader>
 

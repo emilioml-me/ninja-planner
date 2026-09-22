@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,6 +34,7 @@ export default function CustomFields() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
+  const isAdminLoaded = useIsAdminLoaded();
   const { toast } = useToast();
 
   const [creating,     setCreating]     = useState(false);
@@ -61,13 +62,13 @@ export default function CustomFields() {
       setNewOptions('');
       toast({ title: 'Field created' });
     },
-    onError: () => toast({ title: 'Failed to create field', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create field', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/custom-fields/${id}`),
     onSuccess: () => { invalidate(); toast({ title: 'Field deleted' }); },
-    onError: () => toast({ title: 'Failed to delete field', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to delete field', description: err.message, variant: 'destructive' }),
   });
 
   function handleCreate() {
@@ -75,6 +76,13 @@ export default function CustomFields() {
       ? newOptions.split(',').map((o) => o.trim()).filter(Boolean)
       : undefined;
     createMutation.mutate({ name: newName, field_type: newType, entity_type: newEntity, options });
+  }
+
+  // Wait for Clerk to resolve so real admins don't see a flash of "Admin access required".
+  if (!isAdminLoaded) {
+    return (
+      <div className="p-6 space-y-3">{[1,2,3].map((i) => <Skeleton key={i} className="h-16 w-full" />)}</div>
+    );
   }
 
   if (!isAdmin) {
@@ -174,7 +182,11 @@ export default function CustomFields() {
                   <Badge variant="outline" className="text-xs">{ENTITY_LABELS[f.entity_type]}</Badge>
                   <Badge variant="secondary" className="text-xs">{TYPE_LABELS[f.field_type]}</Badge>
                   <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive hover:text-destructive"
-                    onClick={() => deleteMutation.mutate(f.id)}
+                    onClick={() => {
+                      if (confirm(`Delete field "${f.name}"? Every value stored for this field on all ${f.entity_type === 'client' ? 'clients' : 'tasks'} will be permanently deleted.`)) {
+                        deleteMutation.mutate(f.id);
+                      }
+                    }}
                     disabled={deleteMutation.isPending}>
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>

@@ -10,6 +10,13 @@ interface Workspace {
   clerk_org_id: string;
 }
 
+function isNotFoundError(err: unknown): boolean {
+  if (!err) return false;
+  if ((err as { status?: number }).status === 404) return true;
+  const message = (err as { message?: string }).message ?? '';
+  return message.startsWith('404') || /not found/i.test(message);
+}
+
 /**
  * WorkspaceGate — wraps the authenticated app shell.
  *
@@ -21,10 +28,17 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
   const { orgId } = useAuth();
   const { apiRequest } = useApiClient();
 
+  // Resolves the workspace for the ACTIVE org (GET /api/workspaces/current returns 404 until the
+  // workspace row + membership exist). Keyed by orgId so switching orgs re-checks instead of
+  // reusing the previous org's cached answer.
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery<Workspace>({
-    queryKey: ['/api/workspaces/me'],
-    queryFn: () => apiRequest<Workspace>('GET', '/api/workspaces/me'),
-    retry: 1,
+    queryKey: ['/api/workspaces/current', orgId],
+    queryFn: () => apiRequest<Workspace>('GET', '/api/workspaces/current'),
+    enabled: !!orgId,
+    retry: (failureCount, err) => !isNotFoundError(err) && failureCount < 1,
+    // While the workspace is still being provisioned (webhook in flight), poll so the gate opens
+    // on its own once it lands.
+    refetchInterval: (query) => (isNotFoundError(query.state.error) ? 5000 : false),
     staleTime: 5 * 60 * 1000,
   });
 
@@ -59,7 +73,7 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
   if (isError || !data) {
     const message =
       (error as { message?: string })?.message ?? 'Could not load workspace.';
-    const isNotFound = message.includes('404') || message.includes('not found');
+    const isNotFound = isNotFoundError(error);
 
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">

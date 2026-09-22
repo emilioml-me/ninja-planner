@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import request from 'supertest';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -27,6 +27,7 @@ vi.mock('../middleware/requireWorkspace.js', () => ({
 }));
 
 let app: any;
+const ORIGINAL_ENV = { ...process.env };
 beforeAll(async () => {
   process.env.CLERK_SECRET_KEY     = 'test';
   process.env.CLERK_WEBHOOK_SECRET = 'test';
@@ -38,11 +39,18 @@ beforeAll(async () => {
 
 afterEach(() => {
   vi.clearAllMocks();
-  delete process.env.DESK_NINJA_API_KEY;
+  // Undo per-test vi.stubEnv / vi.stubGlobal('fetch', ...) so no test leaks into the next.
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
+afterAll(() => {
+  process.env = ORIGINAL_ENV;
 });
 
 describe('POST /api/support/ticket', () => {
   it('returns 503 when DESK_NINJA_API_KEY is not set', async () => {
+    vi.stubEnv('DESK_NINJA_API_KEY', '');
     mockQuery.mockResolvedValueOnce({ rows: [{ display_name: 'Alice', email: 'alice@example.com' }] });
 
     const res = await request(app)
@@ -54,7 +62,7 @@ describe('POST /api/support/ticket', () => {
   });
 
   it('returns 400 for missing subject', async () => {
-    process.env.DESK_NINJA_API_KEY = 'dnk_test';
+    vi.stubEnv('DESK_NINJA_API_KEY', 'dnk_test');
     mockQuery.mockResolvedValueOnce({ rows: [{ display_name: 'Alice', email: 'alice@example.com' }] });
 
     const res = await request(app)
@@ -65,7 +73,7 @@ describe('POST /api/support/ticket', () => {
   });
 
   it('returns 400 for missing description', async () => {
-    process.env.DESK_NINJA_API_KEY = 'dnk_test';
+    vi.stubEnv('DESK_NINJA_API_KEY', 'dnk_test');
     const res = await request(app)
       .post('/api/support/ticket')
       .send({ subject: 'Test' });
@@ -74,16 +82,17 @@ describe('POST /api/support/ticket', () => {
   });
 
   it('forwards ticket to desk-ninja and returns ticket number', async () => {
-    process.env.DESK_NINJA_API_KEY = 'dnk_test';
-    process.env.DESK_NINJA_URL     = 'http://desk-ninja-mock';
+    vi.stubEnv('DESK_NINJA_API_KEY', 'dnk_test');
+    vi.stubEnv('DESK_NINJA_URL', 'http://desk-ninja-mock');
 
     mockQuery.mockResolvedValueOnce({ rows: [{ display_name: 'Alice', email: 'alice@example.com' }] });
 
     // Mock the fetch to desk-ninja
-    global.fetch = vi.fn().mockResolvedValueOnce({
+    const fetchMock = vi.fn().mockResolvedValueOnce({
       ok: true,
       json: async () => ({ ticketNumber: 'TKT-0042', portalUrl: 'http://desk-ninja-mock/portal' }),
     } as any);
+    vi.stubGlobal('fetch', fetchMock);
 
     const res = await request(app)
       .post('/api/support/ticket')
@@ -94,23 +103,23 @@ describe('POST /api/support/ticket', () => {
     expect(res.body.portalUrl).toBeDefined();
 
     // Verify fetch was called with correct payload
-    const fetchCall = (global.fetch as any).mock.calls[0];
+    const fetchCall = fetchMock.mock.calls[0] as any[];
     const fetchBody = JSON.parse(fetchCall[1].body);
     expect(fetchBody.customerEmail).toBe('alice@example.com');
-    expect(fetchBody.tags).toContain('plan-ninja');
+    expect(fetchBody.tags).toContain('ninja-planner');
   });
 
   it('propagates desk-ninja error status', async () => {
-    process.env.DESK_NINJA_API_KEY = 'dnk_test';
-    process.env.DESK_NINJA_URL     = 'http://desk-ninja-mock';
+    vi.stubEnv('DESK_NINJA_API_KEY', 'dnk_test');
+    vi.stubEnv('DESK_NINJA_URL', 'http://desk-ninja-mock');
 
     mockQuery.mockResolvedValueOnce({ rows: [{ display_name: 'Alice', email: 'alice@example.com' }] });
 
-    global.fetch = vi.fn().mockResolvedValueOnce({
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
       ok: false,
       status: 429,
       json: async () => ({ error: 'Ticket limit reached' }),
-    } as any);
+    } as any));
 
     const res = await request(app)
       .post('/api/support/ticket')

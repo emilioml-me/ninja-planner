@@ -8,6 +8,8 @@ export interface Notification {
   title: string;
   body: string | null;
   link: string | null;
+  /** Optional idempotency key (unique per workspace+recipient, migration 052). */
+  dedup_key: string | null;
   read_at: Date | null;
   created_at: Date;
 }

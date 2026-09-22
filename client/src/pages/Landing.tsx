@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useAuth, SignIn } from '@clerk/clerk-react';
+import { useAuth, SignIn, SignUp } from '@clerk/clerk-react';
 import { Redirect } from 'wouter';
 import {
   CheckSquare,
@@ -20,31 +20,31 @@ import { buildSoftwareApp, buildFAQ } from '@/lib/structured-data';
 
 const FAQ_ITEMS = [
   {
-    question: '¿Que es Plan Ninja y para quien esta pensado?',
-    answer: 'Plan Ninja es un planificador de equipo y dashboard empresarial diseñado para pymes y equipos en Mexico y LATAM. Centraliza tareas, metas, roadmap y metricas de negocio en un solo workspace.',
+    question: '¿Que es Ninja Planner y para quien esta pensado?',
+    answer: 'Ninja Planner es un planificador de equipo y dashboard empresarial diseñado para pymes y equipos en Mexico y LATAM. Centraliza tareas, metas, roadmap y metricas de negocio en un solo workspace.',
   },
   {
-    question: '¿Como ayuda Plan Ninja a organizar a mi equipo?',
+    question: '¿Como ayuda Ninja Planner a organizar a mi equipo?',
     answer: 'Con tableros Kanban, asignacion de tareas, seguimiento de sprints y un dashboard compartido, todo el equipo ve el trabajo pendiente, los avances y los bloqueos en tiempo real.',
   },
   {
-    question: '¿Puedo monitorear las metricas de negocio desde Plan Ninja?',
+    question: '¿Puedo monitorear las metricas de negocio desde Ninja Planner?',
     answer: 'Si. El dashboard centraliza KPIs como MRR, pipeline de ventas y avance hacia metas. Se conecta con tu CRM para mantener los datos actualizados automaticamente.',
   },
   {
-    question: '¿Plan Ninja tiene una version gratuita?',
+    question: '¿Ninja Planner tiene una version gratuita?',
     answer: 'Si. Puedes empezar gratis con un workspace para tu equipo, tableros ilimitados y acceso a todas las funciones principales. Los planes de pago desbloquean integraciones avanzadas y mas miembros.',
   },
   {
-    question: '¿Plan Ninja funciona para equipos remotos o hibridos?',
-    answer: 'Absolutamente. Plan Ninja es 100% web, por lo que tu equipo puede acceder desde cualquier lugar. Las revisiones semanales y el board de tareas mantienen a todos alineados sin importar donde esten.',
+    question: '¿Ninja Planner funciona para equipos remotos o hibridos?',
+    answer: 'Absolutamente. Ninja Planner es 100% web, por lo que tu equipo puede acceder desde cualquier lugar. Las revisiones semanales y el board de tareas mantienen a todos alineados sin importar donde esten.',
   },
 ];
 
 const STRUCTURED_DATA = [
   buildSoftwareApp({
-    name: 'Plan Ninja',
-    url: 'https://plan-ninja.com',
+    name: 'Ninja Planner',
+    url: 'https://ninja-planner.com',
     description: 'Planificador de equipo y dashboard empresarial para pymes en Mexico y LATAM.',
     applicationCategory: 'ProductivityApplication',
     price: '0',
@@ -89,7 +89,10 @@ const STATS = [
 
 export default function Landing() {
   const { isLoaded, isSignedIn } = useAuth();
-  const [signInOpen, setSignInOpen] = useState(false);
+  // Which Clerk widget the auth overlay shows ("Get started free" goes to sign-up, not sign-in).
+  const [authMode, setAuthMode] = useState<'signIn' | 'signUp' | null>(null);
+  const setSignInOpen = (open: boolean) => setAuthMode(open ? 'signIn' : null);
+  const openSignUp = () => setAuthMode('signUp');
 
   if (isLoaded && isSignedIn) return <Redirect to="/dashboard" />;
 
@@ -98,7 +101,7 @@ export default function Landing() {
       <SeoHead
         title="Planificador de Equipo y Dashboard Empresarial"
         description="Gestiona tareas, proyectos y metricas de tu negocio en un solo lugar. Dashboard para equipos y pymes en Mexico. Sin complicaciones."
-        canonical="https://plan-ninja.com/"
+        canonical="https://ninja-planner.com/"
         structuredData={STRUCTURED_DATA}
       />
       {/* Navbar */}
@@ -140,7 +143,7 @@ export default function Landing() {
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
-            <Button size="lg" className="gap-2 px-8" onClick={() => setSignInOpen(true)}>
+            <Button size="lg" className="gap-2 px-8" onClick={openSignUp}>
               Get started free
               <ArrowRight className="h-4 w-4" />
             </Button>
@@ -195,6 +198,24 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* FAQ — rendered so the FAQPage structured data matches visible content */}
+      <section className="border-t px-6 py-20">
+        <div className="max-w-3xl mx-auto">
+          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-10">Preguntas frecuentes</h2>
+          <div className="space-y-3">
+            {FAQ_ITEMS.map(({ question, answer }) => (
+              <details key={question} className="group rounded-lg border bg-card px-5 py-4">
+                <summary className="cursor-pointer list-none font-medium flex items-center justify-between gap-4">
+                  {question}
+                  <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+                </summary>
+                <p className="mt-3 text-sm text-muted-foreground leading-relaxed">{answer}</p>
+              </details>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* CTA banner */}
       <section className="border-t px-6 py-16">
         <div className="max-w-2xl mx-auto text-center space-y-5">
@@ -202,7 +223,7 @@ export default function Landing() {
           <p className="text-muted-foreground">
             Get your team's workspace up and running in minutes.
           </p>
-          <Button size="lg" className="gap-2 px-8" onClick={() => setSignInOpen(true)}>
+          <Button size="lg" className="gap-2 px-8" onClick={openSignUp}>
             Get started free
             <ArrowRight className="h-4 w-4" />
           </Button>
@@ -223,19 +244,20 @@ export default function Landing() {
       </footer>
 
       {/* Sign-in overlay */}
-      {signInOpen && (
+      {authMode && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
           onClick={() => setSignInOpen(false)}
         >
           <div className="relative" onClick={(e) => e.stopPropagation()}>
             <button
+              aria-label="Close"
               onClick={() => setSignInOpen(false)}
               className="absolute -top-3 -right-3 z-10 rounded-full bg-background border shadow-sm h-7 w-7 flex items-center justify-center hover:bg-accent transition-colors"
             >
               <X className="h-4 w-4" />
             </button>
-            <SignIn routing="hash" />
+            {authMode === 'signUp' ? <SignUp routing="hash" /> : <SignIn routing="hash" />}
           </div>
         </div>
       )}

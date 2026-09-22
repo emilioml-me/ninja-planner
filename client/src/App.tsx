@@ -1,6 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { useAuth } from '@clerk/clerk-react';
-import { Route, Switch, Redirect } from 'wouter';
+import { Route, Switch, Redirect, useLocation } from 'wouter';
 import { queryClient } from './lib/queryClient';
 import { Toaster } from './components/ui/toaster';
 import { AppLayout } from './components/AppLayout';
@@ -41,6 +41,7 @@ import EpicTemplates from './pages/EpicTemplates';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
+  const [location] = useLocation();
 
   if (!isLoaded) {
     return (
@@ -55,7 +56,7 @@ function AuthenticatedApp() {
   return (
     <WorkspaceGate>
       <AppLayout>
-        <ErrorBoundary>
+        <ErrorBoundary resetKey={location}>
           <Switch>
             <Route path="/dashboard" component={Dashboard} />
             <Route path="/my-tasks"  component={MyTasks} />

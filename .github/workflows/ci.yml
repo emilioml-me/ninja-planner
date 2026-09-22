@@ -26,6 +26,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Type-check (server + client)
+        run: npm run typecheck
+
+      - name: Server tests
+        run: npm test
+
+      - name: Client tests
+        run: npm run test:client
+
       - name: Build
         run: npm run build
         env:

@@ -14,21 +14,38 @@ router.use(requireWorkspace);
 
 const STAGES = ['prospect', 'proposal', 'active', 'churned'] as const;
 
+const MRR_MAX = 9_999_999_999.99; // clients.mrr is NUMERIC(12,2)
+const NOTES_MAX = 10_000;
+
 const createSchema = z.object({
-  name:           z.string().min(1).max(255),
+  name:           z.string().trim().min(1).max(255),
   contact_name:   z.string().max(255).optional(),
-  contact_email:  z.preprocess((v) => (v === '' ? undefined : v), z.string().email().optional()),
+  contact_email:  z.preprocess((v) => (v === '' ? undefined : v), z.string().email().max(255).optional()),
   stage:          z.enum(STAGES).optional(),
-  mrr:            z.number().min(0).optional(),
-  notes:          z.string().optional(),
+  mrr:            z.number().min(0).max(MRR_MAX).optional(),
+  notes:          z.string().max(NOTES_MAX).optional(),
 });
 
-const updateSchema = createSchema.partial();
+// PATCH: optional text fields may be cleared by sending null (or '').
+const emptyToNull = (v: unknown) => (v === '' ? null : v);
+const updateSchema = z.object({
+  name:           z.string().trim().min(1).max(255).optional(),
+  contact_name:   z.preprocess(emptyToNull, z.string().max(255).nullable().optional()),
+  contact_email:  z.preprocess(emptyToNull, z.string().email().max(255).nullable().optional()),
+  stage:          z.enum(STAGES).optional(),
+  mrr:            z.number().min(0).max(MRR_MAX).optional(),
+  notes:          z.preprocess(emptyToNull, z.string().max(NOTES_MAX).nullable().optional()),
+});
 
 // GET /api/clients
 router.get('/', async (req, res, next) => {
   try {
-    const stage = req.query.stage as string | undefined;
+    const rawStage = req.query.stage;
+    if (rawStage !== undefined && (typeof rawStage !== 'string' || !(STAGES as readonly string[]).includes(rawStage))) {
+      res.status(400).json({ error: 'Invalid stage' });
+      return;
+    }
+    const stage = rawStage as string | undefined;
     const clients = await getClients(req.workspace.id, stage);
     res.json(clients);
   } catch (err) {
@@ -59,7 +76,7 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
-    if (Object.keys(parsed.data).length === 0) {
+    if (Object.values(parsed.data).every((v) => v === undefined)) {
       res.status(400).json({ error: 'No fields to update' });
       return;
     }

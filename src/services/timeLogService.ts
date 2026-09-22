@@ -58,6 +58,7 @@ export async function addTimeLog(
 // repoint someone else's billable time onto an arbitrary budget entry, corrupting its rollup.
 export async function setTimeLogBudgetEntry(
   id: string,
+  taskId: string,
   workspaceId: string,
   userClerkId: string,
   isAdmin: boolean,
@@ -70,25 +71,27 @@ export async function setTimeLogBudgetEntry(
     );
     if (check.rows.length === 0) return null;
   }
+  // task_id is matched too so /tasks/:taskId/time-logs/:id can't act on another task's log.
   const query = isAdmin
-    ? `UPDATE time_logs SET budget_entry_id = $1 WHERE id = $2 AND workspace_id = $3 RETURNING *`
-    : `UPDATE time_logs SET budget_entry_id = $1 WHERE id = $2 AND workspace_id = $3 AND user_clerk_id = $4 RETURNING *`;
-  const params = isAdmin ? [budgetEntryId, id, workspaceId] : [budgetEntryId, id, workspaceId, userClerkId];
+    ? `UPDATE time_logs SET budget_entry_id = $1 WHERE id = $2 AND task_id = $3 AND workspace_id = $4 RETURNING *`
+    : `UPDATE time_logs SET budget_entry_id = $1 WHERE id = $2 AND task_id = $3 AND workspace_id = $4 AND user_clerk_id = $5 RETURNING *`;
+  const params = isAdmin ? [budgetEntryId, id, taskId, workspaceId] : [budgetEntryId, id, taskId, workspaceId, userClerkId];
   const result = await pool.query<TimeLog>(query, params);
   return result.rows[0] ?? null;
 }
 
 export async function deleteTimeLog(
   id: string,
+  taskId: string,
   workspaceId: string,
   userClerkId: string,
   isAdmin: boolean,
 ): Promise<boolean> {
   // Admins can delete any log; members can only delete their own
   const query = isAdmin
-    ? `DELETE FROM time_logs WHERE id = $1 AND workspace_id = $2`
-    : `DELETE FROM time_logs WHERE id = $1 AND workspace_id = $2 AND user_clerk_id = $3`;
-  const params = isAdmin ? [id, workspaceId] : [id, workspaceId, userClerkId];
+    ? `DELETE FROM time_logs WHERE id = $1 AND task_id = $2 AND workspace_id = $3`
+    : `DELETE FROM time_logs WHERE id = $1 AND task_id = $2 AND workspace_id = $3 AND user_clerk_id = $4`;
+  const params = isAdmin ? [id, taskId, workspaceId] : [id, taskId, workspaceId, userClerkId];
   const result = await pool.query(query, params);
   return (result.rowCount ?? 0) > 0;
 }

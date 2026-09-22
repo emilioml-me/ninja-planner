@@ -8,6 +8,7 @@ import {
 import { pool } from '../config/db.js';
 import { createNotification } from '../services/notificationService.js';
 import { dispatchAutomations } from '../services/automationService.js';
+import { fireWebhooks } from '../services/webhookService.js';
 import { logger } from '../config/logger.js';
 
 const router = Router();
@@ -20,21 +21,26 @@ const SPRINT_STATUSES = ['planning', 'active', 'completed'] as const;
 // single GET into a synchronous, event-loop-blocking loop across every workspace's requests.
 const MAX_SPRINT_DAYS = 366;
 
-function validateDateRange(data: { start_date?: string | null; end_date?: string | null }, ctx: z.RefinementCtx) {
-  if (!data.start_date || !data.end_date) return;
-  const start = new Date(data.start_date);
-  const end = new Date(data.end_date);
+/** Returns an error message when the range is inverted or too long, else null. */
+function dateRangeError(startDate: string | null | undefined, endDate: string | null | undefined): string | null {
+  if (!startDate || !endDate) return null;
+  const start = new Date(startDate);
+  const end = new Date(endDate);
   const days = Math.round((end.getTime() - start.getTime()) / 86_400_000);
-  if (days < 0) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'end_date must not be before start_date', path: ['end_date'] });
-  } else if (days > MAX_SPRINT_DAYS) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Sprint range cannot exceed ${MAX_SPRINT_DAYS} days`, path: ['end_date'] });
-  }
+  if (days < 0) return 'end_date must not be before start_date';
+  if (days > MAX_SPRINT_DAYS) return `Sprint range cannot exceed ${MAX_SPRINT_DAYS} days`;
+  return null;
 }
 
+function validateDateRange(data: { start_date?: string | null; end_date?: string | null }, ctx: z.RefinementCtx) {
+  const message = dateRangeError(data.start_date, data.end_date);
+  if (message) ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['end_date'] });
+}
+
+// goal is nullable so the client can clear it (sending null) — undefined means "unchanged".
 const createSchema = z.object({
   name:       z.string().min(1).max(255),
-  goal:       z.string().optional(),
+  goal:       z.string().max(2000).nullable().optional(),
   status:     z.enum(SPRINT_STATUSES).optional(),
   start_date: z.string().date().nullable().optional(),
   end_date:   z.string().date().nullable().optional(),
@@ -42,7 +48,7 @@ const createSchema = z.object({
 
 const updateSchema = z.object({
   name:       z.string().min(1).max(255).optional(),
-  goal:       z.string().optional(),
+  goal:       z.string().max(2000).nullable().optional(),
   status:     z.enum(SPRINT_STATUSES).optional(),
   start_date: z.string().date().nullable().optional(),
   end_date:   z.string().date().nullable().optional(),
@@ -88,30 +94,28 @@ async function checkSprintEndAlerts(
 
     const daysLeft = Math.ceil(msLeft / 86_400_000);
     const title = `Sprint "${sprint.name}" ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}`;
+    const body = `The sprint ends on ${sprint.end_date}.`;
+    // One alert per (sprint, end date, days-left) per admin: at most one "2 days" and one
+    // "1 day" alert, and moving the end date re-arms the alerts. Enforced by the unique
+    // partial index on notifications.dedup_key (migration 052), so concurrent GETs can't
+    // double-insert — the body stays human-readable instead of carrying the sprint id.
+    const dedupKey = `sprint_ending:${sprint.id}:${sprint.end_date}:${daysLeft}`;
 
-    // Atomic dedup: insert for each admin only if no sprint_ending notification for this
-    // sprint+admin already exists in the last 20 hours. Single INSERT per admin avoids
-    // the SELECT-then-INSERT race condition.
     for (const adminId of adminIds) {
-      pool.query(
-        `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
-         SELECT $1, $2, 'sprint_ending', $3, $4, '/sprints'
-         WHERE NOT EXISTS (
-           SELECT 1 FROM notifications
-           WHERE workspace_id = $1
-             AND recipient_clerk_id = $2
-             AND type = 'sprint_ending'
-             AND body = $4
-             AND created_at > NOW() - INTERVAL '20 hours'
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM notification_preferences
-           WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'sprint_ending' AND enabled = false
-         )`,
-        [workspaceId, adminId, title, sprint.id],
-      ).catch((err) => {
+      try {
+        await pool.query(
+          `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link, dedup_key)
+           SELECT $1, $2, 'sprint_ending', $3, $4, '/sprints', $5
+           WHERE NOT EXISTS (
+             SELECT 1 FROM notification_preferences
+             WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'sprint_ending' AND enabled = false
+           )
+           ON CONFLICT (workspace_id, recipient_clerk_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING`,
+          [workspaceId, adminId, title, body, dedupKey],
+        );
+      } catch (err) {
         logger.warn({ err, workspaceId, adminId, sprintId: sprint.id }, '[sprints] sprint_ending notification insert failed');
-      });
+      }
     }
   }
 }
@@ -140,15 +144,43 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
-    const sprint = await updateSprint(req.params.id, req.workspace.id, parsed.data);
-    if (!sprint) { res.status(404).json({ error: 'Sprint not found' }); return; }
 
-    // Phase 5 — Sprint → Quest Sync: when a sprint goes active, create a ninja-task quest
-    // for every non-guest workspace member. Fire-and-forget; never blocks the response.
-    if (parsed.data.status === 'active' && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
+    // The schema-level range check only runs when both dates are in the body — a partial PATCH
+    // (e.g. only end_date) must be validated against the stored other bound too.
+    if (parsed.data.start_date !== undefined || parsed.data.end_date !== undefined) {
+      const existing = await getSprintById(req.params.id, req.workspace.id);
+      if (!existing) { res.status(404).json({ error: 'Sprint not found' }); return; }
+      const message = dateRangeError(
+        parsed.data.start_date !== undefined ? parsed.data.start_date : existing.start_date,
+        parsed.data.end_date !== undefined ? parsed.data.end_date : existing.end_date,
+      );
+      if (message) {
+        res.status(400).json({ error: { formErrors: [], fieldErrors: { end_date: [message] } } });
+        return;
+      }
+    }
+
+    const updated = await updateSprint(req.params.id, req.workspace.id, parsed.data);
+    if (!updated) { res.status(404).json({ error: 'Sprint not found' }); return; }
+    const { prev_status: prevStatus, ...sprint } = updated;
+    const statusChanged = sprint.status !== prevStatus;
+
+    // Phase 5 — Sprint → Quest Sync: when a sprint TRANSITIONS to active, create a ninja-task
+    // quest for every participating (non-viewer) workspace member who doesn't already have one
+    // for this sprint. Gated on the transition (not on the payload merely containing
+    // status='active') so ordinary edits of an active sprint don't mint duplicate quests.
+    // Fire-and-forget; never blocks the response.
+    if (statusChanged && sprint.status === 'active' && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
       pool.query<{ clerk_user_id: string }>(
-        "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role != 'guest'",
-        [req.workspace.id],
+        `SELECT wm.clerk_user_id
+         FROM workspace_members wm
+         WHERE wm.workspace_id = $1
+           AND wm.role <> 'viewer'
+           AND NOT EXISTS (
+             SELECT 1 FROM sprint_quests sq
+             WHERE sq.sprint_id = $2 AND sq.clerk_user_id = wm.clerk_user_id
+           )`,
+        [req.workspace.id, sprint.id],
       ).then(async (membersResult) => {
         const { createQuestInNinjaTask } = await import("../integrations/ninjatask.js");
         for (const member of membersResult.rows) {
@@ -161,29 +193,34 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
             // One quest is created per member, so it can't be represented by the single
             // sprints.ninja_task_quest_id column — this table tracks all of them, which is what
             // the quest_complete webhook needs to map an incoming questId back to a member.
+            // UNIQUE (sprint_id, clerk_user_id) (migration 052) keeps it at one per member even
+            // if two activations race.
             if (quest?.id) {
               await pool.query(
                 `INSERT INTO sprint_quests (sprint_id, workspace_id, clerk_user_id, ninja_task_quest_id)
                  VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (ninja_task_quest_id) DO NOTHING`,
+                 ON CONFLICT (sprint_id, clerk_user_id) DO NOTHING`,
                 [sprint.id, req.workspace.id, member.clerk_user_id, quest.id],
               );
             }
           } catch (err) {
-            console.error("[ninja-task] quest create failed for member:", member.clerk_user_id, err);
+            logger.warn({ err, clerkUserId: member.clerk_user_id, sprintId: sprint.id }, '[ninja-task] quest create failed for member');
           }
         }
-      }).catch((err: Error) => console.error("[ninja-task] member fetch failed:", err));
+      }).catch((err: Error) => logger.warn({ err, sprintId: sprint.id }, '[ninja-task] member fetch failed'));
     }
 
     // When completing a sprint, include the count of still-incomplete tasks
-    if (parsed.data.status === 'completed') {
-      dispatchAutomations({
-        type: 'sprint.completed',
-        workspaceId: req.workspace.id,
-        sprintId: sprint.id,
-        title: sprint.name,
-      }).catch(() => {});
+    if (sprint.status === 'completed') {
+      if (statusChanged) {
+        dispatchAutomations({
+          type: 'sprint.completed',
+          workspaceId: req.workspace.id,
+          sprintId: sprint.id,
+          title: sprint.name,
+        }).catch(() => {});
+        fireWebhooks(req.workspace.id, 'sprint.completed', { sprint });
+      }
 
       const incompleteResult = await pool.query<{ count: number }>(
         `SELECT COUNT(*)::int AS count FROM tasks
@@ -266,21 +303,39 @@ router.get('/:id/burndown', async (req, res, next) => {
       return;
     }
 
-    // For each task currently done, find the latest activity row where status='done'
+    // For each task currently done, its completion date is the FIRST transition to done after
+    // its last non-done status (i.e. the start of its current "done" streak). Taking the latest
+    // status='done' row instead meant any later activity row repeating status='done' (an edit of
+    // a done task, a Kanban move within the Done column) moved its completion to that day.
+    // Status-carrying rows are 'updated', 'created' (task created directly as done) and
+    // historical 'moved' rows (Kanban drags logged the status there before the reorder path
+    // switched to logging 'updated').
     const doneByDay = await pool.query<{ done_date: string; task_count: number; point_sum: number }>(
-      `WITH final_done AS (
-         SELECT DISTINCT ON (ta.task_id)
-           ta.task_id,
-           DATE(ta.created_at AT TIME ZONE 'UTC')::text AS done_date
+      `WITH status_rows AS (
+         SELECT ta.task_id, ta.created_at, ta.payload->>'status' AS status
          FROM task_activity ta
          JOIN tasks t ON t.id = ta.task_id
          WHERE t.sprint_id = $1
            AND t.workspace_id = $2
            AND t.status = 'done'
-           AND ta.action = 'updated'
-           AND (ta.payload->>'status') = 'done'
            AND t.deleted_at IS NULL
-         ORDER BY ta.task_id, ta.created_at DESC
+           AND ta.action IN ('updated', 'created', 'moved')
+           AND (ta.payload->>'status') IS NOT NULL
+       ),
+       last_reopen AS (
+         SELECT task_id, MAX(created_at) AS reopened_at
+         FROM status_rows
+         WHERE status <> 'done'
+         GROUP BY task_id
+       ),
+       final_done AS (
+         SELECT sr.task_id,
+                DATE(MIN(sr.created_at) AT TIME ZONE 'UTC')::text AS done_date
+         FROM status_rows sr
+         LEFT JOIN last_reopen lr ON lr.task_id = sr.task_id
+         WHERE sr.status = 'done'
+           AND (lr.reopened_at IS NULL OR sr.created_at > lr.reopened_at)
+         GROUP BY sr.task_id
        )
        SELECT
          fd.done_date,
@@ -297,21 +352,33 @@ router.get('/:id/burndown', async (req, res, next) => {
     // addition to the create/update validation) so a sprint row with an extreme or inverted
     // range — from data written before validation existed, or any other path — can't turn this
     // GET into a synchronous loop of tens of thousands of iterations.
-    const start = new Date(start_date);
-    let end = new Date(end_date);
+    // All date math is in UTC ('YYYY-MM-DD' parses as UTC midnight) so the series doesn't shift
+    // by a day depending on the server's local timezone.
+    const start = new Date(`${start_date}T00:00:00Z`);
+    let end = new Date(`${end_date}T00:00:00Z`);
     if (end < start) {
       res.json({ total_tasks, total_points, points: [] });
       return;
     }
     const maxEnd = new Date(start);
-    maxEnd.setDate(maxEnd.getDate() + MAX_SPRINT_DAYS);
+    maxEnd.setUTCDate(maxEnd.getUTCDate() + MAX_SPRINT_DAYS);
     if (end > maxEnd) end = maxEnd;
     const today = new Date();
     const last  = end < today ? end : today;
 
+    // Tasks completed before the sprint started (e.g. finished, then pulled into the sprint)
+    // are burned down at day 0 rather than never being subtracted at all.
+    const startStr = start.toISOString().split('T')[0];
+    let preStartTasks = 0;
+    let preStartPoints = 0;
     const doneMap = new Map<string, { tasks: number; points: number }>();
     for (const row of doneByDay.rows) {
-      doneMap.set(row.done_date, { tasks: row.task_count, points: row.point_sum });
+      if (row.done_date < startStr) {
+        preStartTasks  += row.task_count;
+        preStartPoints += row.point_sum;
+      } else {
+        doneMap.set(row.done_date, { tasks: row.task_count, points: row.point_sum });
+      }
     }
 
     const days = Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1;
@@ -324,12 +391,12 @@ router.get('/:id/burndown', async (req, res, next) => {
       ideal_points: number;
     }[] = [];
 
-    let doneTasks = 0;
-    let donePoints = 0;
+    let doneTasks = preStartTasks;
+    let donePoints = preStartPoints;
 
     for (let i = 0; ; i++) {
       const d = new Date(start);
-      d.setDate(d.getDate() + i);
+      d.setUTCDate(d.getUTCDate() + i);
       if (d > last) break;
 
       const dateStr = d.toISOString().split('T')[0];
@@ -429,8 +496,8 @@ router.patch('/:id/tasks', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/sprints/:id/tasks/:taskId  — remove task from sprint
-router.delete('/:id/tasks/:taskId', async (req, res, next) => {
+// DELETE /api/sprints/:id/tasks/:taskId  — remove task from sprint  [admin only, like bulk assign]
+router.delete('/:id/tasks/:taskId', requireAdmin, async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE tasks SET sprint_id = NULL

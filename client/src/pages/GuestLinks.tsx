@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -26,6 +26,7 @@ export default function GuestLinks() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
+  const isAdminLoaded = useIsAdminLoaded();
   const { toast } = useToast();
 
   const [creating, setCreating] = useState(false);
@@ -36,6 +37,7 @@ export default function GuestLinks() {
   const { data: shares = [], isLoading } = useQuery<Share[]>({
     queryKey: ['project-shares'],
     queryFn: () => apiRequest('GET', '/api/project-shares'),
+    enabled: isAdmin,
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['project-shares'] });
@@ -51,13 +53,13 @@ export default function GuestLinks() {
       setExpires('');
       toast({ title: 'Guest link created' });
     },
-    onError: () => toast({ title: 'Failed to create link', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create link', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/project-shares/${id}`),
     onSuccess: () => { invalidate(); toast({ title: 'Link revoked' }); },
-    onError: () => toast({ title: 'Failed to revoke link', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to revoke link', description: err.message, variant: 'destructive' }),
   });
 
   function toggleScope(scope: string) {
@@ -70,9 +72,23 @@ export default function GuestLinks() {
     return `${window.location.origin}/g/${token}`;
   }
 
-  function copyLink(token: string) {
-    navigator.clipboard.writeText(guestUrl(token));
-    toast({ title: 'Link copied to clipboard' });
+  async function copyLink(token: string) {
+    // writeText rejects without a secure context / permission — don't claim success then.
+    try {
+      await navigator.clipboard.writeText(guestUrl(token));
+      toast({ title: 'Link copied to clipboard' });
+    } catch {
+      toast({ title: 'Could not copy link', description: guestUrl(token), variant: 'destructive' });
+    }
+  }
+
+  const expiresInPast = !!expires && new Date(expires).getTime() <= Date.now();
+
+  // Wait for Clerk to resolve so real admins don't see a flash of "Admin access required".
+  if (!isAdminLoaded) {
+    return (
+      <div className="p-6 space-y-3">{[1,2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}</div>
+    );
   }
 
   if (!isAdmin) {
@@ -109,7 +125,7 @@ export default function GuestLinks() {
               <label className="text-sm font-medium">Access</label>
               <div className="flex flex-wrap gap-2 mt-2">
                 {ALL_SCOPES.map((scope) => (
-                  <button key={scope} onClick={() => toggleScope(scope)}
+                  <button key={scope} type="button" onClick={() => toggleScope(scope)}
                     className={`text-xs px-2 py-1 rounded border transition-colors ${
                       scopes.includes(scope)
                         ? 'bg-primary text-primary-foreground border-primary'
@@ -124,6 +140,9 @@ export default function GuestLinks() {
               <label className="text-sm font-medium">Expires (optional)</label>
               <Input type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)}
                 className="mt-1" />
+              {expiresInPast && (
+                <p className="text-xs text-destructive mt-1">Expiry must be in the future.</p>
+              )}
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
@@ -133,7 +152,7 @@ export default function GuestLinks() {
                   scopes,
                   ...(expires ? { expires_at: new Date(expires).toISOString() } : {}),
                 })}
-                disabled={!label.trim() || scopes.length === 0 || createMutation.isPending}>
+                disabled={!label.trim() || scopes.length === 0 || expiresInPast || createMutation.isPending}>
                 Create
               </Button>
             </div>
@@ -172,7 +191,7 @@ export default function GuestLinks() {
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
                   <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive hover:text-destructive"
-                    onClick={() => deleteMutation.mutate(s.id)}
+                    onClick={() => { if (confirm(`Revoke "${s.label}"? Anyone using this link will lose access immediately.`)) deleteMutation.mutate(s.id); }}
                     disabled={deleteMutation.isPending}>
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>

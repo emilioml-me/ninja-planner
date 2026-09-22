@@ -45,7 +45,7 @@ export async function createEndpoint(
   const result = await pool.query<WebhookEndpoint>(
     `INSERT INTO webhook_endpoints (workspace_id, url, secret, events, created_by)
      VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [workspaceId, data.url, secret, data.events],
+    [workspaceId, data.url, secret, data.events, createdBy],
   );
   return result.rows[0];
 }
@@ -94,7 +94,9 @@ export async function getDeliveries(endpointId: string, workspaceId: string): Pr
 
 // ─── Delivery ─────────────────────────────────────────────────────────────────
 
-const ALL_EVENTS = [
+// Single source of truth for subscribable event types (webhook-endpoints.ts validates against
+// this list; migration 054 backfilled legacy empty-events endpoints to this same set).
+export const ALL_EVENTS = [
   'task.created', 'task.updated', 'task.completed', 'task.deleted',
   'review.submitted',
   'epic.created', 'epic.updated', 'epic.deleted',
@@ -127,11 +129,14 @@ async function _deliver(
   eventType: WebhookEventType,
   payload: Record<string, unknown>,
 ): Promise<void> {
+  // An empty `events` array is treated as "subscribed to nothing", not a wildcard — see the
+  // comment on webhook-endpoints.ts's createSchema for why the previous `events = '{}' OR ...`
+  // wildcard semantics were a bug, not a deliberate default.
   const result = await pool.query<WebhookEndpoint>(
     `SELECT * FROM webhook_endpoints
      WHERE workspace_id = $1
        AND active = true
-       AND (events = '{}' OR $2 = ANY(events))`,
+       AND $2 = ANY(events)`,
     [workspaceId, eventType],
   );
 
@@ -151,22 +156,30 @@ async function _deliver(
  * raw URL typed into the rule. Returns false if the endpoint doesn't exist/isn't active/isn't
  * in this workspace, so the caller can log that distinctly from a delivery failure.
  */
+/**
+ * Returns 'not_found' if the endpoint doesn't exist/isn't active/isn't in this workspace,
+ * 'delivered' if the HTTP call ultimately succeeded, or 'failed' if it was attempted but never
+ * got a 2xx after retries. Previously returned a plain boolean that was `true` whenever the
+ * endpoint existed, regardless of whether the underlying HTTP delivery actually succeeded — so
+ * automation runs against a permanently-failing endpoint were logged as 'ok' with no signal to
+ * admins short of cross-referencing the separate webhook_deliveries table.
+ */
 export async function deliverToEndpoint(
   endpointId: string,
   workspaceId: string,
   eventType: string,
   payload: Record<string, unknown>,
-): Promise<boolean> {
+): Promise<'delivered' | 'failed' | 'not_found'> {
   const result = await pool.query<WebhookEndpoint>(
     `SELECT * FROM webhook_endpoints WHERE id = $1 AND workspace_id = $2 AND active = true`,
     [endpointId, workspaceId],
   );
   const endpoint = result.rows[0];
-  if (!endpoint) return false;
+  if (!endpoint) return 'not_found';
 
   const body = JSON.stringify({ event: eventType, timestamp: new Date().toISOString(), data: payload });
-  await _deliverToEndpoint(endpoint, eventType, body, payload);
-  return true;
+  const delivered = await _deliverToEndpoint(endpoint, eventType, body, payload);
+  return delivered ? 'delivered' : 'failed';
 }
 
 /** Retry delays: immediate → 10 s → 60 s */
@@ -181,25 +194,10 @@ async function _deliverToEndpoint(
   eventType: string,
   body: string,
   payload: Record<string, unknown>,
-): Promise<void> {
+): Promise<boolean> {
   // Per-endpoint delivery ID so each receiver can correlate retries vs. separate events
   const deliveryId = randomBytes(16).toString('hex');
-  // DNS-rebinding guard: verify the resolved IP is still public at delivery time.
-  // NOTE: this check and the fetch() below perform separate DNS resolutions, so a
-  // narrow TOCTOU window remains (attacker-controlled DNS could flip between the two).
-  // Fully closing it requires pinning the resolved IP for the actual connection
-  // (e.g. a custom undici Agent with a validating `connect.lookup`) — tracked as follow-up.
   const { hostname } = new URL(endpoint.url);
-  if (!(await resolvedIpIsSafe(hostname))) {
-    logger.warn({ endpointId: endpoint.id, url: endpoint.url }, 'SSRF: resolved IP is private, aborting delivery');
-    pool.query(
-      `INSERT INTO webhook_deliveries (endpoint_id, event_type, payload, status, http_status, error, delivered_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [endpoint.id, eventType, payload, 'failed', null, 'SSRF: resolved to private IP', null],
-    ).catch(() => {});
-    return;
-  }
-
   const signature = signPayload(endpoint.secret, body);
   let httpStatus: number | null = null;
   let error: string | null = null;
@@ -207,6 +205,18 @@ async function _deliverToEndpoint(
 
   for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
     if (attempt > 0) await sleep(RETRY_DELAYS_MS[attempt]);
+
+    // DNS-rebinding guard, re-run on EVERY attempt (retries happen up to 70s later, long enough
+    // for attacker-controlled DNS with a short TTL to flip to a private address). All resolved
+    // addresses must be public. A narrow TOCTOU window between this lookup and fetch()'s own
+    // resolution remains; fully closing it would need a pinned-IP dispatcher (undici is not a
+    // direct dependency).
+    if (!(await resolvedIpIsSafe(hostname))) {
+      logger.warn({ endpointId: endpoint.id, url: endpoint.url }, 'SSRF: resolved IP is private, aborting delivery');
+      httpStatus = null;
+      error = 'SSRF: resolved to private IP';
+      break;
+    }
 
     try {
       const res = await fetch(endpoint.url, {
@@ -251,4 +261,6 @@ async function _deliverToEndpoint(
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [endpoint.id, eventType, payload, status, httpStatus, error, status === 'success' ? new Date() : null],
   ).catch(() => {});
+
+  return status === 'success';
 }

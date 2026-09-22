@@ -31,6 +31,18 @@ export interface CrmDealsResult {
   deals: CrmDeal[];
 }
 
+export interface CrmClient {
+  id: string;
+  name: string;
+  email: string | null;
+  mrr: number | null;
+  stage: string;
+}
+
+export interface CrmClientsResult {
+  clients: CrmClient[];
+}
+
 // ─── payment-ninja ────────────────────────────────────────────────────────────
 export interface PaymentSummary {
   currentMonthRevenue: number;

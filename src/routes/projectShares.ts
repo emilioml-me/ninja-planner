@@ -16,7 +16,11 @@ const createSchema = z.object({
     (s) => s.every((x) => VALID_SCOPES.has(x)),
     { message: 'Invalid scope' },
   ).default(['tasks:read', 'roadmap:read']),
-  expires_at: z.string().datetime({ offset: true }).nullable().optional(),
+  // A link that is already expired at creation is useless (and confusing in the list).
+  expires_at: z.string().datetime({ offset: true }).nullable().optional().refine(
+    (v) => v == null || new Date(v).getTime() > Date.now(),
+    { message: 'expires_at must be in the future' },
+  ),
 });
 
 // GET /api/project-shares  [admin]

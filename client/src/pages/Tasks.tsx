@@ -1,7 +1,9 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { format, isBefore, isToday, startOfDay } from 'date-fns';
-import { useApiClient } from '@/lib/api';
+import { useLocation, useSearch } from 'wouter';
+import { isBefore, isToday, startOfDay } from 'date-fns';
+import { ApiError, useApiClient } from '@/lib/api';
+import { useTaskList } from '@/hooks/use-tasks';
 import { useToast } from '@/hooks/use-toast';
 import { useMembers } from '@/hooks/use-members';
 import { useIsAdmin } from '@/hooks/use-is-admin';
@@ -24,12 +26,58 @@ import {
 } from '@/components/ui/dialog';
 import {
   Plus, Search, X, LayoutGrid, List, MoreVertical, Pencil, Trash2, Clock, Calendar,
-  CheckSquare, ChevronDown, Download, FileText, Upload,
+  CheckSquare, ChevronDown, Download, FileText, Upload, AlertTriangle,
 } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
-import { cn } from '@/lib/utils';
+import { cn, localDateOnly, safeFormat } from '@/lib/utils';
 
 interface Sprint { id: string; name: string; status: string; }
+
+interface ImportResult {
+  imported: number;
+  skipped: number;
+  validation_errors?: { row: number; error: string }[];
+  warnings?: { row: number; warning: string }[];
+}
+
+type BulkUpdate = Partial<Pick<Task, 'status' | 'priority' | 'assignee_clerk_id' | 'sprint_id'>>;
+
+/**
+ * Runs `fn` over `items` with at most `limit` requests in flight. Used as the fallback for bulk
+ * actions -- firing one request per selected task all at once (previously Promise.allSettled over
+ * every id) tripped the API rate limiter and locked the user out with 429s.
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<unknown>,
+): Promise<T[]> {
+  const failed: T[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      try { await fn(item); } catch { failed.push(item); }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return failed;
+}
+
+const BULK_CONCURRENCY = 5;
+const BULK_CHUNK = 200;
+
+/** Server row errors are JSON-stringified zod fieldErrors -- render them as "field: msg". */
+function formatImportError(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, string[]>;
+    if (parsed && typeof parsed === 'object') {
+      const parts = Object.entries(parsed).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : String(v)}`);
+      if (parts.length > 0) return parts.join('; ');
+    }
+  } catch { /* plain string */ }
+  return raw;
+}
 
 interface TaskTemplate {
   id: string;
@@ -174,7 +222,7 @@ function TaskListView({
           {sorted.map((task) => {
             const isOverdue = task.due_date && task.status !== 'done' &&
               isBefore(new Date(task.due_date + 'T23:59:59'), todayStart);
-            const dueToday = task.due_date && isToday(new Date(task.due_date));
+            const dueToday = task.due_date && isToday(localDateOnly(task.due_date));
             const selected = selectedIds.has(task.id);
             return (
               <TableRow
@@ -225,7 +273,7 @@ function TaskListView({
                       isOverdue ? 'text-destructive font-medium' : dueToday ? 'text-yellow-600' : 'text-muted-foreground',
                     )}>
                       {isOverdue ? <Clock className="h-3 w-3" /> : <Calendar className="h-3 w-3" />}
-                      {format(new Date(task.due_date), 'MMM d')}
+                      {safeFormat(task.due_date, 'MMM d')}
                     </span>
                   ) : <span className="text-xs text-muted-foreground">—</span>}
                 </TableCell>
@@ -285,12 +333,11 @@ export default function Tasks() {
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importCsv, setImportCsv] = useState('');
-  const [importResult, setImportResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [importErrors, setImportErrors] = useState<{ row: number; error: string }[] | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
-  const { data: tasks = [], isLoading } = useQuery<Task[]>({
-    queryKey: ['/api/tasks'],
-    queryFn: () => apiRequest<Task[]>('GET', '/api/tasks'),
-  });
+  const { tasks, isLoading, truncated, total: totalTasks } = useTaskList();
 
   const { members, displayName, initials } = useMembers();
   const isAdmin = useIsAdmin();
@@ -368,16 +415,51 @@ export default function Tasks() {
 
   // ─── Bulk actions ─────────────────────────────────────────────────────────
 
-  const bulkUpdateMutation = useMutation({
-    mutationFn: async ({ ids, update }: { ids: string[]; update: Partial<Task> }) => {
-      const results = await Promise.allSettled(
-        ids.map((id) => apiRequest('PATCH', `/api/tasks/${id}`, update)),
-      );
-      const failed = ids.filter((_, i) => results[i].status === 'rejected');
+  // POST /api/tasks/bulk: one request per chunk of up to BULK_CHUNK ids (server max 200), same
+  // auth rules and per-task side effects as the single-task routes. Ids the server reports as
+  // not_found count as failed. If the endpoint is missing (404/405 from an older server), fall
+  // back to per-task requests with limited concurrency.
+  const runBulk = async (
+    ids: string[],
+    op: { update: BulkUpdate } | { delete: true },
+  ): Promise<{ succeeded: number; failed: string[] }> => {
+    const failed: string[] = [];
+    let remaining = ids;
+    try {
+      while (remaining.length > 0) {
+        const chunk = remaining.slice(0, BULK_CHUNK);
+        const body = 'update' in op
+          ? { action: 'update', ids: chunk, changes: op.update }
+          : { action: 'delete', ids: chunk };
+        const res = await apiRequest<{ not_found?: string[] } | undefined>('POST', '/api/tasks/bulk', body);
+        failed.push(...(res?.not_found ?? []));
+        remaining = remaining.slice(BULK_CHUNK);
+      }
       return { succeeded: ids.length - failed.length, failed };
-    },
+    } catch (err) {
+      const endpointMissing = err instanceof ApiError && (err.status === 404 || err.status === 405)
+        && remaining.length === ids.length;
+      if (!endpointMissing) {
+        // Earlier chunks may have succeeded; everything from the failing chunk on is "failed".
+        if (remaining.length < ids.length) {
+          failed.push(...remaining);
+          return { succeeded: ids.length - failed.length, failed };
+        }
+        throw err;
+      }
+    }
+    const fallbackFailed = await runWithConcurrency(ids, BULK_CONCURRENCY, (id) =>
+      'update' in op
+        ? apiRequest('PATCH', `/api/tasks/${id}`, op.update)
+        : apiRequest('DELETE', `/api/tasks/${id}`),
+    );
+    return { succeeded: ids.length - fallbackFailed.length, failed: fallbackFailed };
+  };
+
+  const bulkUpdateMutation = useMutation({
+    mutationFn: ({ ids, update }: { ids: string[]; update: BulkUpdate }) => runBulk(ids, { update }),
     onSuccess: ({ succeeded, failed }) => {
-      // Always refresh — some tasks may have succeeded even if others failed.
+      // Always refresh -- some tasks may have succeeded even if others failed.
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
       queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setSelectedIds(new Set(failed));
@@ -393,14 +475,14 @@ export default function Tasks() {
         });
       }
     },
+    onError: (err: Error) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      toast({ title: 'Bulk update failed', description: err.message, variant: 'destructive' });
+    },
   });
 
   const bulkDeleteMutation = useMutation({
-    mutationFn: async (ids: string[]) => {
-      const results = await Promise.allSettled(ids.map((id) => apiRequest('DELETE', `/api/tasks/${id}`)));
-      const failed = ids.filter((_, i) => results[i].status === 'rejected');
-      return { succeeded: ids.length - failed.length, failed };
-    },
+    mutationFn: (ids: string[]) => runBulk(ids, { delete: true }),
     onSuccess: ({ succeeded, failed }) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
       setSelectedIds(new Set(failed));
@@ -417,16 +499,30 @@ export default function Tasks() {
         });
       }
     },
+    onError: (err: Error) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      setBulkDeleteConfirm(false);
+      toast({ title: 'Bulk delete failed', description: err.message, variant: 'destructive' });
+    },
   });
 
   const importMutation = useMutation({
-    mutationFn: (csv: string) => apiRequest<{ imported: number; skipped: number }>('POST', '/api/tasks/import', { csv }),
+    mutationFn: (csv: string) => apiRequest<ImportResult>('POST', '/api/tasks/import', { csv }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
       setImportResult(res);
+      setImportErrors(null);
       setImportCsv('');
     },
-    onError: (err: Error) => toast({ title: 'Import failed', description: err.message, variant: 'destructive' }),
+    onError: (err: Error) => {
+      // 422 "All rows failed validation" carries per-row details -- show them instead of only
+      // the generic message.
+      const details = err instanceof ApiError
+        ? (err.body as { details?: { row: number; error: string }[] } | undefined)?.details
+        : undefined;
+      setImportErrors(Array.isArray(details) && details.length > 0 ? details : null);
+      toast({ title: 'Import failed', description: err.message, variant: 'destructive' });
+    },
   });
 
   const toggleSelect = (id: string) => {
@@ -448,6 +544,37 @@ export default function Tasks() {
 
   const clearSelection = () => setSelectedIds(new Set());
 
+  // Open a task named by ?task=<id> (used by the command palette), then strip the param so a
+  // refresh / closing the dialog doesn't reopen it.
+  const searchString = useSearch();
+  const [, navigate] = useLocation();
+  const taskParam = new URLSearchParams(searchString).get('task');
+  useEffect(() => {
+    if (!taskParam || isLoading) return;
+    let cancelled = false;
+    const openTask = (task: Task) => {
+      if (cancelled) return;
+      setEditingTask(task);
+      setDialogOpen(true);
+      navigate('/tasks', { replace: true });
+    };
+    const found = tasks.find((t) => t.id === taskParam);
+    if (found) {
+      openTask(found);
+    } else {
+      // Not in the (possibly truncated) list -- fetch it directly.
+      apiRequest<{ task: Task }>('GET', `/api/tasks/${encodeURIComponent(taskParam)}`)
+        .then((res) => openTask(res.task))
+        .catch(() => {
+          if (cancelled) return;
+          toast({ title: 'Task not found', variant: 'destructive' });
+          navigate('/tasks', { replace: true });
+        });
+    }
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskParam, isLoading]);
+
   // ─── Filters ───────────────────────────────────────────────────────────────
 
   const filteredTasks = useMemo(() => {
@@ -464,11 +591,32 @@ export default function Tasks() {
     });
   }, [tasks, search, priorityFilter]);
 
+  // Drop selected ids that are no longer visible (filtered out) or no longer exist (deleted),
+  // so bulk actions never act on tasks the user can't see.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(filteredTasks.map((t) => t.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filteredTasks]);
+
   const columns: KanbanColumnData[] = COLUMNS.map((col) => ({
     id: col.id,
     title: col.title,
     cards: filteredTasks.filter((t) => t.status === col.id).map(taskToCard),
   }));
+
+  // Unfiltered columns -- KanbanBoard computes drag positions against these so reordering while
+  // a search/priority filter is active doesn't corrupt positions relative to hidden tasks.
+  const allColumns: KanbanColumnData[] = COLUMNS.map((col) => ({
+    id: col.id,
+    title: col.title,
+    cards: tasks.filter((t) => t.status === col.id).map(taskToCard),
+  }));
+
+  const pendingDeleteTask = pendingDeleteId ? tasks.find((t) => t.id === pendingDeleteId) : undefined;
 
   const hasFilters = search !== '' || priorityFilter !== 'all';
   const selectedCount = selectedIds.size;
@@ -574,14 +722,18 @@ export default function Tasks() {
             size="sm"
             variant="outline"
             className="gap-2"
+            // Column names / tag separator match POST /api/tasks/import so an export can be
+            // re-imported as-is (assignee_name and created_at are informational and ignored).
             onClick={() => downloadCsv('tasks.csv', tasks.map((t) => ({
               title: t.title,
+              description: t.description ?? '',
               status: t.status,
               priority: t.priority,
-              assignee: t.assignee_clerk_id ?? '',
-              due_date: t.due_date ?? '',
-              tags: t.tags.join(', '),
-              created_at: String(t.created_at),
+              assignee_clerk_id: t.assignee_clerk_id ?? '',
+              assignee_name: t.assignee_clerk_id ? displayName(t.assignee_clerk_id) : '',
+              due_date: t.due_date ? t.due_date.substring(0, 10) : '',
+              tags: t.tags.join(';'),
+              created_at: t.created_at ?? '',
             })))}
           >
             <Download className="h-4 w-4" />
@@ -591,7 +743,7 @@ export default function Tasks() {
             size="sm"
             variant="outline"
             className="gap-2"
-            onClick={() => { setImportOpen(true); setImportResult(null); }}
+            onClick={() => { setImportOpen(true); setImportResult(null); setImportErrors(null); }}
           >
             <Upload className="h-4 w-4" />
             <span className="hidden sm:inline">Import</span>
@@ -641,6 +793,13 @@ export default function Tasks() {
         )}
       </div>
 
+      {truncated && (
+        <div className="flex items-center gap-2 px-4 sm:px-6 py-2 border-b bg-yellow-50 text-yellow-800 dark:bg-yellow-950/40 dark:text-yellow-300 text-xs">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          Showing {tasks.length} of {Math.max(totalTasks, tasks.length)} tasks; the rest are not listed here.
+        </div>
+      )}
+
       {/* Board / List */}
       <div className="flex-1 overflow-hidden">
         {isLoading ? (
@@ -651,14 +810,15 @@ export default function Tasks() {
             onAddCard={handleAddCard}
             onCardClick={handleCardClick}
             onReorder={handleReorder}
-            onDeleteCard={isAdmin ? (id) => deleteMutation.mutate(id) : undefined}
+            onDeleteCard={isAdmin ? (id) => setPendingDeleteId(id) : undefined}
             members={members}
+            allColumns={allColumns}
           />
         ) : (
           <TaskListView
             tasks={filteredTasks}
             onEdit={(task) => { setEditingTask(task); setDialogOpen(true); }}
-            onDelete={isAdmin ? (id) => deleteMutation.mutate(id) : undefined}
+            onDelete={isAdmin ? (id) => setPendingDeleteId(id) : undefined}
             displayName={displayName}
             initials={initials}
             selectedIds={selectedIds}
@@ -799,6 +959,32 @@ export default function Tasks() {
         allTasks={tasks}
       />
 
+      {/* Single delete confirm */}
+      <Dialog open={pendingDeleteId !== null} onOpenChange={(o) => { if (!o) setPendingDeleteId(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete task?</DialogTitle>
+            <DialogDescription>
+              {pendingDeleteTask ? `"${pendingDeleteTask.title}" will be deleted.` : 'This task will be deleted.'}{' '}
+              This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setPendingDeleteId(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMutation.isPending}
+              onClick={() => {
+                if (!pendingDeleteId) return;
+                deleteMutation.mutate(pendingDeleteId, { onSettled: () => setPendingDeleteId(null) });
+              }}
+            >
+              {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Bulk delete confirm */}
       <Dialog open={bulkDeleteConfirm} onOpenChange={setBulkDeleteConfirm}>
         <DialogContent className="sm:max-w-sm">
@@ -853,12 +1039,14 @@ export default function Tasks() {
       </Dialog>
 
       {/* CSV Import */}
-      <Dialog open={importOpen} onOpenChange={(o) => { setImportOpen(o); if (!o) setImportResult(null); }}>
+      <Dialog open={importOpen} onOpenChange={(o) => { setImportOpen(o); if (!o) { setImportResult(null); setImportErrors(null); } }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Import Tasks from CSV</DialogTitle>
             <DialogDescription>
-              Paste CSV text with headers: title, description, status, priority, due_date, tags
+              Paste CSV text with headers: title, description, status, priority, due_date,
+              tags (separated by ;), assignee_clerk_id. A file exported from this page can be
+              re-imported as-is.
             </DialogDescription>
           </DialogHeader>
           {importResult ? (
@@ -870,6 +1058,26 @@ export default function Tasks() {
                   <div className="text-sm text-muted-foreground mt-1">{importResult.skipped} rows skipped</div>
                 )}
               </div>
+              {(importResult.validation_errors?.length ?? 0) > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-destructive">Skipped rows</p>
+                  <ul className="max-h-32 overflow-y-auto text-xs text-muted-foreground space-y-0.5">
+                    {importResult.validation_errors!.map((e) => (
+                      <li key={`e${e.row}`}>Row {e.row}: {formatImportError(e.error)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {(importResult.warnings?.length ?? 0) > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-yellow-700 dark:text-yellow-400">Warnings</p>
+                  <ul className="max-h-32 overflow-y-auto text-xs text-muted-foreground space-y-0.5">
+                    {importResult.warnings!.map((w) => (
+                      <li key={`w${w.row}`}>Row {w.row}: {w.warning}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <Button className="w-full" onClick={() => setImportOpen(false)}>Done</Button>
             </div>
           ) : (
@@ -880,6 +1088,16 @@ export default function Tasks() {
                 value={importCsv}
                 onChange={(e) => setImportCsv(e.target.value)}
               />
+              {importErrors && importErrors.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-destructive">No rows were imported:</p>
+                  <ul className="max-h-32 overflow-y-auto text-xs text-muted-foreground space-y-0.5">
+                    {importErrors.map((e) => (
+                      <li key={e.row}>Row {e.row}: {formatImportError(e.error)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {(() => {
                 const lines = importCsv.split(/\r?\n/).filter((l) => l.trim());
                 if (lines.length === 0) return null;

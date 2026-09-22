@@ -6,24 +6,31 @@ import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 import { createEpic } from '../services/epicService.js';
-import { createTask } from '../services/taskService.js';
+import { createTask, logTaskActivity } from '../services/taskService.js';
+import { fireWebhooks } from '../services/webhookService.js';
+import { logger } from '../config/logger.js';
 
 const router = Router();
 router.use(requireWorkspace);
 
 const schema = z.object({
-  name:               z.string().min(1).max(255),
-  epic_title:          z.string().min(1).max(500),
-  epic_description:    z.string().max(5000).nullable().optional(),
-  epic_color:          z.string().max(20).optional(),
+  name:               z.string().trim().min(1).max(255),
+  epic_title:          z.string().trim().min(1).max(500),
+  epic_description:    z.preprocess((v) => (v === '' ? null : v), z.string().max(5000).nullable().optional()),
+  // Must match epics.ts's own format guarantee — epicService.createEpic() does no revalidation
+  // of its own, and this value flows straight into epics.color both when the template is saved
+  // and when it's instantiated via POST /:id/use, so a loose bound here (previously just
+  // max(20), no format check) let a non-hex value bypass the format invariant epics.ts enforces
+  // app-wide for every other epic-creation path.
+  epic_color:          z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   sprint_template_id:  z.string().uuid().nullable().optional(),
   task_template_ids:   z.array(z.string().uuid()).max(50).default([])
     .refine((ids) => new Set(ids).size === ids.length, { message: 'task_template_ids must not contain duplicates' }),
 });
 
 const useTemplateSchema = z.object({
-  epic_title:  z.string().min(1).max(500).optional(),
-  start_date:  z.string().date().optional(),
+  epic_title:  z.string().trim().min(1).max(500).optional(),
+  start_date:  z.preprocess((v) => (v === '' ? undefined : v), z.string().date().optional()),
 });
 
 interface EpicTemplateRow {
@@ -37,6 +44,44 @@ interface EpicTemplateRow {
   created_by: string;
   created_at: Date;
   updated_at: Date;
+}
+
+type Queryable = Pick<import('pg').PoolClient, 'query'>;
+
+/** Returns an error message if any sprint/task template reference isn't in this workspace. */
+async function validateTemplateRefs(
+  workspaceId: string,
+  sprintTemplateId: string | null | undefined,
+  taskTemplateIds: string[] | undefined,
+): Promise<string | null> {
+  if (sprintTemplateId) {
+    const check = await pool.query('SELECT 1 FROM sprint_templates WHERE id = $1 AND workspace_id = $2', [sprintTemplateId, workspaceId]);
+    if (check.rows.length === 0) return 'Invalid sprint_template_id';
+  }
+  if (taskTemplateIds && taskTemplateIds.length > 0) {
+    const check = await pool.query('SELECT id FROM task_templates WHERE workspace_id = $1 AND id = ANY($2)', [workspaceId, taskTemplateIds]);
+    if (check.rows.length !== taskTemplateIds.length) return 'Invalid task_template_ids';
+  }
+  return null;
+}
+
+async function insertTaskTemplateLinks(db: Queryable, epicTemplateId: string, taskTemplateIds: string[]): Promise<void> {
+  if (taskTemplateIds.length === 0) return;
+  const values: unknown[] = [];
+  const placeholders = taskTemplateIds.map((id, i) => {
+    values.push(epicTemplateId, id, i);
+    return `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`;
+  });
+  await db.query(
+    `INSERT INTO epic_template_tasks (epic_template_id, task_template_id, position) VALUES ${placeholders.join(',')}`,
+    values,
+  );
+}
+
+/** Pure calendar arithmetic on a 'YYYY-MM-DD' string (no server-timezone dependence). */
+function addDaysToDateString(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
 
 async function getTaskTemplateIds(epicTemplateId: string, db: Pick<import('pg').PoolClient, 'query'> = pool): Promise<string[]> {
@@ -54,10 +99,26 @@ router.get('/', async (req, res, next) => {
       'SELECT * FROM epic_templates WHERE workspace_id = $1 ORDER BY created_at DESC',
       [req.workspace.id],
     );
-    const withTasks = await Promise.all(rows.map(async (t) => ({
+
+    // Previously one extra getTaskTemplateIds query per template (N+1) — a workspace with many
+    // saved epic templates turned this single list endpoint into 1 + N round-trips. One batched
+    // query grouped in application code instead.
+    const { rows: taskLinks } = await pool.query<{ epic_template_id: string; task_template_id: string }>(
+      `SELECT epic_template_id, task_template_id FROM epic_template_tasks
+       WHERE epic_template_id = ANY($1) ORDER BY epic_template_id, position`,
+      [rows.map((t) => t.id)],
+    );
+    const idsByTemplate = new Map<string, string[]>();
+    for (const link of taskLinks) {
+      const list = idsByTemplate.get(link.epic_template_id) ?? [];
+      list.push(link.task_template_id);
+      idsByTemplate.set(link.epic_template_id, list);
+    }
+
+    const withTasks = rows.map((t) => ({
       ...t,
-      task_template_ids: await getTaskTemplateIds(t.id),
-    })));
+      task_template_ids: idsByTemplate.get(t.id) ?? [],
+    }));
     res.json(withTasks);
   } catch (err) { next(err); }
 });
@@ -69,35 +130,29 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     const { name, epic_title, epic_description, epic_color, sprint_template_id, task_template_ids } = parsed.data;
 
-    if (sprint_template_id) {
-      const check = await pool.query('SELECT 1 FROM sprint_templates WHERE id = $1 AND workspace_id = $2', [sprint_template_id, req.workspace.id]);
-      if (check.rows.length === 0) { res.status(400).json({ error: 'Invalid sprint_template_id' }); return; }
-    }
-    if (task_template_ids.length > 0) {
-      const check = await pool.query('SELECT id FROM task_templates WHERE workspace_id = $1 AND id = ANY($2)', [req.workspace.id, task_template_ids]);
-      if (check.rows.length !== task_template_ids.length) { res.status(400).json({ error: 'Invalid task_template_ids' }); return; }
-    }
+    const refError = await validateTemplateRefs(req.workspace.id, sprint_template_id, task_template_ids);
+    if (refError) { res.status(400).json({ error: refError }); return; }
 
-    const { rows } = await pool.query<EpicTemplateRow>(
-      `INSERT INTO epic_templates (workspace_id, name, epic_title, epic_description, epic_color, sprint_template_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [req.workspace.id, name, epic_title, epic_description ?? null, epic_color ?? '#6366f1', sprint_template_id ?? null, req.auth.userId],
-    );
-    const template = rows[0];
-
-    if (task_template_ids.length > 0) {
-      const values: unknown[] = [];
-      const placeholders = task_template_ids.map((id, i) => {
-        values.push(template.id, id, i);
-        return `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`;
-      });
-      await pool.query(
-        `INSERT INTO epic_template_tasks (epic_template_id, task_template_id, position) VALUES ${placeholders.join(',')}`,
-        values,
+    // Template row + its task links are written in one transaction so a failed link insert
+    // can't leave a template saved without its tasks.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<EpicTemplateRow>(
+        `INSERT INTO epic_templates (workspace_id, name, epic_title, epic_description, epic_color, sprint_template_id, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [req.workspace.id, name, epic_title, epic_description ?? null, epic_color ?? '#6366f1', sprint_template_id ?? null, req.auth.userId],
       );
+      const template = rows[0];
+      await insertTaskTemplateLinks(client, template.id, task_template_ids);
+      await client.query('COMMIT');
+      res.status(201).json({ ...template, task_template_ids });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
-
-    res.status(201).json({ ...template, task_template_ids });
   } catch (err) { next(err); }
 });
 
@@ -106,47 +161,53 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
   try {
     const parsed = schema.partial().safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-    if (Object.keys(parsed.data).length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
+    if (Object.values(parsed.data).every((v) => v === undefined)) { res.status(400).json({ error: 'No fields to update' }); return; }
 
+    // Validate every reference BEFORE writing anything - previously the row update was
+    // committed first and an invalid task_template_ids then returned 400, half-applying the
+    // PATCH. Same workspace check POST applies to sprint_template_id.
     const { task_template_ids, ...rest } = parsed.data;
+    const refError = await validateTemplateRefs(req.workspace.id, rest.sprint_template_id, task_template_ids);
+    if (refError) { res.status(400).json({ error: refError }); return; }
+
     const fields: string[] = [];
     const values: unknown[] = [];
     let i = 1;
+    // undefined = unchanged; null = clear (epic_description, sprint_template_id).
     const UPDATABLE = new Set(['name', 'epic_title', 'epic_description', 'epic_color', 'sprint_template_id']);
     for (const [k, v] of Object.entries(rest)) {
-      if (!UPDATABLE.has(k)) continue;
+      if (!UPDATABLE.has(k) || v === undefined) continue;
       fields.push(`${k} = $${i++}`);
-      values.push(v ?? null);
+      values.push(v);
     }
     fields.push(`updated_at = now()`);
     values.push(req.params.id, req.workspace.id);
 
-    const { rows } = await pool.query<EpicTemplateRow>(
-      `UPDATE epic_templates SET ${fields.join(', ')} WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
-      values,
-    );
-    if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
-
-    if (task_template_ids !== undefined) {
-      if (task_template_ids.length > 0) {
-        const check = await pool.query('SELECT id FROM task_templates WHERE workspace_id = $1 AND id = ANY($2)', [req.workspace.id, task_template_ids]);
-        if (check.rows.length !== task_template_ids.length) { res.status(400).json({ error: 'Invalid task_template_ids' }); return; }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<EpicTemplateRow>(
+        `UPDATE epic_templates SET ${fields.join(', ')} WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
+        values,
+      );
+      if (rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(404).json({ error: 'Not found' });
+        return;
       }
-      await pool.query('DELETE FROM epic_template_tasks WHERE epic_template_id = $1', [rows[0].id]);
-      if (task_template_ids.length > 0) {
-        const values2: unknown[] = [];
-        const placeholders = task_template_ids.map((id, idx) => {
-          values2.push(rows[0].id, id, idx);
-          return `($${idx * 3 + 1}, $${idx * 3 + 2}, $${idx * 3 + 3})`;
-        });
-        await pool.query(
-          `INSERT INTO epic_template_tasks (epic_template_id, task_template_id, position) VALUES ${placeholders.join(',')}`,
-          values2,
-        );
+      if (task_template_ids !== undefined) {
+        await client.query('DELETE FROM epic_template_tasks WHERE epic_template_id = $1', [rows[0].id]);
+        await insertTaskTemplateLinks(client, rows[0].id, task_template_ids);
       }
+      const ids = await getTaskTemplateIds(rows[0].id, client);
+      await client.query('COMMIT');
+      res.json({ ...rows[0], task_template_ids: ids });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
-
-    res.json({ ...rows[0], task_template_ids: await getTaskTemplateIds(rows[0].id) });
   } catch (err) { next(err); }
 });
 
@@ -200,10 +261,11 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
         );
         if (sprintTplRows.length > 0) {
           const st = sprintTplRows[0];
-          const startDate = parsed.data.start_date ?? new Date().toISOString().split('T')[0];
-          const end = new Date(startDate);
-          end.setDate(end.getDate() + st.duration_days - 1);
-          const endDate = end.toISOString().split('T')[0];
+          // Both ends are plain calendar dates: end = start + duration - 1 (inclusive), matching
+          // sprintTemplates' /use. The old `new Date(start)` + setDate() mixed a UTC-parsed date
+          // with local-time arithmetic, which can shift the end date by a day.
+          const startDate = parsed.data.start_date ?? new Date().toISOString().slice(0, 10);
+          const endDate = addDaysToDateString(startDate, st.duration_days - 1);
           const { rows: sprintRows } = await client.query(
             `INSERT INTO sprints (workspace_id, name, goal, status, start_date, end_date, created_by)
              VALUES ($1,$2,$3,'planning',$4,$5,$6) RETURNING id`,
@@ -243,9 +305,18 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
       }
 
       await client.query('COMMIT');
+
+      // Same post-create side effects as POST /api/tasks, run only after the commit so
+      // nothing is logged/announced for tasks that were rolled back.
+      for (const task of createdTasks) {
+        logTaskActivity(task.id, req.auth.userId, 'created', { status: task.status, source: 'epic_template' })
+          .catch((err) => logger.warn({ err, taskId: task.id }, 'Failed to log task activity for epic template task'));
+        fireWebhooks(req.workspace.id, 'task.created', { task });
+      }
+
       res.status(201).json({ epic, sprint_id: sprintId, tasks: createdTasks });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
       throw err;
     } finally {
       client.release();
