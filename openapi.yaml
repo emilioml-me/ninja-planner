@@ -8,6 +8,13 @@ info:
     This spec covers the most commonly integrated routes; it is not an exhaustive list of every
     internal endpoint the web app uses.
 
+    **Public routes (no Bearer token)**: `/health`, the token-scoped share links under
+    `/public/*` (public roadmap + votes, guest views), `GET /api/invites/token/{token}` (invite
+    lookup; accepting needs a session), `/api/docs/` (`/api/docs` redirects there), and the signed inbound webhooks
+    (`POST /webhooks/clerk` - svix signature; `POST /api/integrations/crm/webhook` and
+    `POST /api/integrations/ninja-task/webhook` - HMAC signature). These are rate limited per
+    client IP. Everything else under `/api/*` needs a token as described below.
+
     **Session API (`/api/*`)**: requires a Clerk-issued session JWT in
     `Authorization: Bearer <token>`. The workspace is resolved server-side from the Clerk
     organization claim in the token (the user's active organization); there is no workspace
@@ -41,7 +48,15 @@ tags:
   - name: Notifications
   - name: Support
   - name: Subscription
+  - name: Workspace
+  - name: Reviews
+  - name: Webhooks
+  - name: Integrations
   - name: External API
+  - name: Public
+    description: Unauthenticated, token-scoped share links
+  - name: Inbound webhooks
+    description: Signed callbacks from Clerk and other ninja apps (no Bearer token)
 
 components:
   securitySchemes:
@@ -146,6 +161,33 @@ components:
         created_by:        { type: string }
         created_at:        { type: string, format: date-time }
         updated_at:        { type: string, format: date-time }
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: Internal (always null in list responses). Clients should ignore it.
+        external_ninja_task_id:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Internal ninja-task sync id. Clients should ignore it.
+        due_date_passed_notified_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: Internal scheduler bookkeeping. Clients should ignore it.
+        due_date_passed_dispatched_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: Internal scheduler bookkeeping. Clients should ignore it.
+      additionalProperties: true
+      description: |
+        Task rows are returned as stored, so the object can carry internal bookkeeping columns
+        (listed as readOnly) and columns added by future migrations; ignore unknown properties.
 
     TaskActivity:
       type: object
@@ -164,8 +206,8 @@ components:
         status:            { $ref: '#/components/schemas/TaskStatus' }
         priority:          { $ref: '#/components/schemas/TaskPriority' }
         assignee_clerk_id: { type: string, nullable: true, description: Must be a workspace member; null = unassigned }
-        due_date:          { type: string, format: date, nullable: true }
-        start_date:        { type: string, format: date, nullable: true }
+        due_date:          { type: string, format: date, nullable: true, description: 1900-01-01 .. 2199-12-31 }
+        start_date:        { type: string, format: date, nullable: true, description: 1900-01-01 .. 2199-12-31 }
         tags:              { type: array, items: { type: string } }
         sprint_id:         { type: string, format: uuid, nullable: true }
         epic_id:           { type: string, format: uuid, nullable: true }
@@ -202,7 +244,7 @@ components:
         task_id:       { type: string, format: uuid }
         workspace_id:  { type: string, format: uuid }
         file_name:     { type: string }
-        file_size:     { type: integer }
+        file_size:     { type: string, example: '204800', description: BIGINT bytes, serialized as a string }
         mime_type:     { type: string }
         uploaded_by:   { type: string }
         uploader_name: { type: string, nullable: true }
@@ -219,8 +261,27 @@ components:
         start_date: { type: string, format: date, nullable: true }
         end_date:   { type: string, format: date, nullable: true }
         goal:       { type: string, nullable: true }
+        committed_points:
+          type: string
+          nullable: true
+          description: |
+            NUMERIC as a string. Story points snapshotted when the sprint became active (or at
+            completion if it never was); null until then.
+        committed_task_count:
+          type: integer
+          nullable: true
+          description: Task count snapshotted alongside committed_points
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+
+    SprintWithStats:
+      description: Sprint list item (GET /api/sprints)
+      allOf:
+        - $ref: '#/components/schemas/Sprint'
+        - type: object
+          properties:
+            total_tasks: { type: integer, description: Non-deleted tasks in the sprint }
+            done_tasks:  { type: integer, description: Of those, tasks with status done }
 
     Epic:
       type: object
@@ -233,10 +294,10 @@ components:
           type: string
           enum: [active, completed, archived]
         external_ref: { type: string, nullable: true }
-        total_tasks:  { type: integer }
-        done_tasks:   { type: integer }
-        total_points: { type: integer }
-        done_points:  { type: integer }
+        total_tasks:  { type: integer, description: Rollup - only on GET list/detail, not on POST/PATCH responses }
+        done_tasks:   { type: integer, description: Rollup - only on GET list/detail }
+        total_points: { type: integer, description: Rollup - only on GET list/detail }
+        done_points:  { type: integer, description: Rollup - only on GET list/detail }
         created_by:   { type: string }
         created_at:   { type: string, format: date-time }
         updated_at:   { type: string, format: date-time }
@@ -251,11 +312,55 @@ components:
           type: string
           enum: [active, completed, cancelled]
         due_date:    { type: string, format: date, nullable: true }
-        total_tasks: { type: integer, description: Linked tasks + roadmap items }
-        done_tasks:  { type: integer, description: Linked done tasks + live roadmap items }
+        total_tasks: { type: integer, description: 'Linked tasks + roadmap items (rollup - GET only, not on POST/PATCH responses)' }
+        done_tasks:  { type: integer, description: 'Linked done tasks + live roadmap items (rollup - GET only)' }
+        key_results:
+          type: array
+          description: Only on GET /api/goals (list), ordered by position
+          items: { $ref: '#/components/schemas/KeyResult' }
         created_by:  { type: string }
         created_at:  { type: string, format: date-time }
         updated_at:  { type: string, format: date-time }
+
+    KeyResult:
+      type: object
+      properties:
+        id:            { type: string, format: uuid }
+        goal_id:       { type: string, format: uuid }
+        title:         { type: string }
+        target_value:  { type: string, description: NUMERIC as a string }
+        current_value: { type: string, description: NUMERIC as a string }
+        unit:          { type: string, example: '%' }
+        position:      { type: integer }
+        created_at:    { type: string, format: date-time }
+        updated_at:    { type: string, format: date-time }
+
+    WeeklyReview:
+      type: object
+      additionalProperties: true
+      properties:
+        id:           { type: string, format: uuid }
+        week_start:   { type: string, format: date }
+        wins:         { type: string, nullable: true }
+        blockers:     { type: string, nullable: true }
+        focus_next:   { type: string, nullable: true }
+        health_score: { type: integer, minimum: 1, maximum: 5, nullable: true }
+        created_at:   { type: string, format: date-time }
+        updated_at:   { type: string, format: date-time }
+
+    WebhookEndpoint:
+      type: object
+      properties:
+        id:         { type: string, format: uuid }
+        url:        { type: string, format: uri, description: 'Must be https in production and resolve to a public address' }
+        events:     { type: array, items: { type: string } }
+        active:     { type: boolean }
+        secret:
+          type: string
+          description: |
+            Only present on create and rotate-secret responses. Deliveries are signed with
+            `X-Ninja-Signature: sha256=<hex HMAC-SHA256 of the raw body using this secret>`.
+        created_at: { type: string, format: date-time }
 
     Notification:
       type: object
@@ -280,6 +385,14 @@ components:
           type: string
           nullable: true
           enum: [no_code, expired, app_not_allowed, revoked, ninja_core_unreachable]
+
+    Health:
+      type: object
+      properties:
+        status:  { type: string, enum: [ok, degraded] }
+        app:     { type: string, example: ninja-planner }
+        version: { type: string, example: 1.0.0, description: APP_VERSION env, else package.json version }
+        db:      { type: string, enum: [ok, error] }
 
     ExternalTask:
       type: object
@@ -306,14 +419,16 @@ paths:
       security: []
       responses:
         '200':
-          description: Service is healthy
+          description: Service and database are healthy
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  status: { type: string, example: ok }
-                  app:    { type: string, example: ninja-planner }
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: Database unreachable (checked with a 2s timeout)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+              example: { status: degraded, app: ninja-planner, version: 1.0.0, db: error }
 
   # ── Tasks ──────────────────────────────────────────────────────────────────
   /api/tasks:
@@ -523,6 +638,37 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/tasks/{taskId}/time-logs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdPath'
+      - $ref: '#/components/parameters/IdPath'
+    patch:
+      tags: [Tasks]
+      summary: Edit a time log (own log; admins may edit any log)
+      description: |
+        At least one field is required. `hourly_rate` may only be sent by admins (members get
+        403 even for their own log) - it is how an admin prices billable time a member logged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                minutes:     { type: integer, minimum: 1, maximum: 14400 }
+                note:        { type: string, maxLength: 500, nullable: true }
+                billable:    { type: boolean }
+                hourly_rate: { type: number, minimum: 0, maximum: 10000, nullable: true, description: Admins only }
+      responses:
+        '200':
+          description: Updated time log
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeLog' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Log not found or not yours }
+
   /api/tasks/{taskId}/attachments:
     parameters:
       - $ref: '#/components/parameters/TaskIdPath'
@@ -597,7 +743,7 @@ paths:
   /api/sprints:
     get:
       tags: [Sprints]
-      summary: List sprints
+      summary: List sprints with task counts (active first, then planning, then completed)
       responses:
         '200':
           description: Sprint list
@@ -605,7 +751,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { $ref: '#/components/schemas/Sprint' }
+                items: { $ref: '#/components/schemas/SprintWithStats' }
     post:
       tags: [Sprints]
       summary: Create a sprint (admin only)
@@ -639,7 +785,9 @@ paths:
     get:
       tags: [Sprints]
       summary: Burndown chart data for a sprint
-      description: '`points` is empty when the sprint has no start/end date.'
+      description: |
+        When the sprint has no start/end date (or the range is empty) the response is just
+        `{ total_tasks, total_points, points: [] }`: `start_date` / `end_date` are omitted, not null.
       responses:
         '200':
           description: Burndown series
@@ -647,9 +795,10 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [total_tasks, total_points, points]
                 properties:
-                  start_date:   { type: string, format: date, nullable: true }
-                  end_date:     { type: string, format: date, nullable: true }
+                  start_date:   { type: string, format: date, description: Omitted when the sprint has no dates }
+                  end_date:     { type: string, format: date, description: Omitted when the sprint has no dates }
                   total_tasks:  { type: integer }
                   total_points: { type: integer }
                   points:
@@ -703,7 +852,7 @@ paths:
                 external_ref: { type: string, maxLength: 500, nullable: true, description: http(s) URL, e.g. a GitHub issue }
       responses:
         '201':
-          description: Epic created
+          description: Epic created (the stored row; rollup counts are not included - re-fetch the list for them)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Epic' }
@@ -714,7 +863,7 @@ paths:
   /api/goals:
     get:
       tags: [Goals]
-      summary: List goals with progress counts
+      summary: List goals with progress counts and their key results
       responses:
         '200':
           description: Goal list
@@ -739,7 +888,7 @@ paths:
                 due_date:    { type: string, format: date, nullable: true }
       responses:
         '201':
-          description: Goal created
+          description: Goal created (the stored row; total_tasks/done_tasks/key_results are not included)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Goal' }
@@ -812,6 +961,10 @@ paths:
                   truncated:
                     type: boolean
                     description: True when tasks farthest from today were left out
+                  today:
+                    type: string
+                    format: date
+                    description: Today in the caller's time zone (X-Timezone header), used for the cap ordering
 
   # ── Budgets ────────────────────────────────────────────────────────────────
   /api/budgets:
@@ -845,6 +998,30 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  # ── Workspace ──────────────────────────────────────────────────────────────
+  /api/workspaces/me:
+    get:
+      tags: [Workspace]
+      summary: The workspace for the token's active organization, plus the caller's role
+      description: |
+        `my_role` comes from workspace_members.role (the same source the server uses for admin
+        checks), so clients should gate admin/viewer UI on it rather than on the Clerk token.
+      responses:
+        '200':
+          description: Workspace
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                properties:
+                  id:           { type: string, format: uuid }
+                  name:         { type: string }
+                  clerk_org_id: { type: string }
+                  my_role:      { type: string, nullable: true, example: 'org:admin', description: 'Stored member role, e.g. org:owner, org:admin, org:member or viewer (read-only)' }
+        '403': { description: No active organization in the token }
+        '404': { description: Workspace not provisioned yet (Clerk webhook still in flight) or caller is not a member }
+
   # ── Members ────────────────────────────────────────────────────────────────
   /api/workspaces/me/members:
     get:
@@ -853,11 +1030,111 @@ paths:
       responses:
         '200': { description: Member list }
 
+  # ── Reviews ────────────────────────────────────────────────────────────────
+  /api/reviews:
+    get:
+      tags: [Reviews]
+      summary: List weekly reviews (newest week first), paginated
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Review page
+          headers:
+            X-Total-Count:
+              description: Total number of reviews in the workspace
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WeeklyReview' }
+
+  # ── Webhooks (outbound, admin managed) ─────────────────────────────────────
+  /api/webhooks:
+    get:
+      tags: [Webhooks]
+      summary: List webhook endpoints (admin only; secrets are never included)
+      responses:
+        '200':
+          description: Endpoint list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/webhooks/events:
+    get:
+      tags: [Webhooks]
+      summary: Subscribable webhook event types (any member)
+      responses:
+        '200':
+          description: Event names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { type: string }
+                    example: [task.created, task.updated, task.completed, task.deleted, review.submitted, epic.created, epic.updated, epic.deleted, sprint.completed, goal.completed]
+
+  /api/webhooks/{id}/rotate-secret:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    post:
+      tags: [Webhooks]
+      summary: Generate a new signing secret (admin only)
+      description: |
+        Returns the endpoint including the NEW `secret` - the only time it is shown. The old secret
+        stops validating immediately, so update the receiver right away.
+      responses:
+        '200':
+          description: Endpoint with its new secret
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── Integrations ───────────────────────────────────────────────────────────
+  /api/integrations/capabilities:
+    get:
+      tags: [Integrations]
+      summary: Which integration-backed actions do something for this workspace
+      description: No external calls; used by the UI to hide controls that would no-op or 503.
+      responses:
+        '200':
+          description: Capability flags
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slack_alerts:  { type: boolean, description: Operator workspace and SLACK_WEBHOOK_URL set }
+                  payments_sync: { type: boolean, description: Operator workspace and payment-ninja configured }
+                  crm_linked:    { type: boolean, description: Workspace linked to a crm-ninja tenant and CRM configured }
+
   # ── Notifications ──────────────────────────────────────────────────────────
   /api/notifications:
     get:
       tags: [Notifications]
       summary: List the current user's notifications (most recent first)
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
       responses:
         '200':
           description: Notification list
@@ -931,6 +1208,7 @@ paths:
                   ticketNumber: { type: string }
                   portalUrl:    { type: string, format: uri }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '429': { description: Rate limited (10 tickets per user per 10 minutes) or desk-ninja quota reached }
         '502': { description: Support service error or timeout }
         '503': { description: Support is not available on this server }
 
@@ -945,6 +1223,41 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SubscriptionStatus' }
+
+  /api/ninja-stack/workspaces/{workspaceId}/override:
+    parameters:
+      - { name: workspaceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Subscription]
+      summary: Grant a workspace free access (platform admins only - PLATFORM_ADMIN_USER_IDS)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan: { type: string, default: pro }
+      responses:
+        '200': { description: Override granted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Subscription]
+      summary: Revoke the override (falls back to the workspace's real code, if any)
+      responses:
+        '200': { description: Override revoked }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/ninja-stack/workspaces/{workspaceId}/override/audit:
+    parameters:
+      - { name: workspaceId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Subscription]
+      summary: Override audit log for a workspace (platform admins only)
+      responses:
+        '200': { description: Audit entries, newest first }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/ninja-stack/activate:
     post:
@@ -974,12 +1287,23 @@ paths:
   /api/external/tasks:
     get:
       tags: [External API]
-      summary: List tasks (newest first, max 200) — scope tasks:read
+      summary: List tasks (newest first, paginated) — scope tasks:read
       security:
         - ApiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
       responses:
         '200':
           description: Task list
+          headers:
+            X-Total-Count:
+              description: Total number of tasks in the workspace
+              schema: { type: integer }
           content:
             application/json:
               schema:
@@ -1133,3 +1457,138 @@ paths:
                 items: { $ref: '#/components/schemas/Sprint' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ── Public share links (no auth, rate limited per IP) ──────────────────────
+  /public/roadmap/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Public]
+      summary: Public roadmap for a share token (with vote counts)
+      security: []
+      responses:
+        '200': { description: Roadmap items visible on the public link }
+        '404': { description: Roadmap not found or link expired }
+        '429': { description: Rate limited }
+
+  /public/roadmap/{token}/votes/{itemId}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+      - { name: itemId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Public]
+      summary: Vote for a roadmap item (one vote per visitor/IP per item)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [visitor_id]
+              properties:
+                visitor_id: { type: string, minLength: 1, maxLength: 128, description: Random id kept by the browser }
+      responses:
+        '200': { description: Vote recorded (or already present) }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { description: Item, roadmap or link not found }
+        '429': { description: Rate limited }
+    delete:
+      tags: [Public]
+      summary: Remove this visitor's vote
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [visitor_id]
+              properties:
+                visitor_id: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        '200': { description: Vote removed }
+        '404': { description: Item, roadmap or link not found }
+        '429': { description: Rate limited }
+
+  /public/g/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Public]
+      summary: Guest view for a project share link
+      description: |
+        Returns `{ label, scopes }` plus one list per granted scope (tasks, roadmap, ...). Only
+        display fields are included - no internal ids, assignee ids, tags or descriptions.
+      security: []
+      responses:
+        '200': { description: Guest view payload }
+        '404': { description: Link not found or expired }
+        '429': { description: Rate limited }
+
+  /api/invites/token/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Public]
+      summary: Look up an unused, unexpired invite (no auth)
+      security: []
+      responses:
+        '200':
+          description: Invite summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace_name: { type: string }
+                  expires_at:     { type: string, format: date-time }
+        '404': { description: Invite not found or expired }
+        '429': { description: Rate limited }
+
+  /api/invites/token/{token}/accept:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Members]
+      summary: Accept an invite as the signed-in user (session token required)
+      responses:
+        '200': { description: Joined the workspace }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Invite not found or expired }
+
+  # ── Inbound webhooks (signature-verified, no Bearer token) ─────────────────
+  /webhooks/clerk:
+    post:
+      tags: [Inbound webhooks]
+      summary: Clerk events (organization/membership/user sync)
+      description: Verified with svix headers (`svix-id`, `svix-timestamp`, `svix-signature`) and CLERK_WEBHOOK_SECRET.
+      security: []
+      responses:
+        '200': { description: Processed }
+        '400': { description: Missing or invalid signature }
+
+  /api/integrations/crm/webhook:
+    post:
+      tags: [Inbound webhooks]
+      summary: crm-ninja events for a linked tenant
+      description: HMAC-signed with CRM_WEBHOOK_SECRET over the raw body.
+      security: []
+      responses:
+        '200': { description: Processed }
+        '400': { description: Malformed payload }
+        '401': { description: Missing or invalid signature }
+        '403': { description: Workspace is not linked to this CRM account }
+        '429': { description: Rate limited }
+
+  /api/integrations/ninja-task/webhook:
+    post:
+      tags: [Inbound webhooks]
+      summary: ninja-task events (task_complete)
+      description: HMAC-signed with NINJA_TASK_WEBHOOK_SECRET over the raw body.
+      security: []
+      responses:
+        '200': { description: Processed }
+        '400': { description: Malformed payload }
+        '401': { description: Invalid signature }
+        '429': { description: Rate limited }

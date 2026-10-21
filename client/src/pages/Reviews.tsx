@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -7,8 +7,9 @@ import { useAuth } from '@clerk/clerk-react';
 import { useApiClient } from '@/lib/api';
 import { safeFormat, todayLocal } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
 import { useMembers } from '@/hooks/use-members';
+import { QueryError } from '@/components/QueryError';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,7 +22,7 @@ import {
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { Plus, ClipboardList, Trophy, AlertTriangle, Target, Heart, Download } from 'lucide-react';
+import { Plus, ClipboardList, Trophy, AlertTriangle, Target, Download, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { downloadCsv } from '@/lib/export-csv';
 
@@ -42,13 +43,22 @@ const formSchema = z.object({
     (v) => new Date(v + 'T00:00:00').getDay() === 1,
     { message: 'Week start must be a Monday' },
   ),
-  wins: z.string().optional(),
-  blockers: z.string().optional(),
-  focus_next: z.string().optional(),
+  wins: z.string().max(10000, 'Max 10000 characters').optional(),
+  blockers: z.string().max(10000, 'Max 10000 characters').optional(),
+  focus_next: z.string().max(10000, 'Max 10000 characters').optional(),
   // null = not rated (an existing review without a score must not silently become 3 on edit).
   health_score: z.number().int().min(1).max(5).nullable(),
 });
 type FormData = z.infer<typeof formSchema>;
+
+/** Reviews fetched per "Load more" page (server default 100, max 500). */
+const REVIEWS_PAGE_SIZE = 100;
+
+interface ReviewsPage {
+  items: WeeklyReview[];
+  /** X-Total-Count, or null if the server didn't send it. */
+  total: number | null;
+}
 
 function healthColor(score: number) {
   if (score >= 4) return 'text-green-600';
@@ -93,23 +103,46 @@ function monday(dateStr: string) {
 const emptyToNull = (v: string | undefined) => (v && v.trim() ? v : null);
 
 export default function Reviews() {
-  const { apiRequest } = useApiClient();
+  const { apiRequest, apiRequestWithHeaders } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
   const { userId } = useAuth();
-  const isAdmin = useIsAdmin();
+  // Write controls stay hidden until the workspace role has loaded (no flash for viewers).
+  const { isAdmin, isViewer, isLoading: roleLoading } = useMyRole();
+  const canWrite = !roleLoading && !isViewer;
   const { displayName } = useMembers();
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<WeeklyReview | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<WeeklyReview | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
 
-  // Server rule: only the review's author or an admin may edit it.
-  const canEdit = (r: WeeklyReview) => isAdmin || r.created_by === userId;
+  // Server rule: only the review's author or an admin may edit or delete it.
+  const canEdit = (r: WeeklyReview) => canWrite && (isAdmin || r.created_by === userId);
   const authorLabel = (r: WeeklyReview) => (r.created_by === userId ? 'You' : displayName(r.created_by));
 
-  const { data: reviews = [], isLoading } = useQuery<WeeklyReview[]>({
-    queryKey: ['/api/reviews'],
-    queryFn: () => apiRequest<WeeklyReview[]>('GET', '/api/reviews'),
+  // Paginated with limit/offset + X-Total-Count. Own sub-key under ['/api/reviews'] so prefix
+  // invalidation still reaches it (and Dashboard's ['/api/reviews', 'dashboard-latest']).
+  const reviewsQuery = useInfiniteQuery({
+    queryKey: ['/api/reviews', 'list'],
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }): Promise<ReviewsPage> => {
+      const { data, headers } = await apiRequestWithHeaders<WeeklyReview[]>(
+        'GET', `/api/reviews?limit=${REVIEWS_PAGE_SIZE}&offset=${pageParam}`,
+      );
+      const header = headers.get('X-Total-Count');
+      const total = header !== null && Number.isFinite(Number(header)) ? Number(header) : null;
+      return { items: data, total };
+    },
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + p.items.length, 0);
+      if (last.total !== null) return loaded < last.total ? loaded : undefined;
+      return last.items.length >= REVIEWS_PAGE_SIZE ? loaded : undefined;
+    },
   });
+  const reviews = reviewsQuery.data?.pages.flatMap((p) => p.items) ?? [];
+  const lastPage = reviewsQuery.data?.pages[reviewsQuery.data.pages.length - 1];
+  const totalReviews = lastPage?.total ?? reviews.length;
+  const isLoading = reviewsQuery.isLoading || roleLoading;
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
@@ -118,7 +151,7 @@ export default function Reviews() {
       wins: '',
       blockers: '',
       focus_next: '',
-      health_score: 3,
+      health_score: null,
     },
   });
 
@@ -132,7 +165,7 @@ export default function Reviews() {
       wins: '',
       blockers: '',
       focus_next: '',
-      health_score: 3,
+      health_score: null,
     });
     setOpen(true);
   };
@@ -152,7 +185,7 @@ export default function Reviews() {
   const createMut = useMutation({
     mutationFn: (d: FormData) => apiRequest('POST', '/api/reviews', { ...d, health_score: d.health_score ?? undefined }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/reviews'] }); closeDialog(); toast({ title: 'Review created' }); },
-    onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Failed to create review', description: e.message, variant: 'destructive' }),
   });
 
   const updateMut = useMutation({
@@ -166,7 +199,18 @@ export default function Reviews() {
       health_score: d.health_score,
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/reviews'] }); closeDialog(); toast({ title: 'Review updated' }); },
-    onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Failed to update review', description: e.message, variant: 'destructive' }),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => apiRequest('DELETE', `/api/reviews/${id}`),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: ['/api/reviews'] });
+      setDeleteTarget(null);
+      if (detailId === id) setDetailId(null);
+      toast({ title: 'Review deleted' });
+    },
+    onError: (e: Error) => toast({ title: 'Failed to delete review', description: e.message, variant: 'destructive' }),
   });
 
   const handleSubmit = (d: FormData) => {
@@ -174,7 +218,6 @@ export default function Reviews() {
     else createMut.mutate(d);
   };
 
-  const [detailId, setDetailId] = useState<string | null>(null);
   const detail = reviews.find((r) => r.id === detailId) ?? reviews[0] ?? null;
 
   return (
@@ -197,19 +240,25 @@ export default function Reviews() {
               <Download className="h-4 w-4" /> Export
             </Button>
           )}
-          <Button size="sm" className="gap-2" onClick={openCreate}>
-            <Plus className="h-4 w-4" /> New Review
-          </Button>
+          {canWrite && (
+            <Button size="sm" className="gap-2" onClick={openCreate}>
+              <Plus className="h-4 w-4" /> New Review
+            </Button>
+          )}
         </div>
       </div>
 
       {isLoading ? (
         <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading…</div>
+      ) : reviewsQuery.isError && !reviewsQuery.data ? (
+        <div className="p-6">
+          <QueryError error={reviewsQuery.error} onRetry={() => reviewsQuery.refetch()} />
+        </div>
       ) : reviews.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-4 text-muted-foreground">
           <ClipboardList className="h-12 w-12 opacity-30" />
-          <p className="text-sm">No reviews yet. Reflect on your week.</p>
-          <Button size="sm" onClick={openCreate}>Start your first review</Button>
+          <p className="text-sm">No reviews yet.{canWrite && ' Reflect on your week.'}</p>
+          {canWrite && <Button size="sm" onClick={openCreate}>Start your first review</Button>}
         </div>
       ) : (
         <div className="flex flex-1 overflow-hidden">
@@ -241,6 +290,23 @@ export default function Reviews() {
                 </button>
               );
             })}
+            <div className="px-4 py-3 space-y-2">
+              <p className="text-[11px] text-muted-foreground">
+                Showing {reviews.length} of {Math.max(totalReviews, reviews.length)}
+              </p>
+              {reviewsQuery.hasNextPage && (
+                <Button
+                  size="sm" variant="outline" className="w-full"
+                  disabled={reviewsQuery.isFetchingNextPage}
+                  onClick={() => reviewsQuery.fetchNextPage()}
+                >
+                  {reviewsQuery.isFetchingNextPage ? 'Loading…' : 'Load more'}
+                </Button>
+              )}
+              {reviewsQuery.isFetchNextPageError && (
+                <p className="text-[11px] text-destructive">Couldn't load more reviews. Try again.</p>
+              )}
+            </div>
           </div>
 
           {/* Detail */}
@@ -253,17 +319,28 @@ export default function Reviews() {
                       Week of {safeFormat(detail.week_start.substring(0, 10), 'MMMM d, yyyy')}
                     </h2>
                     <p className="text-xs text-muted-foreground">by {authorLabel(detail)}</p>
-                    {detail.health_score && (
+                    {detail.health_score ? (
                       <div className="flex items-center gap-2 mt-1">
                         <HealthDots score={detail.health_score} />
                         <span className={cn('text-sm font-medium', healthColor(detail.health_score))}>
                           {healthLabel(detail.health_score)}
                         </span>
                       </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground mt-1">Health: not rated</p>
                     )}
                   </div>
                   {canEdit(detail) && (
-                    <Button variant="outline" size="sm" onClick={() => openEdit(detail)}>Edit</Button>
+                    <div className="flex gap-2">
+                      <Button variant="outline" size="sm" onClick={() => openEdit(detail)}>Edit</Button>
+                      <Button
+                        variant="outline" size="sm"
+                        className="text-destructive hover:text-destructive gap-1.5"
+                        onClick={() => setDeleteTarget(detail)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> Delete
+                      </Button>
+                    </div>
                   )}
                 </div>
 
@@ -336,12 +413,15 @@ export default function Reviews() {
                   <FormItem>
                     <FormLabel>Health Score (1–5)</FormLabel>
                     <FormControl>
-                      <div className="flex items-center gap-2 pt-1">
+                      <div className="flex items-center gap-2 pt-1 flex-wrap">
                         {[1, 2, 3, 4, 5].map((n) => (
                           <button
                             key={n}
                             type="button"
-                            onClick={() => field.onChange(n)}
+                            aria-pressed={field.value === n}
+                            aria-label={`Health score ${n}`}
+                            // Clicking the selected score again clears it ("not rated").
+                            onClick={() => field.onChange(field.value === n ? null : n)}
                             className={cn(
                               'h-8 w-8 rounded-full border-2 text-xs font-bold transition-colors',
                               Number(field.value) >= n
@@ -354,6 +434,17 @@ export default function Reviews() {
                             {n}
                           </button>
                         ))}
+                        {field.value != null ? (
+                          <button
+                            type="button"
+                            className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                            onClick={() => field.onChange(null)}
+                          >
+                            Clear
+                          </button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Not rated</span>
+                        )}
                       </div>
                     </FormControl>
                     <FormMessage />
@@ -393,6 +484,31 @@ export default function Reviews() {
               </DialogFooter>
             </form>
           </Form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirm */}
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete review?</DialogTitle>
+            <DialogDescription>
+              The review for the week of{' '}
+              {deleteTarget ? safeFormat(deleteTarget.week_start.substring(0, 10), 'MMM d, yyyy') : ''}
+              {deleteTarget && deleteTarget.created_by !== userId ? ` by ${displayName(deleteTarget.created_by)}` : ''}
+              {' '}will be permanently deleted. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMut.isPending}
+              onClick={() => deleteTarget && deleteMut.mutate(deleteTarget.id)}
+            >
+              {deleteMut.isPending ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

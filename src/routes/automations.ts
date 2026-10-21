@@ -49,6 +49,62 @@ function validateActionConfig(actionType: string, actionConfig: unknown): string
   return result.success ? null : `Invalid action_config for ${actionType}: ${result.error.message}`;
 }
 
+// Triggers whose events carry a task (and so an assignee). sprint/epic/goal events don't, so
+// task actions on them could only ever no-op.
+const TASK_TRIGGERS: ReadonlySet<string> = new Set([
+  'task.status_changed', 'task.assigned', 'task.created', 'task.due_date_passed',
+]);
+const TASK_ACTIONS: ReadonlySet<string> = new Set(['set_status', 'reassign_task', 'notify_assignee']);
+
+const MAX_RULES_PER_WORKSPACE = 50;
+
+/**
+ * Rejects trigger/action combinations that can never do anything (they used to be accepted
+ * and then logged 'ok' on every run while silently no-op'ing). Returns an error or null.
+ */
+function validateRuleCombo(
+  triggerType: string,
+  triggerConfig: Record<string, unknown>,
+  actionType: string,
+  actionConfig: Record<string, unknown>,
+): string | null {
+  const isTaskTrigger = TASK_TRIGGERS.has(triggerType);
+  if (TASK_ACTIONS.has(actionType) && !isTaskTrigger) {
+    return `${actionType} needs a task trigger; ${triggerType} events have no task (use post_webhook instead)`;
+  }
+  if ((triggerConfig.from_status || triggerConfig.to_status) && triggerType !== 'task.status_changed') {
+    return 'from_status/to_status filters only apply to task.status_changed';
+  }
+  if (triggerConfig.assignee_clerk_id && !isTaskTrigger) {
+    return `assignee filter does not apply to ${triggerType}`;
+  }
+  if (
+    actionType === 'set_status' &&
+    triggerType === 'task.status_changed' &&
+    triggerConfig.to_status &&
+    triggerConfig.to_status === actionConfig.status
+  ) {
+    return 'set_status to the same status the trigger already requires would never change anything';
+  }
+  return null;
+}
+
+/** post_webhook must point at a webhook endpoint of this workspace; returns an error or null. */
+async function validateWebhookEndpoint(
+  workspaceId: string,
+  actionType: string,
+  actionConfig: Record<string, unknown>,
+): Promise<string | null> {
+  if (actionType !== 'post_webhook') return null;
+  const endpointId = actionConfig.endpoint_id;
+  if (typeof endpointId !== 'string' || !endpointId) return 'post_webhook requires an endpoint';
+  const { rows } = await pool.query(
+    'SELECT 1 FROM webhook_endpoints WHERE id = $1 AND workspace_id = $2',
+    [endpointId, workspaceId],
+  );
+  return rows.length > 0 ? null : 'Webhook endpoint not found in this workspace';
+}
+
 /** reassign_task must target a current workspace member; returns an error message or null. */
 async function validateReassignTarget(
   workspaceId: string,
@@ -115,16 +171,39 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const parsed = ruleSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
     const { name, trigger_type, trigger_config, action_type, action_config, active } = parsed.data;
-    const reassignError = await validateReassignTarget(req.workspace.id, action_type, action_config);
-    if (reassignError) { res.status(400).json({ error: reassignError }); return; }
+    const ruleError = validateRuleCombo(trigger_type, trigger_config, action_type, action_config)
+      ?? await validateReassignTarget(req.workspace.id, action_type, action_config)
+      ?? await validateWebhookEndpoint(req.workspace.id, action_type, action_config);
+    if (ruleError) { res.status(400).json({ error: ruleError }); return; }
 
-    const { rows } = await pool.query(
-      `INSERT INTO automation_rules
-         (workspace_id, name, trigger_type, trigger_config, action_type, action_config, active, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [req.workspace.id, name, trigger_type, trigger_config, action_type, action_config, active, req.auth.userId],
-    );
-    res.status(201).json(rows[0]);
+    // Count + insert under a per-workspace xact lock so concurrent creates can't overshoot the cap.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('automation_rules:' || $1::text))", [req.workspace.id]);
+      const count = await client.query<{ n: number }>(
+        'SELECT COUNT(*)::int AS n FROM automation_rules WHERE workspace_id = $1',
+        [req.workspace.id],
+      );
+      if ((count.rows[0]?.n ?? 0) >= MAX_RULES_PER_WORKSPACE) {
+        await client.query('ROLLBACK');
+        res.status(400).json({ error: `A workspace can have at most ${MAX_RULES_PER_WORKSPACE} automation rules` });
+        return;
+      }
+      const { rows } = await client.query(
+        `INSERT INTO automation_rules
+           (workspace_id, name, trigger_type, trigger_config, action_type, action_config, active, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [req.workspace.id, name, trigger_type, trigger_config, action_type, action_config, active, req.auth.userId],
+      );
+      await client.query('COMMIT');
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (err) { next(err); }
 });
 
@@ -134,16 +213,29 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     const parsed = ruleSchemaBase.partial().safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
-    if (parsed.data.action_type !== undefined || parsed.data.action_config !== undefined) {
-      const current = await pool.query<{ action_type: string; action_config: Record<string, unknown> }>(
-        'SELECT action_type, action_config FROM automation_rules WHERE id = $1 AND workspace_id = $2',
+    const d = parsed.data;
+    if (
+      d.action_type !== undefined || d.action_config !== undefined ||
+      d.trigger_type !== undefined || d.trigger_config !== undefined
+    ) {
+      const current = await pool.query<{
+        trigger_type: string; trigger_config: Record<string, unknown>;
+        action_type: string; action_config: Record<string, unknown>;
+      }>(
+        `SELECT trigger_type, trigger_config, action_type, action_config
+         FROM automation_rules WHERE id = $1 AND workspace_id = $2`,
         [req.params.id, req.workspace.id],
       );
       if (current.rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
-      const effectiveActionType   = parsed.data.action_type   ?? current.rows[0].action_type;
-      const effectiveActionConfig = parsed.data.action_config ?? current.rows[0].action_config;
+      const cur = current.rows[0];
+      const effectiveTriggerType   = d.trigger_type   ?? cur.trigger_type;
+      const effectiveTriggerConfig = d.trigger_config ?? cur.trigger_config ?? {};
+      const effectiveActionType    = d.action_type    ?? cur.action_type;
+      const effectiveActionConfig  = d.action_config  ?? cur.action_config ?? {};
       const error = validateActionConfig(effectiveActionType, effectiveActionConfig)
-        ?? await validateReassignTarget(req.workspace.id, effectiveActionType, effectiveActionConfig);
+        ?? validateRuleCombo(effectiveTriggerType, effectiveTriggerConfig, effectiveActionType, effectiveActionConfig)
+        ?? await validateReassignTarget(req.workspace.id, effectiveActionType, effectiveActionConfig)
+        ?? await validateWebhookEndpoint(req.workspace.id, effectiveActionType, effectiveActionConfig);
       if (error) { res.status(400).json({ error }); return; }
     }
 
@@ -177,7 +269,8 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
 // Claims up to 200 newly-overdue tasks atomically (same claim-then-dispatch as the scheduler,
 // so it can't double-dispatch against it), responds immediately, and dispatches in the
 // background: post_webhook actions can take over a minute with retries, which previously kept
-// this request open until the proxy timed it out.
+// this request open until the proxy timed it out. dispatchDueDatePassed registers itself with
+// trackBackground, so a graceful shutdown waits for it.
 router.post('/due-date-check', requireAdmin, async (req, res, next) => {
   try {
     const claimed = await claimOverdueTasks(req.workspace.id, 200);

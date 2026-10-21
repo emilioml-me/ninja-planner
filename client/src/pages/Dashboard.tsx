@@ -16,6 +16,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
+import { QueryError } from '@/components/QueryError';
 import {
   CheckSquare,
   TrendingUp,
@@ -112,6 +113,28 @@ function fmt(val: number) {
   }).format(val);
 }
 
+/** Upstream integration JSON is unvalidated: render a number only when it really is one. */
+function numOrDash(v: unknown, format: (n: number) => string = (n) => n.toLocaleString()): string {
+  const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+  return typeof n === 'number' && Number.isFinite(n) ? format(n) : '—';
+}
+
+interface AlertCheckResult {
+  ok?: boolean;
+  skipped?: boolean;
+  alerted?: boolean;
+  slack_sent?: boolean;
+  /** Overdue count as computed by the server. `overdue` is the legacy name. */
+  count?: number;
+  overdue?: number;
+}
+
+interface Capabilities {
+  slack_alerts: boolean;
+  payments_sync: boolean;
+  crm_linked: boolean;
+}
+
 function healthColor(score: number) {
   if (score >= 4) return 'bg-green-500 border-green-500';
   if (score >= 3) return 'bg-yellow-500 border-yellow-500';
@@ -155,19 +178,37 @@ export default function Dashboard() {
   const { user } = useUser();
   const isAdmin = useIsAdmin();
   const { toast } = useToast();
-  const [alertResult, setAlertResult] = useState<{ overdue: number; skipped?: boolean; alerted?: boolean } | null>(null);
+  const [alertResult, setAlertResult] = useState<{ count: number; skipped: boolean; alerted: boolean; slackSent: boolean } | null>(null);
   const { data: integrations } = useIntegrationsSummary();
 
+  // Which integration-backed actions do something for this workspace (Slack posting is only
+  // wired up for the operator workspace).
+  const { data: capabilities } = useQuery<Capabilities>({
+    queryKey: ['/api/integrations/capabilities'],
+    queryFn: () => apiRequest<Capabilities>('GET', '/api/integrations/capabilities'),
+    enabled: isAdmin,
+    staleTime: 5 * 60_000,
+  });
+  const slackAlerts = !!capabilities?.slack_alerts;
+
   const alertMut = useMutation({
-    mutationFn: () => apiRequest<{ ok: boolean; overdue: number; skipped?: boolean; alerted?: boolean }>(
-      'POST', '/api/tasks/alert-check',
-    ),
+    mutationFn: () => apiRequest<AlertCheckResult>('POST', '/api/tasks/alert-check'),
     onSuccess: (data) => {
-      setAlertResult(data);
-      if (data.skipped) {
-        toast({ title: 'Already alerted recently', description: 'Overdue alert was sent in the last 20 hours.' });
-      } else if (data.alerted) {
-        toast({ title: `Overdue alert sent`, description: `${data.overdue} overdue task${data.overdue !== 1 ? 's' : ''} reported to Slack.` });
+      const count = Number(data.count ?? data.overdue ?? 0) || 0;
+      const skipped = !!data.skipped;
+      const alerted = !!data.alerted;
+      const slackSent = !!data.slack_sent;
+      setAlertResult({ count, skipped, alerted, slackSent });
+      const plural = `${count} overdue task${count !== 1 ? 's' : ''}`;
+      if (skipped) {
+        toast({ title: 'Already alerted recently', description: 'An overdue alert was sent in the last 20 hours.' });
+      } else if (alerted) {
+        toast({
+          title: 'Overdue alert sent',
+          description: slackSent ? `${plural} reported to Slack and to admins in-app.` : `${plural} - admins notified in-app.`,
+        });
+      } else if (count > 0) {
+        toast({ title: `${plural}`, description: 'No alert was sent.' });
       } else {
         toast({ title: 'No overdue tasks', description: 'All tasks are on track!' });
       }
@@ -175,22 +216,33 @@ export default function Dashboard() {
     onError: (err: Error) => toast({ title: 'Overdue alert failed', description: err.message, variant: 'destructive' }),
   });
 
-  const { tasks, isLoading: tLoading, truncated: tasksTruncated, total: totalTasks } = useTaskList();
+  const {
+    tasks, isLoading: tLoading, truncated: tasksTruncated, total: totalTasks,
+    isError: tIsError, error: tError, refetch: refetchTasks, data: tasksData,
+  } = useTaskList();
 
-  const { data: revenue = [], isLoading: rLoading } = useQuery<RevenueTarget[]>({
+  const revenueQ = useQuery<RevenueTarget[]>({
     queryKey: ['/api/revenue'],
     queryFn: () => apiRequest<RevenueTarget[]>('GET', '/api/revenue'),
   });
+  const revenue = revenueQ.data ?? [];
+  const rLoading = revenueQ.isLoading;
 
-  const { data: roadmap = [], isLoading: rmLoading } = useQuery<RoadmapItem[]>({
+  const roadmapQ = useQuery<RoadmapItem[]>({
     queryKey: ['/api/roadmap'],
     queryFn: () => apiRequest<RoadmapItem[]>('GET', '/api/roadmap'),
   });
+  const roadmap = roadmapQ.data ?? [];
+  const rmLoading = roadmapQ.isLoading;
 
-  const { data: reviews = [], isLoading: rvLoading } = useQuery<WeeklyReview[]>({
-    queryKey: ['/api/reviews'],
-    queryFn: () => apiRequest<WeeklyReview[]>('GET', '/api/reviews'),
+  // Own sub-key (the Reviews page paginates ['/api/reviews', ...]); prefix invalidation of
+  // ['/api/reviews'] still refreshes it. Only the latest few are needed here.
+  const reviewsQ = useQuery<WeeklyReview[]>({
+    queryKey: ['/api/reviews', 'dashboard-latest'],
+    queryFn: () => apiRequest<WeeklyReview[]>('GET', '/api/reviews?limit=20'),
   });
+  const reviews = reviewsQ.data ?? [];
+  const rvLoading = reviewsQ.isLoading;
 
   const { data: goals = [] } = useQuery<Goal[]>({
     queryKey: ['/api/goals'],
@@ -237,8 +289,11 @@ export default function Dashboard() {
     (r) => r.period_type === 'monthly' && r.period_start.startsWith(thisMonthPrefix),
   ) ?? null;
 
-  const monthPct = monthTarget
-    ? Math.min(100, Math.round((Number(monthTarget.actual_amount) / Number(monthTarget.target_amount)) * 100))
+  // A synced row can have target 0: no meaningful % then (was NaN% / Infinity%). The label shows
+  // the real % (over-achievement included); only the progress bar is capped.
+  const monthTargetAmount = monthTarget ? Number(monthTarget.target_amount) : 0;
+  const monthPct = monthTarget && monthTargetAmount > 0
+    ? Math.round((Number(monthTarget.actual_amount) / monthTargetAmount) * 100)
     : null;
 
   // ── Derived: roadmap ────────────────────────────────────────────────────────
@@ -263,11 +318,13 @@ export default function Dashboard() {
     : 0;
   // end_date is a date-only 'YYYY-MM-DD' -- parse as LOCAL midnight (new Date('YYYY-MM-DD') is
   // UTC midnight and shifted the count by a day for users west of UTC) and count calendar days.
+  // Negative = the sprint is still active past its end date ("Overdue by N days").
   const sprintDaysLeft = activeSprint?.end_date
-    ? Math.max(0, differenceInCalendarDays(localDateOnly(activeSprint.end_date.substring(0, 10)), todayStart))
+    ? differenceInCalendarDays(localDateOnly(activeSprint.end_date.substring(0, 10)), todayStart)
     : null;
 
   const isLoading = tLoading || rLoading || rmLoading || rvLoading;
+  const tasksFailed = tIsError && !tasksData;
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -294,12 +351,12 @@ export default function Dashboard() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard
               label="Overdue"
-              value={String(overdueCount)}
+              value={tasksFailed ? '—' : String(overdueCount)}
               icon={<Clock className={cn('h-4 w-4', overdueCount > 0 ? 'text-destructive' : '')} />}
             />
             <StatCard
               label="Due Today"
-              value={String(dueTodayCount)}
+              value={tasksFailed ? '—' : String(dueTodayCount)}
               icon={<Calendar className="h-4 w-4" />}
             />
             <StatCard
@@ -309,7 +366,7 @@ export default function Dashboard() {
             />
             <StatCard
               label="In Progress"
-              value={String(inProgress)}
+              value={tasksFailed ? '—' : String(inProgress)}
               icon={<CheckSquare className="h-4 w-4" />}
             />
           </div>
@@ -329,28 +386,28 @@ export default function Dashboard() {
             {integrations.crm.configured && (
               <StatCard
                 label="Active Clients"
-                value={integrations.crm.data ? String(integrations.crm.data.activeClients) : '—'}
+                value={numOrDash(integrations.crm.data?.activeClients)}
                 icon={<Users className="h-4 w-4 text-blue-500" />}
               />
             )}
             {integrations.crm.configured && (
               <StatCard
                 label="MRR"
-                value={integrations.crm.data ? `$${integrations.crm.data.totalMRR.toLocaleString()}` : '—'}
+                value={numOrDash(integrations.crm.data?.totalMRR, (n) => `$${n.toLocaleString()}`)}
                 icon={<TrendingUp className="h-4 w-4 text-blue-500" />}
               />
             )}
             {integrations.helpdesk.configured && (
               <StatCard
                 label="Open Tickets"
-                value={integrations.helpdesk.data ? String(integrations.helpdesk.data.openTickets) : '—'}
+                value={numOrDash(integrations.helpdesk.data?.openTickets)}
                 icon={<HeadphonesIcon className={cn('h-4 w-4', integrations.helpdesk.data?.urgentTickets ? 'text-destructive' : 'text-orange-500')} />}
               />
             )}
             {integrations.schedule.configured && (
               <StatCard
                 label="Appointments Today"
-                value={integrations.schedule.data ? String(integrations.schedule.data.todayCount) : '—'}
+                value={numOrDash(integrations.schedule.data?.todayCount)}
                 icon={<CalendarDays className="h-4 w-4 text-purple-500" />}
               />
             )}
@@ -372,7 +429,9 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {tLoading ? (
+              {tasksFailed ? (
+                <QueryError error={tError} onRetry={() => refetchTasks()} />
+              ) : tLoading ? (
                 <div className="space-y-2">
                   {[1,2,3].map((i) => <Skeleton key={i} className="h-9 w-full" />)}
                 </div>
@@ -439,23 +498,29 @@ export default function Dashboard() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {rLoading ? (
+                {revenueQ.isError && !revenueQ.data ? (
+                  <QueryError error={revenueQ.error} onRetry={() => revenueQ.refetch()} />
+                ) : rLoading ? (
                   <Skeleton className="h-16 w-full" />
                 ) : monthTarget ? (
                   <div className="space-y-3">
                     <div className="flex items-end justify-between">
                       <div>
                         <p className="text-2xl font-bold">{fmt(Number(monthTarget.actual_amount))}</p>
-                        <p className="text-xs text-muted-foreground">of {fmt(Number(monthTarget.target_amount))} target</p>
+                        <p className="text-xs text-muted-foreground">
+                          {monthPct !== null ? `of ${fmt(monthTargetAmount)} target` : 'No target set for this month'}
+                        </p>
                       </div>
-                      <span className={cn(
-                        'text-sm font-semibold',
-                        monthPct! >= 100 ? 'text-green-600' : monthPct! >= 70 ? 'text-yellow-600' : 'text-destructive',
-                      )}>
-                        {monthPct}%
-                      </span>
+                      {monthPct !== null && (
+                        <span className={cn(
+                          'text-sm font-semibold',
+                          monthPct >= 100 ? 'text-green-600' : monthPct >= 70 ? 'text-yellow-600' : 'text-destructive',
+                        )}>
+                          {monthPct}%
+                        </span>
+                      )}
                     </div>
-                    <Progress value={monthPct!} className="h-2" />
+                    {monthPct !== null && <Progress value={Math.min(100, Math.max(0, monthPct))} className="h-2" />}
                   </div>
                 ) : (
                   <div className="py-3 text-center">
@@ -477,7 +542,9 @@ export default function Dashboard() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {rvLoading ? (
+                {reviewsQ.isError && !reviewsQ.data ? (
+                  <QueryError error={reviewsQ.error} onRetry={() => reviewsQ.refetch()} />
+                ) : rvLoading ? (
                   <Skeleton className="h-20 w-full" />
                 ) : lastReview ? (
                   <div className="space-y-3">
@@ -526,7 +593,9 @@ export default function Dashboard() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {rmLoading ? (
+            {roadmapQ.isError && !roadmapQ.data ? (
+              <QueryError error={roadmapQ.error} onRetry={() => roadmapQ.refetch()} />
+            ) : rmLoading ? (
               <Skeleton className="h-16 w-full" />
             ) : (
               <div className="space-y-4">
@@ -630,7 +699,9 @@ export default function Dashboard() {
                         'text-xs shrink-0 font-medium',
                         sprintDaysLeft <= 2 ? 'text-destructive' : 'text-muted-foreground',
                       )}>
-                        {sprintDaysLeft === 0 ? 'Ends today' : `${sprintDaysLeft}d left`}
+                        {sprintDaysLeft < 0
+                          ? `Overdue by ${-sprintDaysLeft} day${sprintDaysLeft === -1 ? '' : 's'}`
+                          : sprintDaysLeft === 0 ? 'Ends today' : `${sprintDaysLeft}d left`}
                       </span>
                     )}
                   </div>
@@ -723,16 +794,23 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent className="space-y-3">
               <p className="text-xs text-muted-foreground">
-                Send a Slack message listing all overdue tasks. Deduped — won't re-send within 20 hours.
+                {slackAlerts
+                  ? 'Post a Slack message listing all overdue tasks and notify workspace admins in-app.'
+                  : 'Notify workspace admins in-app about all overdue tasks.'}
+                {' '}Deduped — won't re-send within 20 hours.
               </p>
               {alertResult && !alertResult.skipped && (
                 <p className={cn(
                   'text-xs font-medium',
-                  alertResult.overdue === 0 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400',
+                  alertResult.count === 0 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400',
                 )}>
-                  {alertResult.overdue === 0
-                    ? '✓ No overdue tasks'
-                    : `${alertResult.overdue} overdue task${alertResult.overdue !== 1 ? 's' : ''} reported`}
+                  {alertResult.count === 0
+                    ? 'No overdue tasks'
+                    : `${alertResult.count} overdue task${alertResult.count !== 1 ? 's' : ''}${
+                        alertResult.alerted
+                          ? alertResult.slackSent ? ' reported to Slack and admins' : ' - admins notified in-app'
+                          : ''
+                      }`}
                 </p>
               )}
               <Button

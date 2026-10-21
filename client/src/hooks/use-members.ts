@@ -7,13 +7,16 @@ export interface WorkspaceMember {
   clerk_user_id: string;
   role: string;
   display_name: string;
+  email: string | null;
+  /** Stored avatar (may be null); image_url is the resolved one to render. */
+  avatar_url?: string | null;
   image_url: string | null;
 }
 
 export function useMembers() {
   const { apiRequest } = useApiClient();
 
-  const { data: members = [], isLoading } = useQuery<WorkspaceMember[]>({
+  const { data: members = [], isLoading, isError, error, refetch } = useQuery<WorkspaceMember[]>({
     queryKey: ['/api/workspaces/me/members'],
     queryFn: () => apiRequest<WorkspaceMember[]>('GET', '/api/workspaces/me/members'),
     staleTime: 5 * 60 * 1000,
@@ -37,5 +40,5 @@ export function useMembers() {
     return name.slice(0, 2).toUpperCase();
   }, [displayName]);
 
-  return { members, lookup, displayName, initials, isLoading };
+  return { members, lookup, displayName, initials, isLoading, isError, error, refetch };
 }

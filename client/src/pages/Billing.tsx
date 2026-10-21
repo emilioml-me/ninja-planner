@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useApiClient } from '@/lib/api';
 import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
+import { QueryError } from '@/components/QueryError';
 
 interface SubscriptionStatus {
   active: boolean;
@@ -15,6 +16,20 @@ interface SubscriptionStatus {
   expiresAt: string | null;
   adminOverride: boolean;
   reason?: string;
+}
+
+/** Human text for the server's inactive `reason` codes (subscriptionService). */
+const REASON_TEXT: Record<string, string> = {
+  no_code: 'No subscription code has been entered for this workspace yet.',
+  expired: 'The subscription has expired.',
+  app_not_allowed: "The current plan doesn't include Ninja Planner.",
+  revoked: 'The subscription code was revoked or is no longer valid.',
+  ninja_core_unreachable: "The subscription service couldn't be reached to confirm the subscription. Try again in a few minutes.",
+};
+
+function reasonText(reason: string | undefined): string | null {
+  if (!reason) return null;
+  return REASON_TEXT[reason] ?? `Reason: ${reason}`;
 }
 
 export default function Billing() {
@@ -25,7 +40,7 @@ export default function Billing() {
   const isAdmin = useIsAdmin();
   const isAdminLoaded = useIsAdminLoaded();
 
-  const { data: status, isLoading } = useQuery<SubscriptionStatus>({
+  const { data: status, isLoading, isError, error, refetch } = useQuery<SubscriptionStatus>({
     queryKey: ['/api/ninja-stack/status'],
     queryFn: () => apiRequest('GET', '/api/ninja-stack/status'),
   });
@@ -47,9 +62,31 @@ export default function Billing() {
     );
   }
 
+  // A failed status fetch must not look like "No active subscription" (and offer activation) to
+  // a paying workspace.
+  if (isError && !status) {
+    return (
+      <div className="p-6 max-w-xl space-y-6">
+        <h1 className="text-xl font-bold flex items-center gap-2">
+          <Zap className="h-5 w-5 text-primary" />
+          Subscription
+        </h1>
+        <QueryError error={error} onRetry={() => refetch()} />
+      </div>
+    );
+  }
+
   const isActive   = status?.active   ?? false;
   const isExpired  = status?.reason === 'expired';
   const isOverride = status?.adminOverride ?? false;
+  const inactiveReason = !isActive ? reasonText(status?.reason) : null;
+  // The result of the last activation attempt, shown on whichever card is visible afterwards
+  // (a successful activation hides the activation form, so its message must live elsewhere).
+  const activationMessage = activate.isSuccess
+    ? (activate.data?.active
+        ? { ok: true, text: 'Subscription activated successfully!' }
+        : { ok: false, text: reasonText(activate.data?.reason) ?? 'The code was accepted but the subscription is not active.' })
+    : null;
 
   return (
     <div className="p-6 max-w-xl space-y-6">
@@ -90,6 +127,14 @@ export default function Billing() {
         {(isActive && status?.expiresAt) && (
           <CardContent className="pt-0 text-sm text-muted-foreground">
             Expires: {new Date(status.expiresAt).toLocaleDateString('en-US', { dateStyle: 'long' })}
+          </CardContent>
+        )}
+        {inactiveReason && (
+          <CardContent className="pt-0 text-sm text-muted-foreground">{inactiveReason}</CardContent>
+        )}
+        {activationMessage && (
+          <CardContent className={`pt-0 text-sm ${activationMessage.ok ? 'text-green-600' : 'text-destructive'}`} role="status">
+            {activationMessage.text}
           </CardContent>
         )}
       </Card>
@@ -144,9 +189,6 @@ export default function Billing() {
               <p className="text-sm text-destructive mt-2">
                 {activate.error.message || 'Invalid code. Please try again.'}
               </p>
-            )}
-            {activate.isSuccess && (
-              <p className="text-sm text-green-600 mt-2">Subscription activated successfully!</p>
             )}
           </CardContent>
         </Card>

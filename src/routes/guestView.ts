@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { pool } from '../config/db.js';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
 
 const router = Router();
 
@@ -14,6 +15,7 @@ const guestViewLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => ipBucket(getClientIp(req)),
   message: { error: 'Too many requests' },
 });
 
@@ -54,7 +56,8 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
       scopes.includes('roadmap:read') && (async () => {
         const { rows } = await pool.query(
           `SELECT id, title, phase, status, priority
-           FROM roadmap_items WHERE workspace_id = $1 ORDER BY priority, created_at LIMIT 200`,
+           FROM roadmap_items WHERE workspace_id = $1 AND status != 'archived'
+           ORDER BY priority, created_at LIMIT 200`,
           [wid],
         );
         result.roadmap = rows;
@@ -97,6 +100,10 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
         const { rows } = await pool.query(
           // Same completion-time rule as changelog.ts: first status='done' row after the last
           // non-done status row ('moved' included for historical Kanban-drag rows).
+          // M33: a task completed inside the 30-day window was necessarily updated inside it
+          // (tasks.updated_at trigger), so only those tasks' history is scanned - not the full
+          // status history of every done task in the workspace. Their full history is still
+          // read, so the completion-time rule is unchanged.
           `WITH status_rows AS (
              SELECT ta.task_id, ta.created_at, ta.payload->>'status' AS status
              FROM task_activity ta
@@ -104,6 +111,7 @@ router.get('/:token', guestViewLimiter, async (req, res, next) => {
              WHERE t.workspace_id = $1
                AND t.status = 'done'
                AND t.deleted_at IS NULL
+               AND t.updated_at >= now() - interval '30 days'
                AND ta.action IN ('updated', 'created', 'moved')
                AND (ta.payload->>'status') IS NOT NULL
            ),

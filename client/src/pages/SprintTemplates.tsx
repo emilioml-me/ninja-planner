@@ -2,7 +2,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
 import { todayLocal, safeFormat } from '@/lib/utils';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
+import { QueryError } from '@/components/QueryError';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -58,7 +59,7 @@ function UseTemplateDialog({ template, onDone }: UseTemplateForm) {
     <div className="space-y-4">
       <div>
         <label className="text-sm font-medium">Sprint name</label>
-        <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
+        <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={255} className="mt-1" />
       </div>
       <div>
         <label className="text-sm font-medium">Start date</label>
@@ -73,8 +74,8 @@ function UseTemplateDialog({ template, onDone }: UseTemplateForm) {
       </div>
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onDone}>Cancel</Button>
-        <Button onClick={() => mutation.mutate({ name, start_date: startDate })}
-          disabled={!name.trim() || !startDate || mutation.isPending}>
+        <Button onClick={() => mutation.mutate({ name: name.trim(), start_date: startDate })}
+          disabled={!name.trim() || name.trim().length > 255 || !startDate || mutation.isPending}>
           Create Sprint
         </Button>
       </div>
@@ -85,7 +86,7 @@ function UseTemplateDialog({ template, onDone }: UseTemplateForm) {
 export default function SprintTemplates() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
-  const isAdmin = useIsAdmin();
+  const { isAdmin, isLoading: roleLoading } = useMyRole();
   const { toast } = useToast();
 
   const [creating,  setCreating]  = useState(false);
@@ -97,6 +98,10 @@ export default function SprintTemplates() {
   const [newDays,   setNewDays]   = useState('14');
   const parsedDays = Number(newDays);
   const daysValid = Number.isInteger(parsedDays) && parsedDays >= 1 && parsedDays <= 90;
+  // Mirrors the server schema: name 1-255 (sent trimmed), goal <= 2000.
+  const trimmedName = newName.trim();
+  const nameValid = trimmedName.length >= 1 && trimmedName.length <= 255;
+  const goalValid = newGoal.length <= 2000;
 
   const dialogOpen = creating || !!editing;
   const openCreate = () => { setEditing(null); setNewName(''); setNewGoal(''); setNewDays('14'); setCreating(true); };
@@ -109,12 +114,15 @@ export default function SprintTemplates() {
   };
   const closeDialog = () => { setCreating(false); setEditing(null); };
 
-  const { data: templates = [], isLoading } = useQuery<Template[]>({
-    queryKey: ['sprint-templates'],
+  // Same key as EpicTemplates' sprint-template picker so edits here refresh it too.
+  const { data, isLoading: templatesLoading, isError, error, refetch } = useQuery<Template[]>({
+    queryKey: ['/api/sprint-templates'],
     queryFn: () => apiRequest('GET', '/api/sprint-templates'),
   });
+  const templates = data ?? [];
+  const isLoading = templatesLoading || roleLoading;
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['sprint-templates'] });
+  const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/sprint-templates'] });
 
   const createMutation = useMutation({
     mutationFn: (data: { name: string; goal: string | null; duration_days: number }) =>
@@ -168,12 +176,15 @@ export default function SprintTemplates() {
             <div>
               <label className="text-sm font-medium">Template name</label>
               <Input value={newName} onChange={(e) => setNewName(e.target.value)}
-                placeholder="e.g. Standard 2-week sprint" className="mt-1" />
+                placeholder="e.g. Standard 2-week sprint" maxLength={255} className="mt-1" />
             </div>
             <div>
               <label className="text-sm font-medium">Default sprint goal (optional)</label>
               <Textarea value={newGoal} onChange={(e) => setNewGoal(e.target.value)}
                 placeholder="Focus on…" rows={2} className="mt-1" />
+              {!goalValid && (
+                <p className="text-xs text-destructive mt-1">Goal must be 2000 characters or fewer.</p>
+              )}
             </div>
             <div>
               <label className="text-sm font-medium">Duration (days)</label>
@@ -187,14 +198,14 @@ export default function SprintTemplates() {
               <Button variant="outline" onClick={closeDialog}>Cancel</Button>
               <Button onClick={() => {
                 const data = {
-                  name: newName,
+                  name: trimmedName,
                   // null (not omitted) so clearing the goal on edit actually persists.
                   goal: newGoal.trim() ? newGoal : null,
                   duration_days: parsedDays,
                 };
                 if (editing) updateMutation.mutate(data);
                 else createMutation.mutate(data);
-              }} disabled={!newName.trim() || !daysValid || createMutation.isPending || updateMutation.isPending}>
+              }} disabled={!nameValid || !goalValid || !daysValid || createMutation.isPending || updateMutation.isPending}>
                 {editing ? 'Update Template' : 'Save Template'}
               </Button>
             </div>
@@ -213,6 +224,8 @@ export default function SprintTemplates() {
 
       {isLoading ? (
         <div className="space-y-3">{[1,2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}</div>
+      ) : isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : templates.length === 0 ? (
         <div className="text-center py-20 text-muted-foreground">
           <Zap className="h-10 w-10 mx-auto mb-3 opacity-30" />

@@ -1,7 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
-import { useIsAdmin, useIsAdminLoaded } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
+import { QueryError } from '@/components/QueryError';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -20,13 +21,14 @@ interface Share {
   created_at: string;
 }
 
+const LABEL_MAX = 100; // matches the server's label limit
+
 const ALL_SCOPES = ['tasks:read', 'roadmap:read', 'goals:read', 'sprints:read', 'epics:read', 'changelog:read', 'budgets:read'];
 
 export default function GuestLinks() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
-  const isAdmin = useIsAdmin();
-  const isAdminLoaded = useIsAdminLoaded();
+  const { isAdmin, isLoading: roleLoading } = useMyRole();
   const { toast } = useToast();
 
   const [creating, setCreating] = useState(false);
@@ -34,11 +36,12 @@ export default function GuestLinks() {
   const [scopes,   setScopes]   = useState<string[]>(['tasks:read', 'roadmap:read']);
   const [expires,  setExpires]  = useState('');
 
-  const { data: shares = [], isLoading } = useQuery<Share[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<Share[]>({
     queryKey: ['project-shares'],
     queryFn: () => apiRequest('GET', '/api/project-shares'),
     enabled: isAdmin,
   });
+  const shares = data ?? [];
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['project-shares'] });
 
@@ -84,8 +87,8 @@ export default function GuestLinks() {
 
   const expiresInPast = !!expires && new Date(expires).getTime() <= Date.now();
 
-  // Wait for Clerk to resolve so real admins don't see a flash of "Admin access required".
-  if (!isAdminLoaded) {
+  // Wait for the workspace role so real admins don't see a flash of "Admin access required".
+  if (roleLoading) {
     return (
       <div className="p-6 space-y-3">{[1,2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}</div>
     );
@@ -117,15 +120,16 @@ export default function GuestLinks() {
           <DialogHeader><DialogTitle>New Guest Link</DialogTitle></DialogHeader>
           <div className="space-y-4">
             <div>
-              <label className="text-sm font-medium">Label</label>
-              <Input value={label} onChange={(e) => setLabel(e.target.value)}
-                placeholder="e.g. Client XYZ view" className="mt-1" />
+              <label htmlFor="guest-link-label" className="text-sm font-medium">Label</label>
+              <Input id="guest-link-label" value={label} onChange={(e) => setLabel(e.target.value)}
+                maxLength={LABEL_MAX} placeholder="e.g. Client XYZ view" className="mt-1" />
             </div>
             <div>
-              <label className="text-sm font-medium">Access</label>
+              <span className="text-sm font-medium">Access</span>
               <div className="flex flex-wrap gap-2 mt-2">
                 {ALL_SCOPES.map((scope) => (
                   <button key={scope} type="button" onClick={() => toggleScope(scope)}
+                    aria-pressed={scopes.includes(scope)}
                     className={`text-xs px-2 py-1 rounded border transition-colors ${
                       scopes.includes(scope)
                         ? 'bg-primary text-primary-foreground border-primary'
@@ -137,8 +141,8 @@ export default function GuestLinks() {
               </div>
             </div>
             <div>
-              <label className="text-sm font-medium">Expires (optional)</label>
-              <Input type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)}
+              <label htmlFor="guest-link-expires" className="text-sm font-medium">Expires (optional)</label>
+              <Input id="guest-link-expires" type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)}
                 className="mt-1" />
               {expiresInPast && (
                 <p className="text-xs text-destructive mt-1">Expiry must be in the future.</p>
@@ -148,7 +152,7 @@ export default function GuestLinks() {
               <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
               <Button
                 onClick={() => createMutation.mutate({
-                  label,
+                  label: label.trim(),
                   scopes,
                   ...(expires ? { expires_at: new Date(expires).toISOString() } : {}),
                 })}
@@ -162,6 +166,8 @@ export default function GuestLinks() {
 
       {isLoading ? (
         <div className="space-y-3">{[1,2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}</div>
+      ) : isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : shares.length === 0 ? (
         <div className="text-center py-20 text-muted-foreground">
           <Link2 className="h-10 w-10 mx-auto mb-3 opacity-30" />
@@ -169,13 +175,18 @@ export default function GuestLinks() {
         </div>
       ) : (
         <div className="space-y-3">
-          {shares.map((s) => (
-            <Card key={s.id}>
+          {shares.map((s) => {
+            const expired = !!s.expires_at && new Date(s.expires_at).getTime() <= Date.now();
+            return (
+            <Card key={s.id} className={expired ? 'opacity-70' : undefined}>
               <CardContent className="py-3 px-4">
                 <div className="flex items-start gap-3">
                   <Link2 className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="font-medium text-sm">{s.label}</div>
+                    <div className="font-medium text-sm flex items-center gap-2 min-w-0">
+                      <span className="truncate">{s.label}</span>
+                      {expired && <Badge variant="destructive" className="text-[10px] shrink-0">Expired</Badge>}
+                    </div>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {s.scopes.map((sc) => (
                         <Badge key={sc} variant="secondary" className="text-xs">{sc}</Badge>
@@ -183,14 +194,16 @@ export default function GuestLinks() {
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
                       {s.token.slice(0, 12)}…
-                      {s.expires_at && ` · Expires ${new Date(s.expires_at).toLocaleDateString()}`}
+                      {s.expires_at && ` · ${expired ? 'Expired' : 'Expires'} ${new Date(s.expires_at).toLocaleString()}`}
                     </div>
                   </div>
                   <Button size="icon" variant="ghost" className="h-7 w-7"
+                    aria-label={`Copy link for ${s.label}`} disabled={expired}
                     onClick={() => copyLink(s.token)}>
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
                   <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive hover:text-destructive"
+                    aria-label={`Revoke ${s.label}`}
                     onClick={() => { if (confirm(`Revoke "${s.label}"? Anyone using this link will lose access immediately.`)) deleteMutation.mutate(s.id); }}
                     disabled={deleteMutation.isPending}>
                     <Trash2 className="h-3.5 w-3.5" />
@@ -198,7 +211,8 @@ export default function GuestLinks() {
                 </div>
               </CardContent>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

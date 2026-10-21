@@ -13,8 +13,22 @@
  * edited, so the runner strips a leading BEGIN; / trailing COMMIT; pair
  * before executing (see stripOuterTransaction).
  *
- * The whole run holds a session-level pg_advisory_lock so two containers
- * starting at once (e.g. a rolling deploy) can't apply the same file twice.
+ * Concurrency: DATABASE_URL goes through PgBouncer in transaction pooling mode, so a
+ * session-level pg_advisory_lock/unlock pair could land on different backends (leaking the
+ * lock and hanging the next deploy). Instead every file's transaction first takes
+ * pg_advisory_xact_lock (released automatically at COMMIT/ROLLBACK on the same backend) and
+ * re-checks schema_migrations inside that transaction, so two containers starting at once
+ * (e.g. a rolling deploy) can't apply the same file twice.
+ *
+ * Timeouts (SET LOCAL, so they never leak to other pooled clients):
+ *  - MIGRATE_LOCK_WAIT_TIMEOUT (default 120s): how long to wait for another runner's lock;
+ *  - MIGRATE_LOCK_TIMEOUT (default 30s): per-DDL wait for table locks held by the live app;
+ *  - MIGRATE_STATEMENT_TIMEOUT (default 15min): per-statement cap.
+ *
+ * A file whose first line is `-- migrate:no-transaction` (needed for CREATE INDEX
+ * CONCURRENTLY) runs statement by statement outside a transaction and is recorded afterwards.
+ * Such files must be idempotent (IF NOT EXISTS) and may only contain plain statements each
+ * ending with `;` at end of line (no $$ bodies), since they are split on that.
  *
  * Usage: node dist/migrate.js
  * Exits 0 on success, 1 on error.
@@ -29,6 +43,7 @@ import { readdir, readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import pkg from 'pg';
+import type { PoolClient } from 'pg';
 
 const { Pool } = pkg;
 
@@ -50,8 +65,61 @@ const pool = new Pool({
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = resolve(__dirname, '..', '..', 'migrations');
 
-// Arbitrary app-specific key for pg_advisory_lock (must fit in a signed bigint).
+// Arbitrary app-specific key for pg_advisory_xact_lock (must fit in a signed bigint).
 const MIGRATION_LOCK_KEY = 7_206_320_601;
+
+// Postgres duration strings (e.g. '30s', '15min'); validated so a typo can't inject SQL.
+const DURATION_RE = /^\d+\s*(?:ms|s|min|h)?$/;
+function durationEnv(name: string, fallback: string): string {
+  const v = process.env[name]?.trim();
+  if (!v) return fallback;
+  if (!DURATION_RE.test(v)) {
+    console.warn(`[migrate] ignoring invalid ${name}=${v}; using ${fallback}`);
+    return fallback;
+  }
+  return v;
+}
+const LOCK_WAIT_TIMEOUT = durationEnv('MIGRATE_LOCK_WAIT_TIMEOUT', '120s');
+const LOCK_TIMEOUT = durationEnv('MIGRATE_LOCK_TIMEOUT', '30s');
+const STATEMENT_TIMEOUT = durationEnv('MIGRATE_STATEMENT_TIMEOUT', '15min');
+
+const NO_TRANSACTION_RE = /^\s*--\s*migrate:no-transaction\s*$/im;
+
+type Client = PoolClient;
+
+/**
+ * Opens a transaction holding the migration advisory lock, with the configured timeouts.
+ * The lock wait itself is bounded by LOCK_WAIT_TIMEOUT so a stuck runner fails the deploy
+ * loudly instead of hanging entrypoint.sh forever.
+ */
+async function beginLocked(client: Client): Promise<void> {
+  await client.query('BEGIN');
+  await client.query(`SET LOCAL lock_timeout = '${LOCK_WAIT_TIMEOUT}'`);
+  await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_KEY]);
+  await client.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
+  await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`);
+}
+
+async function isApplied(client: Client, file: string): Promise<boolean> {
+  const { rows } = await client.query('SELECT 1 FROM schema_migrations WHERE name = $1', [file]);
+  return rows.length > 0;
+}
+
+/** Splits a no-transaction file into statements on `;` at end of line (comments dropped). */
+function splitStatements(sql: string): string[] {
+  const out: string[] = [];
+  let current: string[] = [];
+  for (const line of sql.split('\n')) {
+    if (IGNORABLE_LINE_RE.test(line)) continue;
+    current.push(line);
+    if (/;\s*$/.test(line)) {
+      out.push(current.join('\n'));
+      current = [];
+    }
+  }
+  if (current.length > 0) out.push(current.join('\n'));
+  return out;
+}
 
 // Whole-line transaction-control statements, e.g. `BEGIN;`, `BEGIN TRANSACTION;`, `COMMIT;`.
 const BEGIN_LINE_RE = /^\s*(?:BEGIN(?:\s+(?:TRANSACTION|WORK))?|START\s+TRANSACTION)\s*;\s*$/i;
@@ -80,20 +148,22 @@ function stripOuterTransaction(sql: string): string {
 
 async function run() {
   const client = await pool.connect();
-  let locked = false;
   try {
-    // Serialize concurrent migration runs (multiple containers booting at once). Blocks until
-    // any other runner finishes; that runner's applied files are then skipped below.
-    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
-    locked = true;
-
-    // Ensure tracking table exists
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        name       text PRIMARY KEY,
-        applied_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
+    // Ensure tracking table exists (under the lock: two concurrent CREATE TABLE IF NOT EXISTS
+    // can still collide on the catalog).
+    await beginLocked(client);
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          name       text PRIMARY KEY,
+          applied_at timestamptz NOT NULL DEFAULT now()
+        )
+      `);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
 
     // List + sort migration files
     let files: string[];
@@ -111,7 +181,8 @@ async function run() {
       return;
     }
 
-    // Fetch already-applied migrations
+    // Fast pre-check (no lock) so already-applied files are skipped without a transaction each;
+    // every file still re-checks under the lock before running.
     const { rows } = await client.query<{ name: string }>(
       'SELECT name FROM schema_migrations',
     );
@@ -125,13 +196,45 @@ async function run() {
       }
 
       const raw = await readFile(join(MIGRATIONS_DIR, file), 'utf8');
+
+      if (NO_TRANSACTION_RE.test(raw.split('\n')[0] ?? '')) {
+        // Statements like CREATE INDEX CONCURRENTLY can't run in a transaction (nor in a
+        // multi-statement simple query), so each runs on its own; the file must be idempotent
+        // because a concurrent runner may execute it too. Recorded under the lock afterwards.
+        try {
+          for (const stmt of splitStatements(raw)) {
+            await client.query(stmt);
+          }
+          await beginLocked(client);
+          await client.query(
+            'INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING',
+            [file],
+          );
+          await client.query('COMMIT');
+          console.log(`[migrate] apply ${file} (no transaction)`);
+          ran++;
+          continue;
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {});
+          console.error('[migrate] FAILED ' + file, err);
+          process.exitCode = 1;
+          return;
+        }
+      }
+
       const sql = stripOuterTransaction(raw);
       if (sql !== raw) {
         console.log(`[migrate] note  ${file}: stripped its own BEGIN/COMMIT (runner wraps it)`);
       }
 
-      await client.query('BEGIN');
       try {
+        await beginLocked(client);
+        // Another runner may have applied it while we waited for the lock.
+        if (await isApplied(client, file)) {
+          await client.query('COMMIT');
+          console.log(`[migrate] skip  ${file} (applied concurrently)`);
+          continue;
+        }
         await client.query(sql);
         await client.query(
           'INSERT INTO schema_migrations (name) VALUES ($1)',
@@ -154,9 +257,6 @@ async function run() {
       console.log(`[migrate] Applied ${ran} migration(s) successfully`);
     }
   } finally {
-    if (locked) {
-      await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]).catch(() => {});
-    }
     client.release();
     await pool.end();
   }

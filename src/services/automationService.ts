@@ -1,10 +1,12 @@
 // Automation event dispatcher — called from task route event points
+import type { PoolClient } from 'pg';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
-import { deliverToEndpoint } from './webhookService.js';
-import { updateTaskWithPrevState, logTaskActivity } from './taskService.js';
+import { deliverToEndpoint, fireWebhooks } from './webhookService.js';
+import { updateTaskWithPrevState, logTaskActivity, type Task } from './taskService.js';
 import { runTaskStatusEffects } from './taskStatusEffects.js';
 import { createNotification } from './notificationService.js';
+import { trackBackground } from '../lib/background.js';
 
 export type AutomationTrigger =
   | { type: 'task.status_changed'; workspaceId: string; taskId: string; oldStatus: string; newStatus: string; assigneeId?: string | null }
@@ -35,17 +37,23 @@ async function logRun(
   }
 }
 
+/** 'skipped' = the action legitimately had nothing to do (logged with the reason, not as 'ok'). */
+type ActionOutcome = { result: 'ok' } | { result: 'skipped'; reason: string };
+const OK: ActionOutcome = { result: 'ok' };
+const skipped = (reason: string): ActionOutcome => ({ result: 'skipped', reason });
+
 async function executeAction(
   rule: { id: string; action_type: string; action_config: Record<string, unknown>; workspace_id: string },
   trigger: AutomationTrigger,
-): Promise<void> {
+): Promise<ActionOutcome> {
   const cfg = rule.action_config;
   const taskId = 'taskId' in trigger ? trigger.taskId : null;
 
   switch (rule.action_type) {
     case 'set_status': {
       const status = cfg.status as string;
-      if (!taskId || !status) break;
+      if (!taskId) return skipped(`set_status: trigger ${trigger.type} has no task`);
+      if (!status) return skipped('set_status: no status configured');
       // Same service + side-effect helper as PATCH /api/tasks/:id, so an automation-driven
       // status change behaves identically (activity row, recurring spawn, webhooks, goal
       // milestones, watchers). source 'automation' suppresses re-dispatching
@@ -53,7 +61,7 @@ async function executeAction(
       const updateResult = await updateTaskWithPrevState(taskId, rule.workspace_id, { status });
       if (!updateResult) throw new Error(`set_status: task ${taskId} not found`);
       const { task, prevStatus } = updateResult;
-      await runTaskStatusEffects({
+      const changed = await runTaskStatusEffects({
         workspaceId: rule.workspace_id,
         actorUserId: null,
         task,
@@ -61,52 +69,65 @@ async function executeAction(
         newStatus: task.status,
         source: 'automation',
       });
-      break;
+      return changed ? OK : skipped(`set_status: task already ${status}`);
     }
     case 'reassign_task': {
       const assigneeId = cfg.assignee_clerk_id as string;
-      if (!taskId || !assigneeId) break;
+      if (!taskId) return skipped(`reassign_task: trigger ${trigger.type} has no task`);
+      if (!assigneeId) return skipped('reassign_task: no assignee configured');
       // The target must be a current workspace member (validated at rule creation too, but a
       // member can leave after the rule was created). 0 rows = failed run, not a silent 'ok'.
-      const { rows } = await pool.query<{ id: string; title: string; prev_assignee: string | null }>(
+      // Only writes when the assignee actually changes.
+      const { rows } = await pool.query<Task & { prev_assignee: string | null; is_member: boolean }>(
         `WITH prev AS (
            SELECT id, assignee_clerk_id FROM tasks
            WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL
            FOR UPDATE
+         ), member AS (
+           SELECT EXISTS (
+             SELECT 1 FROM workspace_members WHERE workspace_id = $3 AND clerk_user_id = $1
+           ) AS ok
+         ), upd AS (
+           UPDATE tasks t SET assignee_clerk_id = $1
+           FROM prev, member
+           WHERE t.id = prev.id
+             AND member.ok
+             AND prev.assignee_clerk_id IS DISTINCT FROM $1
+           RETURNING t.*
          )
-         UPDATE tasks t SET assignee_clerk_id = $1
-         FROM prev
-         WHERE t.id = prev.id
-           AND EXISTS (
-             SELECT 1 FROM workspace_members
-             WHERE workspace_id = $3 AND clerk_user_id = $1
-           )
-         RETURNING t.id, t.title, prev.assignee_clerk_id AS prev_assignee`,
+         SELECT upd.*, prev.assignee_clerk_id AS prev_assignee, member.ok AS is_member
+         FROM prev CROSS JOIN member LEFT JOIN upd ON upd.id = prev.id`,
         [assigneeId, taskId, rule.workspace_id],
       );
       const row = rows[0];
-      if (!row) {
+      if (!row || !row.is_member) {
         throw new Error(`reassign_task: task not found or ${assigneeId} is not a member of this workspace`);
       }
-      if (row.prev_assignee !== assigneeId) {
-        await logTaskActivity(row.id, 'system:automation', 'updated', { assignee_clerk_id: assigneeId });
-        createNotification({
-          workspaceId: rule.workspace_id,
-          recipientClerkId: assigneeId,
-          type: 'task_assigned',
-          title: `You were assigned "${row.title}"`,
-          link: '/tasks',
-        }).catch(() => {});
+      if (row.prev_assignee === assigneeId || !row.id) {
+        return skipped('reassign_task: task already assigned to that member');
       }
-      break;
+      // Same effects a manual reassignment has (activity row, task.updated webhook, assignee
+      // notification). task.assigned automations are deliberately not re-dispatched so two
+      // reassign rules can't loop.
+      const { prev_assignee: _prev, is_member: _member, ...task } = row;
+      await logTaskActivity(task.id, 'system:automation', 'updated', { assignee_clerk_id: assigneeId });
+      fireWebhooks(rule.workspace_id, 'task.updated', { task });
+      createNotification({
+        workspaceId: rule.workspace_id,
+        recipientClerkId: assigneeId,
+        type: 'task_assigned',
+        title: `You were assigned "${task.title}"`,
+        link: `/tasks?task=${task.id}`,
+      }).catch(() => {});
+      return OK;
     }
     case 'notify_assignee': {
       const assigneeId = 'assigneeId' in trigger ? trigger.assigneeId : null;
-      if (!assigneeId) break;
+      if (!assigneeId) return skipped('notify_assignee: no assignee on this event');
       const title = (cfg.title as string | undefined) ?? 'Automation triggered';
       const body  = (cfg.message as string | undefined) ?? undefined;
-      const link  = taskId ? `/tasks?highlight=${taskId}` : undefined;
-      await pool.query(
+      const link  = taskId ? `/tasks?task=${taskId}` : undefined;
+      const inserted = await pool.query(
         `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
          SELECT $1,$2,'automation',$3,$4,$5
          WHERE NOT EXISTS (
@@ -115,7 +136,7 @@ async function executeAction(
          )`,
         [rule.workspace_id, assigneeId, title, body ?? null, link ?? null],
       );
-      break;
+      return (inserted.rowCount ?? 0) > 0 ? OK : skipped('notify_assignee: recipient muted automation notifications');
     }
     case 'post_webhook': {
       // Delivers through a registered Webhook endpoint (chosen by the rule) instead of a raw
@@ -123,7 +144,7 @@ async function executeAction(
       // and webhook_deliveries logging that regular event-subscription webhooks get, rather
       // than a bare unsigned, non-retrying, unaudited fetch.
       const endpointId = cfg.endpoint_id as string;
-      if (!endpointId) break;
+      if (!endpointId) return skipped('post_webhook: no endpoint configured');
       const result = await deliverToEndpoint(endpointId, rule.workspace_id, trigger.type, { trigger, rule_id: rule.id });
       if (result === 'not_found') {
         const existing = await pool.query<{ active: boolean }>(
@@ -144,10 +165,11 @@ async function executeAction(
       if (result === 'failed') {
         throw new Error(`post_webhook: delivery to endpoint ${endpointId} failed after retries`);
       }
-      break;
+      return OK;
     }
     default:
       logger.warn({ rule_id: rule.id, action: rule.action_type }, 'Unknown automation action type');
+      return skipped(`unknown action type ${rule.action_type}`);
   }
 }
 
@@ -168,7 +190,15 @@ function triggerMatches(rule: { trigger_type: string; trigger_config: Record<str
   return true;
 }
 
-export async function dispatchAutomations(event: AutomationTrigger): Promise<void> {
+/**
+ * Runs every active matching rule for the event. Never throws. Callers fire-and-forget it, so
+ * the work is registered with trackBackground and graceful shutdown waits for it.
+ */
+export function dispatchAutomations(event: AutomationTrigger): Promise<void> {
+  return trackBackground(runAutomations(event));
+}
+
+async function runAutomations(event: AutomationTrigger): Promise<void> {
   try {
     const { rows } = await pool.query(
       `SELECT id, workspace_id, trigger_type, trigger_config, action_type, action_config
@@ -186,8 +216,12 @@ export async function dispatchAutomations(event: AutomationTrigger): Promise<voi
       // flooded automation_logs and buried the runs admins actually care about.
       if (!triggerMatches(rule, event)) return;
       try {
-        await executeAction(rule, event);
-        await logRun(rule.id, rule.workspace_id, event, 'ok');
+        const outcome = await executeAction(rule, event);
+        if (outcome.result === 'skipped') {
+          await logRun(rule.id, rule.workspace_id, event, 'skipped', outcome.reason);
+        } else {
+          await logRun(rule.id, rule.workspace_id, event, 'ok');
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error({ rule_id: rule.id, err }, 'Automation action failed');
@@ -204,9 +238,12 @@ export async function dispatchAutomations(event: AutomationTrigger): Promise<voi
 // Clerk admin JWT; no external scheduler can hold one, so the trigger never fired in practice.
 // It now runs in-process on an interval. Safety:
 //  - claim-then-dispatch: each overdue task is atomically stamped (due_date_passed_notified_at)
-//    in the same UPDATE ... RETURNING that selects it, so it's dispatched at most once;
+//    in the same UPDATE ... RETURNING that selects it, so concurrent claimers never share it;
+//    after dispatch due_date_passed_dispatched_at confirms it, and an unconfirmed claim older
+//    than DUE_DATE_STALE_CLAIM is re-claimed (a restart mid-dispatch no longer loses it);
 //  - small batches (FOR UPDATE SKIP LOCKED) so a large backlog never holds long locks;
-//  - a session-level pg_try_advisory_lock so only one container runs the sweep at a time.
+//  - each batch is claimed inside a transaction holding pg_try_advisory_xact_lock (so only one
+//    container sweeps at a time, PgBouncer-safe), committed, then dispatched outside it.
 
 const DUE_DATE_SCHEDULER_LOCK_KEY = 72_310_451; // arbitrary constant, unique to this job
 const DUE_DATE_BATCH_SIZE = 50;
@@ -219,9 +256,24 @@ export interface ClaimedOverdueTask {
   assignee_clerk_id: string | null;
 }
 
-/** Atomically claims up to `limit` newly-overdue tasks (optionally for one workspace). */
-export async function claimOverdueTasks(workspaceId: string | null, limit = DUE_DATE_BATCH_SIZE): Promise<ClaimedOverdueTask[]> {
-  const { rows } = await pool.query<ClaimedOverdueTask>(
+// A claim (due_date_passed_notified_at) older than this whose dispatch was never confirmed
+// (due_date_passed_dispatched_at, migration 065) is treated as lost - e.g. the process died
+// mid-dispatch - and re-claimed. Well above the worst-case post_webhook retry time (~70s).
+const DUE_DATE_STALE_CLAIM = '15 minutes';
+
+type Queryable = Pick<PoolClient, 'query'>;
+
+/**
+ * Atomically claims up to `limit` newly-overdue tasks (optionally for one workspace), plus
+ * tasks whose earlier claim went stale without a confirmed dispatch. The claim stamp is set in
+ * the same UPDATE that selects the rows, so concurrent claimers never get the same task.
+ */
+export async function claimOverdueTasks(
+  workspaceId: string | null,
+  limit = DUE_DATE_BATCH_SIZE,
+  db: Queryable = pool,
+): Promise<ClaimedOverdueTask[]> {
+  const { rows } = await db.query<ClaimedOverdueTask>(
     `UPDATE tasks SET due_date_passed_notified_at = now()
      WHERE id IN (
        SELECT id FROM tasks
@@ -229,58 +281,99 @@ export async function claimOverdueTasks(workspaceId: string | null, limit = DUE_
          AND status <> 'done'
          AND deleted_at IS NULL
          AND due_date < CURRENT_DATE
-         AND due_date_passed_notified_at IS NULL
+         AND (
+           due_date_passed_notified_at IS NULL
+           OR (
+             due_date_passed_notified_at < now() - $3::interval
+             AND (due_date_passed_dispatched_at IS NULL
+                  OR due_date_passed_dispatched_at < due_date_passed_notified_at)
+           )
+         )
        ORDER BY due_date
        LIMIT $2
        FOR UPDATE SKIP LOCKED
      )
      RETURNING id, workspace_id, title, assignee_clerk_id`,
-    [workspaceId, limit],
+    [workspaceId, limit, DUE_DATE_STALE_CLAIM],
   );
   return rows;
 }
 
-/** Dispatches task.due_date_passed for already-claimed tasks. Never throws. */
-export async function dispatchDueDatePassed(tasks: ClaimedOverdueTask[]): Promise<void> {
-  await Promise.all(tasks.map((task) => dispatchAutomations({
-    type: 'task.due_date_passed',
-    workspaceId: task.workspace_id,
-    taskId: task.id,
-    assigneeId: task.assignee_clerk_id,
-    title: task.title,
-  })));
+/**
+ * Dispatches task.due_date_passed for already-claimed tasks, then confirms each dispatch so the
+ * claim is final. A crash before confirmation lets a later sweep re-claim the task
+ * (at-least-once rather than silently losing it). Never throws.
+ */
+export function dispatchDueDatePassed(tasks: ClaimedOverdueTask[]): Promise<void> {
+  return trackBackground(Promise.all(tasks.map(async (task) => {
+    await dispatchAutomations({
+      type: 'task.due_date_passed',
+      workspaceId: task.workspace_id,
+      taskId: task.id,
+      assigneeId: task.assignee_clerk_id,
+      title: task.title,
+    });
+    await pool.query(
+      `UPDATE tasks SET due_date_passed_dispatched_at = now()
+       WHERE id = $1 AND due_date_passed_notified_at IS NOT NULL`,
+      [task.id],
+    ).catch((err) => logger.warn({ err, taskId: task.id }, '[automationService] due-date dispatch confirm failed'));
+  })).then(() => undefined));
 }
 
-/** One sweep across all workspaces, guarded so only one process runs it at a time. */
-export async function runDueDateSweep(): Promise<number> {
+/**
+ * Claims one batch under a transaction-scoped try-lock (safe behind PgBouncer transaction
+ * pooling, unlike a session-level advisory lock whose unlock can land on another backend).
+ * Returns null when another process holds the lock. The pooled client is released before the
+ * caller dispatches, so slow webhook retries never pin a connection.
+ */
+async function claimBatchLocked(): Promise<ClaimedOverdueTask[] | null> {
   const client = await pool.connect();
-  let locked = false;
   try {
+    await client.query('BEGIN');
     const lockResult = await client.query<{ locked: boolean }>(
-      'SELECT pg_try_advisory_lock($1) AS locked',
+      'SELECT pg_try_advisory_xact_lock($1) AS locked',
       [DUE_DATE_SCHEDULER_LOCK_KEY],
     );
-    locked = lockResult.rows[0]?.locked === true;
-    if (!locked) return 0;
-
-    let total = 0;
-    for (let batch = 0; batch < DUE_DATE_MAX_BATCHES_PER_RUN; batch++) {
-      const claimed = await claimOverdueTasks(null);
-      if (claimed.length === 0) break;
-      total += claimed.length;
-      await dispatchDueDatePassed(claimed);
-      if (claimed.length < DUE_DATE_BATCH_SIZE) break;
+    if (lockResult.rows[0]?.locked !== true) {
+      await client.query('ROLLBACK');
+      return null;
     }
-    return total;
+    const claimed = await claimOverdueTasks(null, DUE_DATE_BATCH_SIZE, client);
+    await client.query('COMMIT');
+    return claimed;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
   } finally {
-    if (locked) {
-      await client.query('SELECT pg_advisory_unlock($1)', [DUE_DATE_SCHEDULER_LOCK_KEY]).catch(() => {});
-    }
     client.release();
   }
 }
 
+/** One sweep across all workspaces; batches are claimed under the advisory lock, dispatched outside it. */
+export async function runDueDateSweep(): Promise<number> {
+  let total = 0;
+  for (let batch = 0; batch < DUE_DATE_MAX_BATCHES_PER_RUN; batch++) {
+    if (stopping) break;
+    const claimed = await claimBatchLocked();
+    if (!claimed || claimed.length === 0) break;
+    total += claimed.length;
+    await dispatchDueDatePassed(claimed);
+    if (claimed.length < DUE_DATE_BATCH_SIZE) break;
+  }
+  return total;
+}
+
 let dueDateTimer: NodeJS.Timeout | null = null;
+let dueDateFirstRun: NodeJS.Timeout | null = null;
+let stopping = false;
+
+/** Stops the scheduler (graceful shutdown). An in-flight sweep finishes its current batch. */
+export function stopDueDateScheduler(): void {
+  stopping = true;
+  if (dueDateFirstRun) { clearTimeout(dueDateFirstRun); dueDateFirstRun = null; }
+  if (dueDateTimer) { clearInterval(dueDateTimer); dueDateTimer = null; }
+}
 
 /**
  * Starts the in-process due-date sweep (default every 15 min, first run ~30s after boot).
@@ -290,9 +383,10 @@ export function startDueDateScheduler(
   intervalMs = Number(process.env.DUE_DATE_SCHEDULER_INTERVAL_MS) || 15 * 60_000,
 ): void {
   if (dueDateTimer || process.env.NODE_ENV === 'test' || process.env.DUE_DATE_SCHEDULER_DISABLED === 'true') return;
+  stopping = false;
   let running = false;
   const tick = () => {
-    if (running) return;
+    if (running || stopping) return;
     running = true;
     runDueDateSweep()
       .then((count) => {
@@ -301,7 +395,8 @@ export function startDueDateScheduler(
       .catch((err) => logger.error({ err }, '[automationService] due-date sweep failed'))
       .finally(() => { running = false; });
   };
-  setTimeout(tick, 30_000).unref();
+  dueDateFirstRun = setTimeout(tick, 30_000);
+  dueDateFirstRun.unref();
   dueDateTimer = setInterval(tick, Math.max(intervalMs, 60_000));
   dueDateTimer.unref();
 }

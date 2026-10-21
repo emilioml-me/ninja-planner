@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { getEpicComments, createEpicComment } from '../services/commentService.js';
 import { createNotification } from '../services/notificationService.js';
 import { pool } from '../config/db.js';
@@ -33,8 +34,14 @@ router.post('/', async (req, res, next) => {
     }
 
     const epicId = (req.params as Record<string, string>).epicId;
-    const epicResult = await pool.query<{ id: string; title: string; created_by: string }>(
-      `SELECT id, title, created_by FROM epics WHERE id = $1 AND workspace_id = $2`,
+    // creator_is_member: the epic creator may have left the workspace — don't notify them then.
+    const epicResult = await pool.query<{ id: string; title: string; created_by: string; creator_is_member: boolean }>(
+      `SELECT e.id, e.title, e.created_by,
+              EXISTS (
+                SELECT 1 FROM workspace_members wm
+                WHERE wm.workspace_id = e.workspace_id AND wm.clerk_user_id = e.created_by
+              ) AS creator_is_member
+       FROM epics e WHERE e.id = $1 AND e.workspace_id = $2`,
       [epicId, req.workspace.id],
     );
     if (epicResult.rows.length === 0) {
@@ -45,7 +52,7 @@ router.post('/', async (req, res, next) => {
     const comment = await createEpicComment(epicId, req.auth.userId, parsed.data.body);
 
     const epic = epicResult.rows[0];
-    if (epic.created_by !== req.auth.userId) {
+    if (epic.created_by !== req.auth.userId && epic.creator_is_member) {
       createNotification({
         workspaceId: req.workspace.id,
         recipientClerkId: epic.created_by,
@@ -65,17 +72,18 @@ router.post('/', async (req, res, next) => {
 // DELETE /api/epics/:epicId/comments/:commentId
 router.delete('/:commentId', async (req, res, next) => {
   try {
-    // Matches the :epicId in the URL too (commentService.deleteEpicComment only checks the
-    // comment id + workspace), so the route can't delete a comment belonging to another epic.
+    // Scoped to the :epicId in the URL and the workspace, so the route can't delete a comment
+    // belonging to another epic. Authors delete their own comments; admins can moderate any.
+    const isAdmin = !!req.auth.memberRole && ADMIN_ROLES.has(req.auth.memberRole);
     const result = await pool.query(
       `DELETE FROM epic_comments ec
        USING epics e
        WHERE ec.id = $1
          AND ec.epic_id = $2
-         AND ec.author_clerk_id = $3
+         AND (ec.author_clerk_id = $3 OR $5::boolean)
          AND e.id = ec.epic_id
          AND e.workspace_id = $4`,
-      [req.params.commentId, (req.params as Record<string, string>).epicId, req.auth.userId, req.workspace.id],
+      [req.params.commentId, (req.params as Record<string, string>).epicId, req.auth.userId, req.workspace.id, isAdmin],
     );
     if ((result.rowCount ?? 0) === 0) {
       res.status(404).json({ error: 'Comment not found' });

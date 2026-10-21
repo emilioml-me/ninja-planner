@@ -4,6 +4,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Bell } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { QueryError } from '@/components/QueryError';
 
 const TYPE_LABELS: Record<string, { label: string; hint: string }> = {
   comment_added:    { label: 'Comments',            hint: 'New comments on tasks and epics you\'re involved in' },
@@ -11,7 +12,7 @@ const TYPE_LABELS: Record<string, { label: string; hint: string }> = {
   task_assigned:    { label: 'Task assigned',       hint: 'When a task is assigned to you' },
   due_date_set:     { label: 'Due date reminders',  hint: 'When a due date is set or changed on your task' },
   task_updated:     { label: 'Watched task updates', hint: 'Changes to tasks you\'re watching' },
-  overdue_alert:    { label: 'Overdue tasks',       hint: 'Daily summary of overdue tasks in the workspace' },
+  overdue_alert:    { label: 'Overdue tasks',       hint: 'Sent to admins when an overdue-task alert is run from the Dashboard (at most once every 20 hours)' },
   sprint_ending:    { label: 'Sprint ending soon',  hint: 'Reminders when an active sprint is about to end' },
   goal_milestone:   { label: 'Goal milestones',     hint: 'When a goal crosses 50% or reaches completion' },
   review_submitted: { label: 'Weekly review submitted', hint: 'When a teammate submits their weekly review' },
@@ -56,17 +57,9 @@ export default function NotificationPreferences() {
 
       {isLoading ? (
         <div className="space-y-3">{[1,2,3,4].map((i) => <Skeleton key={i} className="h-14 w-full" />)}</div>
-      ) : isError ? (
+      ) : isError && !prefs ? (
         // Don't render every toggle as "enabled" when we simply failed to load the real values.
-        <Card>
-          <CardContent className="py-6 text-center space-y-2">
-            <p className="text-sm font-medium text-destructive">Failed to load your notification preferences</p>
-            <p className="text-xs text-muted-foreground">{(error as Error | null)?.message}</p>
-            <button type="button" className="text-xs text-primary hover:underline" onClick={() => refetch()}>
-              Try again
-            </button>
-          </CardContent>
-        </Card>
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : (
         <Card>
           <CardContent className="p-0 divide-y">

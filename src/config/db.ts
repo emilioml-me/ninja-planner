@@ -17,11 +17,22 @@ if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is required');
 }
 
+// L37: bound every query. A server-side `statement_timeout` can't be passed as a connection
+// startup parameter here - PgBouncer (transaction pooling on ninja-db001) rejects unknown startup
+// parameters - so this is node-pg's client-side query_timeout: the promise rejects and pool.query
+// destroys the client instead of waiting forever. For a server-side cap as well, set it on the DB
+// role (ALTER ROLE <app_user> SET statement_timeout = '30s'); long-running jobs use SET LOCAL.
+function queryTimeoutMs(): number {
+  const raw = Number(process.env.DB_QUERY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+}
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,
+  query_timeout: queryTimeoutMs(),
 });
 
 pool.on('error', (err) => {

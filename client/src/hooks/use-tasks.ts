@@ -14,30 +14,36 @@ const EMPTY_TASKS: Task[] = [];
 
 /**
  * Server-reported total (X-Total-Count) per fetched list. Kept beside the array rather than
- * wrapping it so the ['/api/tasks'] cache entry stays a plain Task[] (CommandPalette reads it).
+ * wrapping it so the ['/api/tasks'] cache entry stays a plain Task[].
  */
 const totals = new WeakMap<Task[], number>();
 
 function listState(data: Task[] | undefined) {
   const tasks = data ?? EMPTY_TASKS;
-  const total = totals.get(tasks) ?? tasks.length;
-  return { tasks, total, truncated: total > tasks.length || tasks.length >= TASK_LIST_LIMIT };
+  const reported = totals.get(tasks);
+  // With the server total we know exactly whether rows were cut off (a workspace with exactly
+  // TASK_LIST_LIMIT tasks is complete). Without it, a full page is the only hint.
+  const total = reported ?? tasks.length;
+  const truncated = reported !== undefined ? reported > tasks.length : tasks.length >= TASK_LIST_LIMIT;
+  return { tasks, total, truncated };
 }
 
 function useFetchTaskList() {
   const { apiRequestWithHeaders } = useApiClient();
   return async (url: string): Promise<Task[]> => {
     const { data, headers } = await apiRequestWithHeaders<Task[]>('GET', url);
-    const header = Number(headers.get('X-Total-Count'));
-    if (Number.isFinite(header) && header > 0) totals.set(data, header);
+    const raw = headers.get('X-Total-Count');
+    const header = raw == null || raw === '' ? NaN : Number(raw);
+    if (Number.isFinite(header) && header >= 0) totals.set(data, header);
     return data;
   };
 }
 
 /**
  * Workspace task list. Keyed ['/api/tasks'] so every task mutation's
- * invalidateQueries({ queryKey: ['/api/tasks'] }) refreshes it, and so CommandPalette can read
- * the cached list with getQueryData(['/api/tasks']).
+ * invalidateQueries({ queryKey: ['/api/tasks'] }) refreshes it. This is the ONLY reader of the
+ * exact ['/api/tasks'] key: any other fetch on that key (different limit, no X-Total-Count
+ * bookkeeping) would silently replace this list, so pickers must use this hook too.
  */
 export function useTaskList(options: { enabled?: boolean } = {}) {
   const fetchList = useFetchTaskList();

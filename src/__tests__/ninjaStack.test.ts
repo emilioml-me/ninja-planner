@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from 'vitest';
 import request from 'supertest';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -11,6 +11,7 @@ vi.mock('../config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 vi.mock('@clerk/backend', () => ({
+  verifyToken: vi.fn(),
   createClerkClient: vi.fn(() => ({ verifyToken: vi.fn() })),
 }));
 vi.mock('../middleware/auth.js', () => ({
@@ -19,12 +20,13 @@ vi.mock('../middleware/auth.js', () => ({
     next();
   },
 }));
-vi.mock('../middleware/requireWorkspace.js', () => ({
-  requireWorkspace: (req: any, _res: any, next: any) => {
+vi.mock('../middleware/requireWorkspace.js', () => {
+  const stub = (req: any, _res: any, next: any) => {
     req.workspace = { id: 'ws_test', clerk_org_id: 'org_test' };
     next();
-  },
-}));
+  };
+  return { requireWorkspace: stub, requireWorkspaceAllowViewerWrites: stub };
+});
 vi.mock('../middleware/requireAdmin.js', () => ({
   requireAdmin: (_req: any, _res: any, next: any) => next(),
 }));
@@ -38,6 +40,12 @@ beforeAll(async () => {
   process.env.NODE_ENV             = 'test';
   const { createApp } = await import('../app.js');
   app = createApp();
+});
+
+beforeEach(() => {
+  // mockReset drops unconsumed mockResolvedValueOnce values (clearAllMocks keeps them queued).
+  mockQuery.mockReset();
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 });
 
 afterEach(() => {

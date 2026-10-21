@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query';
 import { isBefore, isToday, startOfDay, addDays, format } from 'date-fns';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { useMembers } from '@/hooks/use-members';
-import { useAssignedTasks } from '@/hooks/use-tasks';
+import { useMyRole } from '@/hooks/use-is-admin';
+import { TASK_LIST_LIMIT } from '@/hooks/use-tasks';
 import { TaskFormDialog, type Task } from '@/components/TaskFormDialog';
+import { QueryError } from '@/components/QueryError';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -26,6 +28,8 @@ interface TaskTemplate {
   tags: string[];
   checklist: { id: string; text: string; done: boolean }[];
 }
+
+const OPEN_STATUSES = ['todo', 'in_progress', 'blocked'] as const;
 
 const STATUS_LABEL: Record<string, string> = {
   todo: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked',
@@ -105,7 +109,7 @@ function TaskCard({ task, onClick }: { task: Task; onClick: () => void }) {
 
 export default function MyTasks() {
   const { userId } = useAuth();
-  const { apiRequest } = useApiClient();
+  const { apiRequest, apiRequestWithHeaders } = useApiClient();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const { members } = useMembers();
@@ -115,19 +119,58 @@ export default function MyTasks() {
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
 
   // Filtered server-side (?assignee=) -- filtering the capped workspace-wide list client-side
-  // silently dropped the user's tasks once the workspace had more than the list cap.
-  const { tasks, isLoading, truncated, total: totalTasks } = useAssignedTasks(userId);
+  // silently dropped the user's tasks once the workspace had more than the list cap. Open
+  // statuses are fetched separately (the API filters one status at a time) so done tasks can't
+  // consume the cap; done tasks are only counted (limit=1 + X-Total-Count).
+  const openQueries = useQueries({
+    queries: OPEN_STATUSES.map((status) => ({
+      queryKey: ['/api/tasks', 'assignee', userId, 'status', status],
+      queryFn: async () => {
+        const { data, headers } = await apiRequestWithHeaders<Task[]>(
+          'GET',
+          `/api/tasks?assignee=${encodeURIComponent(userId ?? '')}&status=${status}&limit=${TASK_LIST_LIMIT}`,
+        );
+        const total = Number(headers.get('X-Total-Count'));
+        return { tasks: data, total: Number.isFinite(total) && total > 0 ? total : data.length };
+      },
+      enabled: !!userId,
+    })),
+  });
+  const doneCountQuery = useQuery<number>({
+    queryKey: ['/api/tasks', 'assignee', userId, 'status', 'done', 'count'],
+    queryFn: async () => {
+      const { data, headers } = await apiRequestWithHeaders<Task[]>(
+        'GET',
+        `/api/tasks?assignee=${encodeURIComponent(userId ?? '')}&status=done&limit=1`,
+      );
+      const total = Number(headers.get('X-Total-Count'));
+      return Number.isFinite(total) && headers.get('X-Total-Count') !== null ? total : data.length;
+    },
+    enabled: !!userId,
+  });
+
+  const isLoading = !userId || openQueries.some((q) => q.isLoading);
+  const failedQuery = openQueries.find((q) => q.isError && !q.data);
+  const tasks: Task[] = openQueries.flatMap((q) => q.data?.tasks ?? []);
+  const truncatedStatuses = openQueries.filter((q) => q.data && q.data.total > q.data.tasks.length).length;
+  const totalOpen = openQueries.reduce((s, q) => s + (q.data?.total ?? 0), 0);
+  const truncated = truncatedStatuses > 0;
+
+  const { isViewer, isLoading: roleLoading } = useMyRole();
+  const canEdit = !roleLoading && !isViewer;
 
   const { data: templates = [] } = useQuery<TaskTemplate[]>({
     queryKey: ['/api/task-templates'],
     queryFn: () => apiRequest<TaskTemplate[]>('GET', '/api/task-templates'),
+    enabled: canEdit,
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, ...data }: Partial<Task> & { id: string; title: string }) =>
+    mutationFn: ({ id, ...data }: Partial<Task> & { id: string }) =>
       apiRequest<Task>('PATCH', `/api/tasks/${id}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setDialogOpen(false);
       setEditingTask(null);
       toast({ title: 'Task updated' });
@@ -140,6 +183,7 @@ export default function MyTasks() {
       apiRequest<Task>('POST', '/api/tasks', data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setDialogOpen(false);
       toast({ title: 'Task created' });
     },
@@ -192,9 +236,7 @@ export default function MyTasks() {
     setDialogOpen(true);
   };
 
-  const myTasks = tasks.filter(
-    (t) => t.assignee_clerk_id === userId && t.status !== 'done',
-  );
+  const myTasks = tasks.filter((t) => t.assignee_clerk_id === userId);
 
   // Compare LOCAL calendar days as YYYY-MM-DD strings so every task lands in exactly one group
   // (previously a task due exactly 7 days out matched neither "This Week" nor "Later").
@@ -214,19 +256,19 @@ export default function MyTasks() {
     { label: 'Later',       icon: Inbox,     iconClass: 'text-muted-foreground', tasks: later },
   ];
 
-  const handleSubmit = (data: Partial<Task> & { title: string }) => {
+  const handleSubmit = (data: Partial<Task>) => {
     // editingTask?.id (not just editingTask) — the template picker sets editingTask to a
     // draft object with id: '' to pre-fill the create form, which must still create, not update.
     if (editingTask?.id) {
       updateMutation.mutate({ ...data, id: editingTask.id });
     } else {
       // Respect the assignee chosen in the form (it is pre-filled with the current user).
-      createMutation.mutate(data);
+      createMutation.mutate({ ...data, title: data.title ?? '' });
     }
   };
 
-  const totalActive = myTasks.length;
-  const doneCount = tasks.filter((t) => t.assignee_clerk_id === userId && t.status === 'done').length;
+  const totalActive = Math.max(totalOpen, myTasks.length);
+  const doneCount = doneCountQuery.data ?? 0;
 
   return (
     <div className="flex flex-col h-full">
@@ -241,7 +283,7 @@ export default function MyTasks() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {templates.length > 0 && (
+          {canEdit && templates.length > 0 && (
             <Button
               size="sm"
               variant="outline"
@@ -252,14 +294,16 @@ export default function MyTasks() {
               <span className="hidden sm:inline">From Template</span>
             </Button>
           )}
-          <Button
-            size="sm"
-            className="gap-2"
-            onClick={openNewTask}
-          >
-            <Plus className="h-4 w-4" />
-            New Task
-          </Button>
+          {canEdit && (
+            <Button
+              size="sm"
+              className="gap-2"
+              onClick={openNewTask}
+            >
+              <Plus className="h-4 w-4" />
+              New Task
+            </Button>
+          )}
         </div>
       </div>
 
@@ -267,10 +311,15 @@ export default function MyTasks() {
         {truncated && (
           <div className="mb-4 flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-900 dark:bg-yellow-950/40 dark:text-yellow-300">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            Showing {tasks.length} of {Math.max(totalTasks, tasks.length)} tasks assigned to you; the rest are not listed.
+            Showing {tasks.length} of {Math.max(totalOpen, tasks.length)} open tasks assigned to you; the rest are not listed.
           </div>
         )}
-        {isLoading ? (
+        {failedQuery ? (
+          <QueryError
+            error={failedQuery.error}
+            onRetry={() => { for (const q of openQueries) if (q.isError) void q.refetch(); }}
+          />
+        ) : isLoading ? (
           <div className="space-y-6">
             {[1, 2, 3].map((i) => (
               <div key={i} className="space-y-2">
@@ -284,10 +333,14 @@ export default function MyTasks() {
           <div className="flex flex-col items-center justify-center h-64 gap-3 text-center">
             <CheckCircle2 className="h-10 w-10 text-muted-foreground/30" />
             <p className="text-sm font-medium">No tasks assigned to you</p>
-            <p className="text-xs text-muted-foreground">Create a task or ask a teammate to assign one.</p>
-            <Button size="sm" className="mt-2 gap-2" onClick={openNewTask}>
-              <Plus className="h-4 w-4" /> Create task
-            </Button>
+            <p className="text-xs text-muted-foreground">
+              {canEdit ? 'Create a task or ask a teammate to assign one.' : 'Tasks assigned to you will show up here.'}
+            </p>
+            {canEdit && (
+              <Button size="sm" className="mt-2 gap-2" onClick={openNewTask}>
+                <Plus className="h-4 w-4" /> Create task
+              </Button>
+            )}
           </div>
         ) : myTasks.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3 text-center">
@@ -296,9 +349,11 @@ export default function MyTasks() {
             <p className="text-xs text-muted-foreground">
               You have no open tasks — {doneCount} completed.
             </p>
-            <Button size="sm" variant="outline" className="mt-2 gap-2" onClick={openNewTask}>
-              <Plus className="h-4 w-4" /> Create task
-            </Button>
+            {canEdit && (
+              <Button size="sm" variant="outline" className="mt-2 gap-2" onClick={openNewTask}>
+                <Plus className="h-4 w-4" /> Create task
+              </Button>
+            )}
           </div>
         ) : (
           <div className="max-w-2xl space-y-6">

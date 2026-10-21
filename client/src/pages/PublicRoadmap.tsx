@@ -1,8 +1,22 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ThumbsUp, ArrowUpDown } from 'lucide-react';
+import { ThumbsUp, ArrowUpDown, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { SeoHead } from '@/components/SeoHead';
+import { baseHeaders } from '@/lib/api';
+
+/** Fetch failure carrying the HTTP status (0 = network error) so 404 can be told apart. */
+class PublicFetchError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'PublicFetchError';
+    this.status = status;
+  }
+}
+
+const errorStatus = (err: unknown): number => (err instanceof PublicFetchError ? err.status : 0);
 
 interface RoadmapItem {
   id: string;
@@ -77,24 +91,32 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
     setVotedIds(loadVotedIds(token));
   }, [token]);
 
-  const { data, isLoading, isError } = useQuery<PublicRoadmapData>({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<PublicRoadmapData>({
     queryKey: ['/public/roadmap', token],
     queryFn: async () => {
-      const res = await fetch(`/public/roadmap/${token}`);
-      if (!res.ok) throw new Error('Not found');
+      let res: Response;
+      try {
+        res = await fetch(`/public/roadmap/${encodeURIComponent(token)}`, { headers: baseHeaders() });
+      } catch {
+        throw new PublicFetchError(0, 'Network error');
+      }
+      if (!res.ok) throw new PublicFetchError(res.status, res.status === 404 ? 'Not found' : `Request failed (${res.status})`);
       return res.json();
     },
-    retry: false,
-    // The footer promises the page updates automatically.
-    refetchInterval: 60_000,
+    // A 404 is final (link revoked or never existed); transient failures get one more try.
+    retry: (failureCount, err) => errorStatus(err) !== 404 && failureCount < 1,
+    retryDelay: 5_000,
+    // The footer promises the page updates automatically; stop polling once the link is gone.
+    refetchInterval: (query) => (errorStatus(query.state.error) === 404 ? false : 60_000),
   });
+  const status = isError ? errorStatus(error) : null;
 
   // Generic vote toggler — hits POST or DELETE depending on current state
   const voteMutation = useMutation({
     mutationFn: async ({ itemId, removing }: { itemId: string; removing: boolean }) => {
       const res = await fetch(`/public/roadmap/${token}/votes/${itemId}`, {
         method: removing ? 'DELETE' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...baseHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ visitor_id: visitorId }),
       });
       if (!res.ok) {
@@ -145,19 +167,53 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
     voteMutation.mutate({ itemId, removing });
   }, [visitorId, votedIds, voteMutation]);
 
+  // Shared links must never be indexed.
+  const seo = (
+    <SeoHead
+      title={data ? `${data.workspace.name} roadmap` : 'Public roadmap'}
+      description="A shared product roadmap."
+      noIndex
+    />
+  );
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
+        {seo}
         <p className="text-sm text-muted-foreground">Loading roadmap…</p>
       </div>
     );
   }
 
-  if (isError || !data) {
+  // 404 = revoked/unknown link: show it even if an older copy is cached.
+  if (status === 404) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-background gap-3">
+      <div className="min-h-screen flex flex-col items-center justify-center bg-background gap-3 px-6 text-center">
+        {seo}
         <p className="text-lg font-semibold">Roadmap not found</p>
         <p className="text-sm text-muted-foreground">This link may have expired or been revoked.</p>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-background gap-3 px-6 text-center">
+        {seo}
+        <p className="text-lg font-semibold">Couldn't load this roadmap</p>
+        <p className="text-sm text-muted-foreground">
+          {status === 429
+            ? 'Too many requests right now. Please wait a minute and try again.'
+            : 'Something went wrong. Please check your connection and try again.'}
+        </p>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted disabled:opacity-50"
+        >
+          {isFetching ? 'Retrying…' : 'Try again'}
+        </button>
       </div>
     );
   }
@@ -165,13 +221,23 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
   const grouped = STATUS_ORDER.reduce<Record<string, RoadmapItem[]>>((acc, s) => {
     const items = data.items.filter((i) => i.status === s);
     acc[s] = sortByVotes
-      ? [...items].sort((a, b) => b.vote_count - a.vote_count)
+      ? [...items].sort((a, b) => Number(b.vote_count) - Number(a.vote_count))
       : items;
     return acc;
   }, {});
 
   return (
     <div className="min-h-screen bg-background">
+      {seo}
+      {/* A failed background refresh keeps the last loaded roadmap on screen. */}
+      {isError && (
+        <div className="flex items-center justify-center gap-2 px-6 py-2 text-xs bg-amber-50 text-amber-800 border-b">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          {status === 429
+            ? 'Updates are paused for a moment (too many requests). Showing the last loaded version.'
+            : "Couldn't refresh the roadmap. Showing the last loaded version."}
+        </div>
+      )}
       {/* Header */}
       <div className="border-b bg-card">
         <div className="max-w-5xl mx-auto px-6 py-8">

@@ -38,7 +38,8 @@ export async function getEpics(workspaceId: string, status?: string): Promise<Ep
      GROUP BY e.id
      ORDER BY
        CASE e.status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
-       e.created_at DESC`,
+       e.created_at DESC
+     LIMIT 500`,
     values,
   );
   return result.rows;
@@ -54,7 +55,7 @@ export async function getEpicById(id: string, workspaceId: string): Promise<Epic
 
 export async function createEpic(
   workspaceId: string,
-  data: { title: string; description?: string; status?: string; color?: string; external_ref?: string | null },
+  data: { title: string; description?: string | null; status?: string; color?: string; external_ref?: string | null },
   createdBy: string,
   db: Pick<import('pg').PoolClient, 'query'> = pool,
 ): Promise<Epic> {

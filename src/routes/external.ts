@@ -1,11 +1,17 @@
 // External REST API — authenticated via API key (Bearer np_...) instead of Clerk session
 // Mount: /api/external (before requireAuth in app.ts)
 import { Router, type Request } from 'express';
-import { createHash } from 'crypto';
 import { z } from 'zod';
 import { pool } from '../config/db.js';
 import { apiKeyAuth, apiKeyAuthLimiter, requireScope } from '../middleware/apiKeyAuth.js';
-import { createTask, updateTaskWithPrevState, logTaskActivity } from '../services/taskService.js';
+import {
+  createTask,
+  updateTaskWithPrevState,
+  logTaskActivity,
+  isTaskDateInBounds,
+  TASK_DATE_RANGE_MESSAGE,
+} from '../services/taskService.js';
+import { getRequestTz } from '../lib/tz.js';
 import { runTaskStatusEffects } from '../services/taskStatusEffects.js';
 import { fireWebhooks } from '../services/webhookService.js';
 import { dispatchAutomations } from '../services/automationService.js';
@@ -16,38 +22,44 @@ router.use(apiKeyAuthLimiter, apiKeyAuth);
 const STATUS  = ['todo', 'in_progress', 'done', 'blocked'] as const;
 const PRIORITY = ['urgent', 'high', 'medium', 'low'] as const;
 
-// GET /api/external/tasks  [tasks:read]
+const taskDate = () => z.string().date().refine(isTaskDateInBounds, { message: TASK_DATE_RANGE_MESSAGE });
+
+const listQuerySchema = z.object({
+  limit:  z.coerce.number().int().min(1).max(500).default(200),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+// GET /api/external/tasks?limit=&offset=  [tasks:read]
+// Paginated (default 200, max 500 per page, newest first); X-Total-Count carries the total.
 router.get('/tasks', requireScope('tasks:read'), async (req, res, next) => {
   try {
+    const parsed = listQuerySchema.safeParse(req.query);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
+    const { limit, offset } = parsed.data;
     const { rows } = await pool.query(
       `SELECT id, title, status, priority, assignee_clerk_id, due_date, story_points, sprint_id, created_at, updated_at
        FROM tasks
        WHERE workspace_id = $1 AND deleted_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 200`,
-      [req.workspace.id],
+       ORDER BY created_at DESC, id
+       LIMIT $2 OFFSET $3`,
+      [req.workspace.id, limit, offset],
     );
+    const total = rows.length < limit && (rows.length > 0 || offset === 0)
+      ? offset + rows.length
+      : parseInt((await pool.query<{ count: string }>(
+        'SELECT COUNT(*) AS count FROM tasks WHERE workspace_id = $1 AND deleted_at IS NULL',
+        [req.workspace.id],
+      )).rows[0]?.count ?? '0', 10);
+    res.setHeader('X-Total-Count', String(total));
     res.json(rows);
   } catch (err) { next(err); }
 });
 
 // Actor recorded for writes made through an API key (tasks.created_by and
-// task_activity.actor_clerk_id are NOT NULL; the insert previously omitted created_by, so every
-// POST /api/external/tasks failed with a 500). Uses the key's id when available so activity is
-// attributable to a specific key.
-async function apiKeyActor(req: Request): Promise<string> {
-  const keyId = (req.apiKey as { id?: string } | undefined)?.id;
-  if (keyId) return `apikey:${keyId}`;
-  const header = req.headers['authorization'] ?? '';
-  const key = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (key) {
-    const { rows } = await pool.query<{ id: string }>(
-      'SELECT id FROM api_keys WHERE key_hash = $1 AND workspace_id = $2',
-      [createHash('sha256').update(key).digest('hex'), req.workspace.id],
-    );
-    if (rows[0]) return `apikey:${rows[0].id}`;
-  }
-  return 'apikey';
+// task_activity.actor_clerk_id are NOT NULL). apiKeyAuth always sets req.apiKey before these
+// routes run, so activity is attributable to a specific key.
+function apiKeyActor(req: Request): string {
+  return req.apiKey?.id ? `apikey:${req.apiKey.id}` : 'apikey';
 }
 
 // POST /api/external/tasks  [tasks:write]
@@ -57,11 +69,11 @@ router.post('/tasks', requireScope('tasks:write'), async (req, res, next) => {
       title:    z.string().min(1).max(500),
       status:   z.enum(STATUS).default('todo'),
       priority: z.enum(PRIORITY).default('medium'),
-      due_date: z.string().date().nullable().optional(),
+      due_date: taskDate().nullable().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-    const actor = await apiKeyActor(req);
+    const actor = apiKeyActor(req);
     const task = await createTask(req.workspace.id, parsed.data, actor);
     await logTaskActivity(task.id, actor, 'created', { status: task.status, source: 'api' });
     fireWebhooks(req.workspace.id, 'task.created', { task });
@@ -86,7 +98,7 @@ router.patch('/tasks/:id', requireScope('tasks:write'), async (req, res, next) =
       title:    z.string().min(1).max(500).optional(),
       status:   z.enum(STATUS).optional(),
       priority: z.enum(PRIORITY).optional(),
-      due_date: z.string().date().nullable().optional(),
+      due_date: taskDate().nullable().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
@@ -97,21 +109,25 @@ router.patch('/tasks/:id', requireScope('tasks:write'), async (req, res, next) =
     // automations and goal milestones, and shows up in burndown/changelog.
     const result = await updateTaskWithPrevState(req.params.id, req.workspace.id, parsed.data);
     if (!result) { res.status(404).json({ error: 'Task not found' }); return; }
-    const { task, prevStatus } = result;
-    const actor = await apiKeyActor(req);
+    const { task, prevStatus, changed } = result;
+    const actor = apiKeyActor(req);
 
-    const statusChanged = await runTaskStatusEffects({
-      workspaceId: req.workspace.id,
-      actorUserId: actor,
-      task,
-      prevStatus,
-      newStatus: task.status,
-      source: 'external',
-      activityPayload: parsed.data as Record<string, unknown>,
-    });
-    if (!statusChanged) {
-      await logTaskActivity(task.id, actor, 'updated', parsed.data as Record<string, unknown>);
-      fireWebhooks(req.workspace.id, 'task.updated', { task });
+    // Nothing logged or announced when every sent value equals the stored one.
+    if (Object.keys(changed).length > 0) {
+      const statusChanged = await runTaskStatusEffects({
+        workspaceId: req.workspace.id,
+        actorUserId: actor,
+        task,
+        prevStatus,
+        newStatus: task.status,
+        source: 'external',
+        activityPayload: changed,
+        tz: getRequestTz(req),
+      });
+      if (!statusChanged) {
+        await logTaskActivity(task.id, actor, 'updated', changed);
+        fireWebhooks(req.workspace.id, 'task.updated', { task });
+      }
     }
 
     res.json({

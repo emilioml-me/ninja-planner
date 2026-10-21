@@ -13,12 +13,25 @@ export interface WeeklyReview {
   updated_at: Date;
 }
 
-export async function getReviews(workspaceId: string, limit = 200): Promise<WeeklyReview[]> {
-  const result = await pool.query<WeeklyReview>(
-    'SELECT * FROM weekly_reviews WHERE workspace_id = $1 ORDER BY week_start DESC LIMIT $2',
-    [workspaceId, limit],
-  );
-  return result.rows;
+/** Page of reviews (newest week first) plus the workspace's total review count. */
+export async function getReviews(
+  workspaceId: string,
+  limit = 100,
+  offset = 0,
+): Promise<{ rows: WeeklyReview[]; total: number }> {
+  const [result, count] = await Promise.all([
+    pool.query<WeeklyReview>(
+      `SELECT * FROM weekly_reviews WHERE workspace_id = $1
+       ORDER BY week_start DESC, created_at DESC, id
+       LIMIT $2 OFFSET $3`,
+      [workspaceId, limit, offset],
+    ),
+    pool.query<{ total: number }>(
+      'SELECT COUNT(*)::int AS total FROM weekly_reviews WHERE workspace_id = $1',
+      [workspaceId],
+    ),
+  ]);
+  return { rows: result.rows, total: count.rows[0]?.total ?? 0 };
 }
 
 export async function createReview(

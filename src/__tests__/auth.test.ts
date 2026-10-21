@@ -17,11 +17,12 @@ vi.mock('@clerk/backend', () => ({
   createClerkClient: vi.fn(() => ({})),
 }));
 // requireWorkspace returns 403 — but auth middleware runs first and returns 401
-vi.mock('../middleware/requireWorkspace.js', () => ({
-  requireWorkspace: (_req: any, res: any, _next: any) => {
+vi.mock('../middleware/requireWorkspace.js', () => {
+  const stub = (_req: any, res: any, _next: any) => {
     res.status(403).json({ error: 'workspace_required' });
-  },
-}));
+  };
+  return { requireWorkspace: stub, requireWorkspaceAllowViewerWrites: stub };
+});
 
 let app: any;
 const ORIGINAL_ENV = { ...process.env };

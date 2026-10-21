@@ -32,7 +32,7 @@ const PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
 const createSchema = z.object({
   name:        z.string().min(1).max(200),
   title:       z.string().min(1).max(500),
-  description: z.string().optional(),
+  description: z.string().max(10000).nullable().optional(),
   priority:    z.enum(PRIORITIES).optional(),
   tags:        z.array(z.string().max(50)).max(20).optional(),
   checklist:   z.array(checklistItemSchema).max(50).optional(),

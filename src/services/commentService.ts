@@ -10,14 +10,21 @@ export interface TaskComment {
   updated_at: Date;
 }
 
+/** Most recent comments returned per thread (oldest-first within that window). */
+export const COMMENT_LIST_LIMIT = 500;
+
 export async function getComments(taskId: string, workspaceId: string): Promise<TaskComment[]> {
   const result = await pool.query<TaskComment>(
-    `SELECT tc.*
-     FROM task_comments tc
-     JOIN tasks t ON t.id = tc.task_id
-     WHERE tc.task_id = $1 AND t.workspace_id = $2 AND t.deleted_at IS NULL
-     ORDER BY tc.created_at`,
-    [taskId, workspaceId],
+    `SELECT * FROM (
+       SELECT tc.*
+       FROM task_comments tc
+       JOIN tasks t ON t.id = tc.task_id
+       WHERE tc.task_id = $1 AND t.workspace_id = $2 AND t.deleted_at IS NULL
+       ORDER BY tc.created_at DESC
+       LIMIT $3
+     ) recent
+     ORDER BY created_at`,
+    [taskId, workspaceId, COMMENT_LIST_LIMIT],
   );
   return result.rows;
 }
@@ -69,12 +76,16 @@ export interface EpicComment {
 
 export async function getEpicComments(epicId: string, workspaceId: string): Promise<EpicComment[]> {
   const result = await pool.query<EpicComment>(
-    `SELECT ec.*
-     FROM epic_comments ec
-     JOIN epics e ON e.id = ec.epic_id
-     WHERE ec.epic_id = $1 AND e.workspace_id = $2
-     ORDER BY ec.created_at`,
-    [epicId, workspaceId],
+    `SELECT * FROM (
+       SELECT ec.*
+       FROM epic_comments ec
+       JOIN epics e ON e.id = ec.epic_id
+       WHERE ec.epic_id = $1 AND e.workspace_id = $2
+       ORDER BY ec.created_at DESC
+       LIMIT $3
+     ) recent
+     ORDER BY created_at`,
+    [epicId, workspaceId, COMMENT_LIST_LIMIT],
   );
   return result.rows;
 }
@@ -91,23 +102,6 @@ export async function createEpicComment(
     [epicId, authorId, body.trim()],
   );
   return result.rows[0];
-}
-
-export async function deleteEpicComment(
-  commentId: string,
-  authorId: string,
-  workspaceId: string,
-): Promise<boolean> {
-  const result = await pool.query(
-    `DELETE FROM epic_comments ec
-     USING epics e
-     WHERE ec.id = $1
-       AND ec.author_clerk_id = $2
-       AND ec.epic_id = e.id
-       AND e.workspace_id = $3`,
-    [commentId, authorId, workspaceId],
-  );
-  return (result.rowCount ?? 0) > 0;
 }
 
 export interface WorkloadRow {

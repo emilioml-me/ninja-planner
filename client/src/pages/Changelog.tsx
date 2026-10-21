@@ -3,10 +3,10 @@ import { useQuery } from '@tanstack/react-query';
 import { useApiClient } from '@/lib/api';
 import { safeFormat, todayLocal } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { QueryError } from '@/components/QueryError';
 import { History, Download, CheckCircle2, Layers, Zap } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
 import { cn } from '@/lib/utils';
@@ -18,6 +18,8 @@ interface ChangelogTask {
   story_points: number | null;
   assignee_name: string | null;
   completed_at: string;
+  /** Completion day (YYYY-MM-DD) in the requester's timezone. */
+  completed_date?: string;
   sprint_name: string | null;
   epic_title: string | null;
   epic_color: string | null;
@@ -67,17 +69,21 @@ export default function Changelog() {
   if (from) params.set('from', from);
   if (to) params.set('to', to);
   const qs = params.toString();
+  const rangeInvalid = !!from && !!to && from > to;
 
-  const { data, isLoading, isError, error } = useQuery<ChangelogResponse>({
+  const { data, isLoading, isError, error, refetch } = useQuery<ChangelogResponse>({
     queryKey: ['/api/changelog', from, to],
     queryFn: () => apiRequest('GET', `/api/changelog${qs ? `?${qs}` : ''}`),
+    // An inverted range can't match anything; don't request it (the inline message explains).
+    enabled: !rangeInvalid,
   });
 
   const exportCsv = () => {
     if (!data) return;
     const rows = data.groups.flatMap((g) =>
       g.tasks.map((t) => ({
-        completed_at: t.completed_at.slice(0, 10),
+        // Calendar day in the user's timezone (slice(0, 10) of the ISO timestamp is the UTC day).
+        completed_at: t.completed_date ?? safeFormat(t.completed_at, 'yyyy-MM-dd'),
         title:        t.title,
         priority:     t.priority,
         story_points: t.story_points ?? '',
@@ -101,14 +107,14 @@ export default function Changelog() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1.5">
-            <label className="text-xs text-muted-foreground">From</label>
-            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="h-8 w-36 text-xs" />
+            <label htmlFor="changelog-from" className="text-xs text-muted-foreground">From</label>
+            <Input id="changelog-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="h-8 w-36 text-xs" />
           </div>
           <div className="flex items-center gap-1.5">
-            <label className="text-xs text-muted-foreground">To</label>
-            <Input type="date" value={to}   onChange={(e) => setTo(e.target.value)}   className="h-8 w-36 text-xs" />
+            <label htmlFor="changelog-to" className="text-xs text-muted-foreground">To</label>
+            <Input id="changelog-to" type="date" value={to}   onChange={(e) => setTo(e.target.value)}   className="h-8 w-36 text-xs" />
           </div>
-          {data && data.total_tasks > 0 && (
+          {data && !rangeInvalid && data.total_tasks > 0 && (
             <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={exportCsv}>
               <Download className="h-3.5 w-3.5" /> Export
             </Button>
@@ -116,9 +122,13 @@ export default function Changelog() {
         </div>
       </div>
 
+      {rangeInvalid && (
+        <p className="text-xs text-destructive" role="alert">"From" must be on or before "To".</p>
+      )}
+
       {/* Summary strip */}
-      {data && (
-        <div className="flex gap-6 text-sm">
+      {data && !rangeInvalid && (
+        <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
           <span>
             <span className="font-semibold text-foreground">{data.total_tasks}</span>
             <span className="text-muted-foreground ml-1">tasks shipped</span>
@@ -134,25 +144,21 @@ export default function Changelog() {
           </span>
         </div>
       )}
-      {data?.truncated && (
+      {data?.truncated && !rangeInvalid && (
         <p className="text-xs text-amber-600">
           Showing only the most recent {data.total_tasks} completed tasks in this range — narrow the date range to see everything.
         </p>
       )}
 
       {/* Groups */}
-      {isLoading ? (
+      {rangeInvalid ? null : isLoading ? (
         <div className="space-y-4">
           {[1, 2].map((i) => (
             <Card key={i}><CardContent className="pt-4"><Skeleton className="h-32 w-full" /></CardContent></Card>
           ))}
         </div>
-      ) : isError ? (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <History className="h-10 w-10 text-destructive/40 mb-3" />
-          <p className="text-sm font-medium text-destructive">Failed to load changelog</p>
-          <p className="text-xs text-muted-foreground mt-1">{(error as Error | null)?.message ?? 'Please try again.'}</p>
-        </div>
+      ) : isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : !data || data.groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <History className="h-10 w-10 text-muted-foreground/30 mb-3" />
@@ -205,7 +211,7 @@ export default function Changelog() {
                           </span>
                         )}
                         <span className="text-[10px] text-muted-foreground shrink-0">
-                          {safeFormat(task.completed_at, 'MMM d')}
+                          {safeFormat(task.completed_date ?? task.completed_at, 'MMM d')}
                         </span>
                       </div>
                     ))}

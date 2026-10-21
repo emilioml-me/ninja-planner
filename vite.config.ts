@@ -19,6 +19,8 @@ export default defineConfig({
       '/api':      { target: 'http://localhost:3206', changeOrigin: true },
       '/health':   { target: 'http://localhost:3206', changeOrigin: true },
       '/webhooks': { target: 'http://localhost:3206', changeOrigin: true },
+      // Unauthenticated share/guest API used by PublicRoadmap (/r/:token) and GuestView (/g/:token)
+      '/public':   { target: 'http://localhost:3206', changeOrigin: true },
     },
   },
 });

@@ -1,11 +1,11 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
-import { requireAdmin } from '../middleware/requireAdmin.js';
+import { ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 import {
   getGoals, getGoalById, createGoal, updateGoal, deleteGoal,
-  getGoalLinks, addGoalLink, removeGoalLink,
+  getGoalLinks, addGoalLink, removeGoalLink, getGoalOwner,
 } from '../services/goalService.js';
 import { dispatchAutomations } from '../services/automationService.js';
 import { fireWebhooks } from '../services/webhookService.js';
@@ -80,9 +80,29 @@ router.patch('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/goals/:id  [admin only]
-router.delete('/:id', requireAdmin, async (req, res, next) => {
+/**
+ * Destructive goal operations (delete goal, unlink items, delete key results) are allowed for
+ * workspace admins and for the goal's creator. Sends 404/403 and returns false otherwise.
+ */
+export async function canManageGoal(
+  req: Request,
+  res: Response,
+  goalId: string,
+): Promise<boolean> {
+  const owner = await getGoalOwner(goalId, req.workspace.id);
+  if (owner === null) { res.status(404).json({ error: 'Goal not found' }); return false; }
+  const isAdmin = !!req.auth.memberRole && ADMIN_ROLES.has(req.auth.memberRole);
+  if (!isAdmin && owner !== req.auth.userId) {
+    res.status(403).json({ error: 'Only admins or the goal owner can do this' });
+    return false;
+  }
+  return true;
+}
+
+// DELETE /api/goals/:id  [admin or goal owner]
+router.delete('/:id', async (req, res, next) => {
   try {
+    if (!(await canManageGoal(req, res, req.params.id))) return;
     const deleted = await deleteGoal(req.params.id, req.workspace.id);
     if (!deleted) { res.status(404).json({ error: 'Goal not found' }); return; }
     res.status(204).send();
@@ -125,9 +145,13 @@ router.post('/:id/links', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/goals/:id/links/:entityId
+// DELETE /api/goals/:id/links/:entityId  [admin or goal owner]
 router.delete('/:id/links/:entityId', async (req, res, next) => {
   try {
+    if (!z.string().uuid().safeParse(req.params.entityId).success) {
+      res.status(400).json({ error: 'Invalid entity id' }); return;
+    }
+    if (!(await canManageGoal(req, res, req.params.id))) return;
     const deleted = await removeGoalLink(req.params.id, req.workspace.id, req.params.entityId);
     if (!deleted) { res.status(404).json({ error: 'Link not found' }); return; }
     res.status(204).send();

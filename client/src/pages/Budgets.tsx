@@ -8,6 +8,7 @@ import { useApiClient } from '@/lib/api';
 import { safeFormat, todayLocal } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { useIsAdmin } from '@/hooks/use-is-admin';
+import { QueryError } from '@/components/QueryError';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -59,22 +60,38 @@ interface BudgetEntry {
 
 const NONE = '__none__';
 
+// An empty number input must be "Required", not silently coerced to 0 (z.coerce turns '' into 0).
+const requiredNumber = (max: number) => z.preprocess(
+  (v) => (v === '' || v === null || v === undefined ? undefined : v),
+  z.coerce.number({ required_error: 'Required', invalid_type_error: 'Must be a number' })
+    .finite('Must be a number')
+    .min(0, 'Must be >= 0')
+    .max(max, `Must be <= ${max.toLocaleString('en-US')}`),
+);
+
+// Mirrors server limits in src/routes/budgets.ts (NUMERIC(14,2) target, 1e9 entry cap).
+const TARGET_AMOUNT_MAX = 999_999_999_999.99;
+const ENTRY_AMOUNT_MAX = 1_000_000_000;
+
 const budgetSchema = z.object({
-  name:          z.string().min(1, 'Required').max(255),
-  description:   z.string().optional(),
-  target_amount: z.coerce.number().min(0, 'Must be ≥ 0'),
-  currency:      z.string().length(3).default('USD'),
+  name:          z.string().trim().min(1, 'Required').max(255),
+  description:   z.string().max(2000, 'Max 2000 characters').optional(),
+  target_amount: requiredNumber(TARGET_AMOUNT_MAX),
+  currency:      z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/, 'Use a 3-letter ISO currency code').default('USD'),
   period_start:  z.string().optional(),
   period_end:    z.string().optional(),
   status:        z.enum(['active', 'closed']).default('active'),
   epic_id:       z.string().default(NONE),
   sprint_id:     z.string().default(NONE),
-});
+}).refine(
+  (d) => !(d.period_start && d.period_end && d.period_start > d.period_end),
+  { message: 'End must be on or after start', path: ['period_end'] },
+);
 type BudgetForm = z.infer<typeof budgetSchema>;
 
 const entrySchema = z.object({
   description: z.string().min(1, 'Required').max(500),
-  amount:      z.coerce.number({ invalid_type_error: 'Must be a number' }).min(0, 'Must be ≥ 0'),
+  amount:      requiredNumber(ENTRY_AMOUNT_MAX),
   category:    z.string().max(100).optional(),
   entry_date:  z.string().min(1, 'Required'),
 });
@@ -154,6 +171,7 @@ function BudgetFormDialog({
             <FormField control={form.control} name="description" render={({ field }) => (
               <FormItem><FormLabel>Description</FormLabel>
                 <FormControl><Textarea rows={2} {...field} /></FormControl>
+                <FormMessage />
               </FormItem>
             )} />
             <div className="grid grid-cols-2 gap-4">
@@ -172,6 +190,9 @@ function BudgetFormDialog({
                       <SelectItem value="EUR">EUR</SelectItem>
                       <SelectItem value="MXN">MXN</SelectItem>
                       <SelectItem value="GBP">GBP</SelectItem>
+                      {field.value && !['USD', 'EUR', 'MXN', 'GBP'].includes(field.value) && (
+                        <SelectItem value={field.value}>{field.value}</SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 </FormItem>
@@ -186,6 +207,7 @@ function BudgetFormDialog({
               <FormField control={form.control} name="period_end" render={({ field }) => (
                 <FormItem><FormLabel>Period End</FormLabel>
                   <FormControl><Input type="date" {...field} /></FormControl>
+                  <FormMessage />
                 </FormItem>
               )} />
             </div>
@@ -252,11 +274,14 @@ function BudgetDetail({ budget }: { budget: Budget }) {
     defaultValues: { description: '', amount: 0, category: '', entry_date: todayLocal() },
   });
 
-  const { data: entries = [] } = useQuery<BudgetEntry[]>({
+  const {
+    data: entriesData, isLoading: entriesLoading, isError: entriesIsError, error: entriesError, refetch: refetchEntries,
+  } = useQuery<BudgetEntry[]>({
     queryKey: ['/api/budgets', budget.id, 'entries'],
     queryFn: () => apiRequest('GET', `/api/budgets/${budget.id}/entries`),
     enabled: expanded,
   });
+  const entries = entriesData ?? [];
 
   const addEntry = useMutation({
     mutationFn: (d: EntryForm) => apiRequest('POST', `/api/budgets/${budget.id}/entries`, d),
@@ -396,7 +421,11 @@ function BudgetDetail({ budget }: { budget: Budget }) {
           )}
 
           <div className="space-y-1 max-h-52 overflow-y-auto">
-            {entries.length === 0 ? (
+            {entriesIsError && !entriesData ? (
+              <QueryError error={entriesError} onRetry={() => refetchEntries()} />
+            ) : entriesLoading ? (
+              <Skeleton className="h-6 w-full" />
+            ) : entries.length === 0 ? (
               <p className="text-xs text-muted-foreground italic">No expenses yet.</p>
             ) : (
               entries.map((e) => (
@@ -409,9 +438,12 @@ function BudgetDetail({ budget }: { budget: Budget }) {
                     <Badge variant="outline" className="text-[9px] px-1 shrink-0">{e.category}</Badge>
                   )}
                   <span className="font-medium shrink-0">{fmt(e.amount, budget.currency)}</span>
-                  {(e.created_by === userId || isAdmin) && (
+                  {/* The server rejects deleting entries from a closed budget (400). */}
+                  {budget.status !== 'closed' && (e.created_by === userId || isAdmin) && (
                     <Button type="button" variant="ghost" size="icon"
-                      className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
+                      aria-label={`Delete expense ${e.description}`}
+                      className="h-5 w-5 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity"
+                      disabled={deleteEntry.isPending}
                       onClick={() => { if (confirm(`Delete expense "${e.description}"?`)) deleteEntry.mutate(e.id); }}>
                       <Trash2 className="h-3 w-3 text-muted-foreground" />
                     </Button>
@@ -435,10 +467,11 @@ export default function Budgets() {
   const [editing, setEditing] = useState<Budget | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Budget | null>(null);
 
-  const { data: budgets = [], isLoading } = useQuery<Budget[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<Budget[]>({
     queryKey: ['/api/budgets'],
     queryFn: () => apiRequest('GET', '/api/budgets'),
   });
+  const budgets = data ?? [];
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/budgets'] });
 
@@ -456,19 +489,19 @@ export default function Budgets() {
   const createMut = useMutation({
     mutationFn: (d: BudgetForm) => apiRequest('POST', '/api/budgets', sanitize(d)),
     onSuccess: () => { invalidate(); setOpen(false); toast({ title: 'Budget created' }); },
-    onError: () => toast({ title: 'Failed to create budget', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create budget', description: err.message, variant: 'destructive' }),
   });
 
   const updateMut = useMutation({
     mutationFn: (d: BudgetForm) => apiRequest('PATCH', `/api/budgets/${editing!.id}`, sanitize(d)),
     onSuccess: () => { invalidate(); setEditing(null); toast({ title: 'Budget updated' }); },
-    onError: () => toast({ title: 'Failed to update budget', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to update budget', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/budgets/${id}`),
     onSuccess: () => { invalidate(); setDeleteTarget(null); toast({ title: 'Budget deleted' }); },
-    onError: () => toast({ title: 'Failed to delete budget', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to delete budget', description: err.message, variant: 'destructive' }),
   });
 
   // Totals are grouped per currency (summing USD + MXN into one number is meaningless) and only
@@ -539,7 +572,9 @@ export default function Budgets() {
       )}
 
       {/* Budget list */}
-      {isLoading ? (
+      {isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
+      ) : isLoading ? (
         <Card><CardContent className="pt-4"><Skeleton className="h-24 w-full" /></CardContent></Card>
       ) : budgets.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 text-center">

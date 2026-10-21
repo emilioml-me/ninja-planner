@@ -4,9 +4,10 @@ import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getSprints, getSprintById, createSprint, updateSprint, deleteSprint, getSprintTasks,
+  snapshotSprintCommitment, type Sprint,
 } from '../services/sprintService.js';
 import { pool } from '../config/db.js';
-import { createNotification } from '../services/notificationService.js';
+import { getRequestTz, todayInTz } from '../lib/tz.js';
 import { dispatchAutomations } from '../services/automationService.js';
 import { fireWebhooks } from '../services/webhookService.js';
 import { logger } from '../config/logger.js';
@@ -70,11 +71,26 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The alert check piggybacks on GET traffic; throttle it per workspace (per process) so every
+// sprint-list load doesn't re-run the admin query + one insert per admin per ending sprint.
+const SPRINT_ALERT_INTERVAL_MS = 10 * 60 * 1000;
+const lastSprintAlertCheck = new Map<string, number>();
+
 async function checkSprintEndAlerts(
   workspaceId: string,
   sprints: Awaited<ReturnType<typeof getSprints>>,
 ): Promise<void> {
   const now = Date.now();
+  const last = lastSprintAlertCheck.get(workspaceId);
+  if (last !== undefined && now - last < SPRINT_ALERT_INTERVAL_MS) return;
+  lastSprintAlertCheck.set(workspaceId, now);
+  if (lastSprintAlertCheck.size > 10_000) {
+    // Bounded memory: drop entries old enough not to throttle anything anymore.
+    for (const [id, ts] of lastSprintAlertCheck) {
+      if (now - ts >= SPRINT_ALERT_INTERVAL_MS) lastSprintAlertCheck.delete(id);
+    }
+  }
+
   const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
 
   // Query all workspace admins to notify (not just the requesting user)
@@ -125,7 +141,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
-    res.status(201).json(await createSprint(req.workspace.id, parsed.data, req.auth.userId));
+    const sprint = await createSprint(req.workspace.id, parsed.data, req.auth.userId);
+    // Creating straight into active/completed is a transition from 'planning' — run the same
+    // side effects PATCH would (commitment snapshot, quests, sprint.completed).
+    await runSprintTransitionEffects(req.workspace.id, sprint, 'planning');
+    res.status(201).json(sprint);
   } catch (err) { next(err); }
 });
 
@@ -163,65 +183,11 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     const updated = await updateSprint(req.params.id, req.workspace.id, parsed.data);
     if (!updated) { res.status(404).json({ error: 'Sprint not found' }); return; }
     const { prev_status: prevStatus, ...sprint } = updated;
-    const statusChanged = sprint.status !== prevStatus;
 
-    // Phase 5 — Sprint → Quest Sync: when a sprint TRANSITIONS to active, create a ninja-task
-    // quest for every participating (non-viewer) workspace member who doesn't already have one
-    // for this sprint. Gated on the transition (not on the payload merely containing
-    // status='active') so ordinary edits of an active sprint don't mint duplicate quests.
-    // Fire-and-forget; never blocks the response.
-    if (statusChanged && sprint.status === 'active' && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
-      pool.query<{ clerk_user_id: string }>(
-        `SELECT wm.clerk_user_id
-         FROM workspace_members wm
-         WHERE wm.workspace_id = $1
-           AND wm.role <> 'viewer'
-           AND NOT EXISTS (
-             SELECT 1 FROM sprint_quests sq
-             WHERE sq.sprint_id = $2 AND sq.clerk_user_id = wm.clerk_user_id
-           )`,
-        [req.workspace.id, sprint.id],
-      ).then(async (membersResult) => {
-        const { createQuestInNinjaTask } = await import("../integrations/ninjatask.js");
-        for (const member of membersResult.rows) {
-          try {
-            const quest = await createQuestInNinjaTask({
-              title: sprint.name,
-              description: sprint.goal ?? null,
-              clerkId: member.clerk_user_id,
-            });
-            // One quest is created per member, so it can't be represented by the single
-            // sprints.ninja_task_quest_id column — this table tracks all of them, which is what
-            // the quest_complete webhook needs to map an incoming questId back to a member.
-            // UNIQUE (sprint_id, clerk_user_id) (migration 052) keeps it at one per member even
-            // if two activations race.
-            if (quest?.id) {
-              await pool.query(
-                `INSERT INTO sprint_quests (sprint_id, workspace_id, clerk_user_id, ninja_task_quest_id)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (sprint_id, clerk_user_id) DO NOTHING`,
-                [sprint.id, req.workspace.id, member.clerk_user_id, quest.id],
-              );
-            }
-          } catch (err) {
-            logger.warn({ err, clerkUserId: member.clerk_user_id, sprintId: sprint.id }, '[ninja-task] quest create failed for member');
-          }
-        }
-      }).catch((err: Error) => logger.warn({ err, sprintId: sprint.id }, '[ninja-task] member fetch failed'));
-    }
+    await runSprintTransitionEffects(req.workspace.id, sprint, prevStatus);
 
     // When completing a sprint, include the count of still-incomplete tasks
     if (sprint.status === 'completed') {
-      if (statusChanged) {
-        dispatchAutomations({
-          type: 'sprint.completed',
-          workspaceId: req.workspace.id,
-          sprintId: sprint.id,
-          title: sprint.name,
-        }).catch(() => {});
-        fireWebhooks(req.workspace.id, 'sprint.completed', { sprint });
-      }
-
       const incompleteResult = await pool.query<{ count: number }>(
         `SELECT COUNT(*)::int AS count FROM tasks
          WHERE sprint_id = $1 AND workspace_id = $2 AND status <> 'done' AND deleted_at IS NULL`,
@@ -234,6 +200,78 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * Side effects of a sprint status transition (prevStatus -> sprint.status). Shared by PATCH and
+ * by POST (a sprint created directly as active/completed is a transition from 'planning'), so
+ * neither path skips them. The commitment snapshot is awaited (analytics depend on it being in
+ * place before move-to-backlog runs); everything else is fire-and-forget.
+ */
+async function runSprintTransitionEffects(
+  workspaceId: string,
+  sprint: Sprint,
+  prevStatus: string,
+): Promise<void> {
+  if (sprint.status === prevStatus) return;
+
+  if (sprint.status === 'active') {
+    await snapshotSprintCommitment(sprint.id, workspaceId, { onlyIfUnset: false });
+  } else if (sprint.status === 'completed') {
+    await snapshotSprintCommitment(sprint.id, workspaceId, { onlyIfUnset: true });
+    dispatchAutomations({
+      type: 'sprint.completed',
+      workspaceId,
+      sprintId: sprint.id,
+      title: sprint.name,
+    }).catch(() => {});
+    fireWebhooks(workspaceId, 'sprint.completed', { sprint });
+  }
+
+  // Phase 5 — Sprint → Quest Sync: when a sprint TRANSITIONS to active, create a ninja-task
+  // quest for every participating (non-viewer) workspace member who doesn't already have one
+  // for this sprint. Gated on the transition (not on the payload merely containing
+  // status='active') so ordinary edits of an active sprint don't mint duplicate quests.
+  // Fire-and-forget; never blocks the response.
+  if (sprint.status === 'active' && process.env.NINJA_TASK_URL && process.env.NINJA_TASK_API_KEY) {
+    pool.query<{ clerk_user_id: string }>(
+      `SELECT wm.clerk_user_id
+       FROM workspace_members wm
+       WHERE wm.workspace_id = $1
+         AND wm.role <> 'viewer'
+         AND NOT EXISTS (
+           SELECT 1 FROM sprint_quests sq
+           WHERE sq.sprint_id = $2 AND sq.clerk_user_id = wm.clerk_user_id
+         )`,
+      [workspaceId, sprint.id],
+    ).then(async (membersResult) => {
+      const { createQuestInNinjaTask } = await import("../integrations/ninjatask.js");
+      for (const member of membersResult.rows) {
+        try {
+          const quest = await createQuestInNinjaTask({
+            title: sprint.name,
+            description: sprint.goal ?? null,
+            clerkId: member.clerk_user_id,
+          });
+          // One quest is created per member, so it can't be represented by the single
+          // sprints.ninja_task_quest_id column — this table tracks all of them, which is what
+          // the quest_complete webhook needs to map an incoming questId back to a member.
+          // UNIQUE (sprint_id, clerk_user_id) (migration 052) keeps it at one per member even
+          // if two activations race.
+          if (quest?.id) {
+            await pool.query(
+              `INSERT INTO sprint_quests (sprint_id, workspace_id, clerk_user_id, ninja_task_quest_id)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (sprint_id, clerk_user_id) DO NOTHING`,
+              [sprint.id, workspaceId, member.clerk_user_id, quest.id],
+            );
+          }
+        } catch (err) {
+          logger.warn({ err, clerkUserId: member.clerk_user_id, sprintId: sprint.id }, '[ninja-task] quest create failed for member');
+        }
+      }
+    }).catch((err: Error) => logger.warn({ err, sprintId: sprint.id }, '[ninja-task] member fetch failed'));
+  }
+}
+
 // POST /api/sprints/:id/move-to-backlog — unassign all non-done tasks from sprint  [admin only]
 router.post('/:id/move-to-backlog', requireAdmin, async (req, res, next) => {
   try {
@@ -242,6 +280,10 @@ router.post('/:id/move-to-backlog', requireAdmin, async (req, res, next) => {
       [req.params.id, req.workspace.id],
     );
     if (sprintCheck.rows.length === 0) { res.status(404).json({ error: 'Sprint not found' }); return; }
+
+    // Record what the sprint committed to before its unfinished work leaves it (no-op when the
+    // snapshot was already taken at activation).
+    await snapshotSprintCommitment(req.params.id, req.workspace.id, { onlyIfUnset: true });
 
     const result = await pool.query<{ count: number }>(
       `WITH moved AS (
@@ -275,6 +317,7 @@ router.get('/:id/tasks', async (req, res, next) => {
 // GET /api/sprints/:id/burndown  — daily remaining tasks + ideal line
 router.get('/:id/burndown', async (req, res, next) => {
   try {
+    const tz = getRequestTz(req);
     // Load sprint + total task/points counts
     const sprintResult = await pool.query<{
       start_date: string | null; end_date: string | null;
@@ -330,7 +373,7 @@ router.get('/:id/burndown', async (req, res, next) => {
        ),
        final_done AS (
          SELECT sr.task_id,
-                DATE(MIN(sr.created_at) AT TIME ZONE 'UTC')::text AS done_date
+                (MIN(sr.created_at) AT TIME ZONE $3)::date::text AS done_date
          FROM status_rows sr
          LEFT JOIN last_reopen lr ON lr.task_id = sr.task_id
          WHERE sr.status = 'done'
@@ -345,7 +388,7 @@ router.get('/:id/burndown', async (req, res, next) => {
        JOIN tasks t ON t.id = fd.task_id
        GROUP BY fd.done_date
        ORDER BY fd.done_date`,
-      [req.params.id, req.workspace.id],
+      [req.params.id, req.workspace.id, tz],
     );
 
     // Build date series start_date..min(today, end_date). Defensively re-clamped here (in
@@ -363,7 +406,9 @@ router.get('/:id/burndown', async (req, res, next) => {
     const maxEnd = new Date(start);
     maxEnd.setUTCDate(maxEnd.getUTCDate() + MAX_SPRINT_DAYS);
     if (end > maxEnd) end = maxEnd;
-    const today = new Date();
+    // "Today" and completion days are in the requester's timezone (K6), so the series matches
+    // the calendar the user sees instead of rolling over at UTC midnight.
+    const today = new Date(`${todayInTz(tz)}T00:00:00Z`);
     const last  = end < today ? end : today;
 
     // Tasks completed before the sprint started (e.g. finished, then pulled into the sprint)
@@ -462,9 +507,10 @@ router.put('/:id/retro', requireAdmin, async (req, res, next) => {
       `INSERT INTO sprint_retros (sprint_id, workspace_id, went_well, to_improve, action_items, created_by)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (sprint_id) DO UPDATE SET
-         went_well    = EXCLUDED.went_well,
-         to_improve   = EXCLUDED.to_improve,
-         action_items = EXCLUDED.action_items,
+         -- Omitted fields keep their stored value (send '' to clear one).
+         went_well    = COALESCE(EXCLUDED.went_well, sprint_retros.went_well),
+         to_improve   = COALESCE(EXCLUDED.to_improve, sprint_retros.to_improve),
+         action_items = COALESCE(EXCLUDED.action_items, sprint_retros.action_items),
          updated_at   = now()
        RETURNING *`,
       [req.params.id, req.workspace.id, went_well ?? null, to_improve ?? null, action_items ?? null, req.auth.userId],
@@ -481,18 +527,28 @@ router.patch('/:id/tasks', requireAdmin, async (req, res, next) => {
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
     // verify sprint belongs to workspace
-    const sprintCheck = await pool.query(
-      'SELECT id FROM sprints WHERE id = $1 AND workspace_id = $2',
+    const sprintCheck = await pool.query<{ status: string }>(
+      'SELECT status FROM sprints WHERE id = $1 AND workspace_id = $2',
       [req.params.id, req.workspace.id],
     );
     if (sprintCheck.rows.length === 0) { res.status(404).json({ error: 'Sprint not found' }); return; }
+    if (sprintCheck.rows[0].status === 'completed') {
+      res.status(409).json({ error: 'Cannot add tasks to a completed sprint' }); return;
+    }
 
-    await pool.query(
-      `UPDATE tasks SET sprint_id = $1
-       WHERE id = ANY($2::uuid[]) AND workspace_id = $3 AND deleted_at IS NULL`,
+    // Tasks that already belong to a completed sprint stay there (their history is part of that
+    // sprint's record); only backlog tasks or tasks in open sprints are moved.
+    const result = await pool.query(
+      `UPDATE tasks t SET sprint_id = $1
+       WHERE t.id = ANY($2::uuid[]) AND t.workspace_id = $3 AND t.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM sprints s WHERE s.id = t.sprint_id AND s.status = 'completed'
+         )`,
       [req.params.id, parsed.data.task_ids, req.workspace.id],
     );
-    res.json({ ok: true });
+    const assigned = result.rowCount ?? 0;
+    if (assigned === 0) { res.status(404).json({ error: 'No assignable tasks found' }); return; }
+    res.json({ ok: true, assigned, skipped: new Set(parsed.data.task_ids).size - assigned });
   } catch (err) { next(err); }
 });
 

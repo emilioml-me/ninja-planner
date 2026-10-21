@@ -1,9 +1,10 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useApiClient } from '@/lib/api';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
 import { useMembers } from '@/hooks/use-members';
+import { QueryError } from '@/components/QueryError';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -37,6 +38,15 @@ interface NotePayload {
 
 // Radix Select can't use '' as an item value.
 const NONE = '__none__';
+
+/** Notes fetched per "Load more" page (server default 100, max 200). */
+const NOTES_PAGE_SIZE = 100;
+
+interface NotesPage {
+  items: Note[];
+  /** X-Total-Count, or null if the server didn't send it. */
+  total: number | null;
+}
 
 interface NoteFormProps {
   initial?: Partial<Note>;
@@ -95,7 +105,7 @@ function NoteForm({ initial, sprints, epics, onSave, onCancel, loading }: NoteFo
         <Button variant="outline" onClick={onCancel}>Cancel</Button>
         <Button
           onClick={() => onSave({
-            title,
+            title: title.trim(),
             content,
             sprint_id: sprintId === NONE ? null : sprintId,
             epic_id:   epicId === NONE ? null : epicId,
@@ -110,27 +120,46 @@ function NoteForm({ initial, sprints, epics, onSave, onCancel, loading }: NoteFo
 }
 
 export default function MeetingNotes() {
-  const { apiRequest } = useApiClient();
+  const { apiRequest, apiRequestWithHeaders } = useApiClient();
   const qc = useQueryClient();
-  const isAdmin = useIsAdmin();
   const { userId } = useAuth();
-  const { lookup, displayName } = useMembers();
+  const { displayName } = useMembers();
   const { toast } = useToast();
 
-  // Viewers are read-only server-side (requireWorkspace rejects their writes).
-  const isViewer = !!userId && lookup.get(userId)?.role === 'viewer';
+  // Viewers are read-only server-side (requireWorkspace rejects their writes). Write controls
+  // stay hidden until the workspace role has loaded (no flash for viewers).
+  const { isAdmin, isViewer, isLoading: roleLoading } = useMyRole();
+  const canWrite = !roleLoading && !isViewer;
   // Server rule (PATCH + DELETE): only the author or a workspace admin may modify a note.
-  const canModify = (note: Note) => !isViewer && (isAdmin || note.created_by === userId);
+  const canModify = (note: Note) => canWrite && (isAdmin || note.created_by === userId);
 
   const [creating,  setCreating]  = useState(false);
   const [editing,   setEditing]   = useState<Note | null>(null);
   const [viewing,   setViewing]   = useState<Note | null>(null);
 
   // preview=1: list rows carry a content excerpt only; the full note is fetched on open.
-  const { data: notes = [], isLoading } = useQuery<Note[]>({
-    queryKey: ['meeting-notes'],
-    queryFn: () => apiRequest('GET', '/api/meeting-notes?preview=1'),
+  // Paginated with limit/offset + X-Total-Count ("Load more").
+  const notesQuery = useInfiniteQuery({
+    queryKey: ['/api/meeting-notes', 'list'],
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }): Promise<NotesPage> => {
+      const { data, headers } = await apiRequestWithHeaders<Note[]>(
+        'GET', `/api/meeting-notes?preview=1&limit=${NOTES_PAGE_SIZE}&offset=${pageParam}`,
+      );
+      const header = headers.get('X-Total-Count');
+      const total = header !== null && Number.isFinite(Number(header)) ? Number(header) : null;
+      return { items: data, total };
+    },
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + p.items.length, 0);
+      if (last.total !== null) return loaded < last.total ? loaded : undefined;
+      return last.items.length >= NOTES_PAGE_SIZE ? loaded : undefined;
+    },
   });
+  const notes = notesQuery.data?.pages.flatMap((p) => p.items) ?? [];
+  const lastPage = notesQuery.data?.pages[notesQuery.data.pages.length - 1];
+  const totalNotes = lastPage?.total ?? notes.length;
+  const isLoading = notesQuery.isLoading || roleLoading;
 
   const { data: sprints = [] } = useQuery<{ id: string; name: string }[]>({
     queryKey: ['/api/sprints'],
@@ -146,8 +175,10 @@ export default function MeetingNotes() {
   // Full note for the open view/edit dialog (list content may be truncated).
   const openId = viewing?.id ?? editing?.id ?? null;
   const openNeedsFull = !!(viewing?.content_truncated || editing?.content_truncated);
-  const { data: fullNote, isLoading: fullLoading } = useQuery<Note>({
-    queryKey: ['meeting-notes', openId],
+  const {
+    data: fullNote, isLoading: fullLoading, error: fullError, refetch: refetchFull,
+  } = useQuery<Note>({
+    queryKey: ['/api/meeting-notes', openId],
     queryFn: () => apiRequest('GET', `/api/meeting-notes/${openId}`),
     enabled: !!openId && openNeedsFull,
   });
@@ -156,7 +187,7 @@ export default function MeetingNotes() {
   const viewingFull = resolved(viewing);
   const editingFull = resolved(editing);
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['meeting-notes'] });
+  const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/meeting-notes'] });
 
   const createMutation = useMutation({
     mutationFn: (data: NotePayload) =>
@@ -185,7 +216,7 @@ export default function MeetingNotes() {
           <h1 className="text-2xl font-bold">Meeting Notes</h1>
           <p className="text-muted-foreground text-sm mt-1">Notes attached to sprints, epics, or standalone</p>
         </div>
-        {!isViewer && (
+        {canWrite && (
           <Button onClick={() => setCreating(true)} className="gap-2">
             <Plus className="h-4 w-4" /> New Note
           </Button>
@@ -213,7 +244,7 @@ export default function MeetingNotes() {
         <DialogContent className="max-w-2xl">
           <DialogHeader><DialogTitle>Edit Note</DialogTitle></DialogHeader>
           {editing && !editingFull ? (
-            fullLoading ? <Skeleton className="h-64 w-full" /> : <p className="text-sm text-destructive">Failed to load the full note.</p>
+            fullLoading ? <Skeleton className="h-64 w-full" /> : <QueryError error={fullError} onRetry={() => refetchFull()} />
           ) : editingFull && (
             <NoteForm
               key={editingFull.id}
@@ -233,7 +264,7 @@ export default function MeetingNotes() {
         <DialogContent className="max-w-2xl">
           <DialogHeader><DialogTitle>{viewing?.title}</DialogTitle></DialogHeader>
           {viewing && !viewingFull ? (
-            fullLoading ? <Skeleton className="h-64 w-full" /> : <p className="text-sm text-destructive">Failed to load the full note.</p>
+            fullLoading ? <Skeleton className="h-64 w-full" /> : <QueryError error={fullError} onRetry={() => refetchFull()} />
           ) : (
             <pre className="whitespace-pre-wrap text-sm font-mono bg-muted rounded p-4 max-h-96 overflow-y-auto">
               {viewingFull?.content || '(no content)'}
@@ -250,10 +281,12 @@ export default function MeetingNotes() {
         <div className="space-y-3">
           {[1,2,3].map((i) => <Skeleton key={i} className="h-24 w-full" />)}
         </div>
+      ) : notesQuery.isError && !notesQuery.data ? (
+        <QueryError error={notesQuery.error} onRetry={() => notesQuery.refetch()} />
       ) : notes.length === 0 ? (
         <div className="text-center py-20 text-muted-foreground">
           <FileText className="h-10 w-10 mx-auto mb-3 opacity-30" />
-          No meeting notes yet.{!isViewer && ' Create one to get started.'}
+          No meeting notes yet.{canWrite && ' Create one to get started.'}
         </div>
       ) : (
         <div className="space-y-3">
@@ -292,6 +325,23 @@ export default function MeetingNotes() {
               </CardContent>
             </Card>
           ))}
+          <div className="flex items-center justify-between gap-3 pt-1">
+            <p className="text-xs text-muted-foreground">
+              Showing {notes.length} of {Math.max(totalNotes, notes.length)} notes
+            </p>
+            {notesQuery.hasNextPage && (
+              <Button
+                size="sm" variant="outline"
+                disabled={notesQuery.isFetchingNextPage}
+                onClick={() => notesQuery.fetchNextPage()}
+              >
+                {notesQuery.isFetchingNextPage ? 'Loading…' : 'Load more'}
+              </Button>
+            )}
+          </div>
+          {notesQuery.isFetchNextPageError && (
+            <p className="text-xs text-destructive">Couldn't load more notes. Try again.</p>
+          )}
         </div>
       )}
     </div>

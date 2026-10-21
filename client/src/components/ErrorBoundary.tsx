@@ -8,6 +8,8 @@ interface Props {
    * away from a crashed page renders the new page instead of the stale error screen.
    */
   resetKey?: unknown;
+  /** Top-level boundary: fill the viewport (there's no app chrome around it). */
+  fullScreen?: boolean;
 }
 interface State { error: Error | null }
 
@@ -33,13 +35,19 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div className="flex flex-col items-center justify-center h-full gap-4 p-8 text-center">
+        <div
+          role="alert"
+          className={`flex flex-col items-center justify-center gap-4 p-8 text-center ${this.props.fullScreen ? 'min-h-screen bg-background' : 'h-full'}`}
+        >
           <p className="text-lg font-semibold">Something went wrong</p>
           <p className="text-sm text-muted-foreground max-w-sm">
             An unexpected error occurred while showing this page. Try again, or reload the page if
             the problem continues.
           </p>
-          <Button onClick={() => this.setState({ error: null })}>Try again</Button>
+          <div className="flex gap-2">
+            <Button onClick={() => this.setState({ error: null })}>Try again</Button>
+            <Button variant="outline" onClick={() => window.location.reload()}>Reload page</Button>
+          </div>
         </div>
       );
     }

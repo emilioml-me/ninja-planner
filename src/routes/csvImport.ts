@@ -3,8 +3,11 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
-import type { Task } from '../services/taskService.js';
-import { fireWebhooks } from '../services/webhookService.js';
+import { isTaskDateInBounds, TASK_DATE_RANGE_MESSAGE, type Task } from '../services/taskService.js';
+import { getEndpoints, deliverToEndpoint } from '../services/webhookService.js';
+import { dispatchAutomations } from '../services/automationService.js';
+import { trackBackground } from '../lib/background.js';
+import { logger } from '../config/logger.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -14,21 +17,35 @@ const rowSchema = z.object({
   description:       z.string().max(10000).optional(),
   status:            z.enum(['todo', 'in_progress', 'done', 'blocked']).default('todo'),
   priority:          z.enum(['low', 'medium', 'high', 'urgent']).default('medium'),
-  due_date:          z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  // .date() rejects impossible dates (2024-02-30) per row instead of letting one bad cell roll
+  // back the whole multi-row INSERT with a generic error.
+  due_date:          z.string().date().refine(isTaskDateInBounds, { message: TASK_DATE_RANGE_MESSAGE }).nullable().optional(),
   tags:              z.string().max(2000).optional(),
-  assignee_clerk_id: z.string().nullable().optional(),
+  assignee_clerk_id: z.string().max(255).nullable().optional(),
 });
 
 const MAX_TAGS_PER_ROW = 50;
+const MAX_TAG_LENGTH = 200;
+// Bounded fan-out for post-import webhooks/automations (up to 500 tasks per import).
+const POST_IMPORT_CONCURRENCY = 5;
 
 // RFC-4180-ish tokenizer: handles quoted fields containing commas/newlines and "" escaped quotes.
 // A naive split(',')/split(/\r?\n/) (the previous implementation) silently shifts every field
 // after an embedded comma/newline into the wrong column instead of erroring.
-function tokenizeCsv(text: string): string[][] {
-  const rows: string[][] = [];
+// Each record carries the file line number it starts on, so validation errors point at the right
+// line even after blank lines or multi-line quoted fields.
+interface CsvRecord { line: number; values: string[] }
+
+class CsvParseError extends Error {}
+
+function tokenizeCsv(text: string): CsvRecord[] {
+  const rows: CsvRecord[] = [];
   let row: string[] = [];
   let field = '';
   let inQuotes = false;
+  let line = 1;
+  let rowStartLine = 1;
+  let quoteStartLine = 1;
   let i = 0;
   while (i < text.length) {
     const char = text[i];
@@ -37,15 +54,22 @@ function tokenizeCsv(text: string): string[][] {
         if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
         inQuotes = false; i++; continue;
       }
+      if (char === '\n') line++;
       field += char; i++; continue;
     }
-    if (char === '"') { inQuotes = true; i++; continue; }
+    if (char === '"') { inQuotes = true; quoteStartLine = line; i++; continue; }
     if (char === ',') { row.push(field); field = ''; i++; continue; }
     if (char === '\r') { i++; continue; }
-    if (char === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    if (char === '\n') {
+      row.push(field); rows.push({ line: rowStartLine, values: row });
+      row = []; field = ''; i++; line++; rowStartLine = line;
+      continue;
+    }
     field += char; i++;
   }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  // An unterminated quote used to silently swallow the rest of the file into one field.
+  if (inQuotes) throw new CsvParseError(`Unterminated quoted field starting on line ${quoteStartLine}`);
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push({ line: rowStartLine, values: row }); }
   return rows;
 }
 
@@ -65,15 +89,57 @@ function normalizeRowKeys(row: Record<string, unknown>): Record<string, string> 
   return out;
 }
 
-function parseCsv(text: string): Record<string, string>[] {
+function parseCsv(text: string): { rows: Record<string, string>[]; lines: number[] } {
   // Strip a UTF-8 BOM (Excel and our own CSV export prepend one) so it doesn't end up glued to
   // the first header name.
-  const rows = tokenizeCsv(text.replace(/^\uFEFF/, '')).filter((r) => r.some((v) => v.trim() !== ''));
-  if (rows.length < 2) return [];
-  const headers = rows[0].map(normalizeHeader);
-  return rows.slice(1).map((vals) =>
-    Object.fromEntries(headers.map((h, i) => [h, (vals[i] ?? '').trim()])),
-  );
+  const records = tokenizeCsv(text.replace(/^\uFEFF/, '')).filter((r) => r.values.some((v) => v.trim() !== ''));
+  if (records.length < 2) return { rows: [], lines: [] };
+  const headers = records[0].values.map(normalizeHeader);
+  const data = records.slice(1);
+  return {
+    rows: data.map((r) => Object.fromEntries(headers.map((h, i) => [h, (r.values[i] ?? '').trim()]))),
+    lines: data.map((r) => r.line),
+  };
+}
+
+// task.created webhooks + automations for an import, with bounded concurrency. Previously each
+// imported task called fireWebhooks separately: up to 500 concurrent endpoint lookups and
+// 500 x N outbound POSTs at once, and automations never ran for imported tasks. The subscribed
+// endpoints are looked up once; an endpoint that keeps failing is dropped for the rest of the
+// import instead of retrying (10s/60s backoff) for every remaining task.
+const MAX_CONSECUTIVE_ENDPOINT_FAILURES = 3;
+
+async function runPostImportEffects(workspaceId: string, tasks: Task[]): Promise<void> {
+  const endpoints = (await getEndpoints(workspaceId))
+    .filter((e) => e.active && e.events.includes('task.created'))
+    .map((e) => e.id);
+  const failures = new Map<string, number>();
+
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) {
+      const task = tasks[next++];
+      for (const endpointId of endpoints) {
+        if ((failures.get(endpointId) ?? 0) >= MAX_CONSECUTIVE_ENDPOINT_FAILURES) continue;
+        const outcome = await deliverToEndpoint(endpointId, workspaceId, 'task.created', { task })
+          .catch(() => 'failed' as const);
+        failures.set(endpointId, outcome === 'failed' ? (failures.get(endpointId) ?? 0) + 1 : 0);
+      }
+      await dispatchAutomations({
+        type: 'task.created',
+        workspaceId,
+        taskId: task.id,
+        assigneeId: task.assignee_clerk_id,
+        title: task.title,
+      }).catch(() => {});
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(POST_IMPORT_CONCURRENCY, tasks.length) }, worker));
+
+  const dropped = [...failures].filter(([, n]) => n >= MAX_CONSECUTIVE_ENDPOINT_FAILURES).map(([id]) => id);
+  if (dropped.length > 0) {
+    logger.warn({ workspaceId, endpointIds: dropped }, '[csvImport] webhook endpoints skipped after repeated failures');
+  }
 }
 
 // POST /api/tasks/import
@@ -81,14 +147,23 @@ function parseCsv(text: string): Record<string, string>[] {
 router.post('/', async (req, res, next) => {
   try {
     let rawRows: Record<string, string>[];
+    // Reported row number per raw row: the file line for CSV text, index + 2 (as if a header
+    // row came first) for a rows array.
+    let rowNumbers: number[];
     if (typeof req.body.csv === 'string') {
-      rawRows = parseCsv(req.body.csv);
+      try {
+        ({ rows: rawRows, lines: rowNumbers } = parseCsv(req.body.csv));
+      } catch (err) {
+        if (err instanceof CsvParseError) { res.status(400).json({ error: err.message }); return; }
+        throw err;
+      }
     } else if (Array.isArray(req.body.rows)) {
       if (req.body.rows.some((r: unknown) => !r || typeof r !== 'object' || Array.isArray(r))) {
         res.status(400).json({ error: 'rows must be an array of objects' });
         return;
       }
       rawRows = (req.body.rows as Record<string, unknown>[]).map(normalizeRowKeys);
+      rowNumbers = rawRows.map((_, i) => i + 2);
     } else {
       res.status(400).json({ error: 'Provide csv string or rows array' });
       return;
@@ -128,10 +203,10 @@ router.post('/', async (req, res, next) => {
     for (let i = 0; i < rawRows.length; i++) {
       const parsed = rowSchema.safeParse(normalizeBlankCells(rawRows[i]));
       if (!parsed.success) {
-        errors.push({ row: i + 2, error: JSON.stringify(parsed.error.flatten().fieldErrors) });
+        errors.push({ row: rowNumbers[i], error: JSON.stringify(parsed.error.flatten().fieldErrors) });
       } else {
         toInsert.push(parsed.data);
-        sourceRowNumbers.push(i + 2);
+        sourceRowNumbers.push(rowNumbers[i]);
       }
     }
 
@@ -158,7 +233,7 @@ router.post('/', async (req, res, next) => {
     for (let i = 0; i < toInsert.length; i++) {
       const row = toInsert[i];
       const tags = row.tags
-        ? row.tags.split(/[;|]/).map((t) => t.trim()).filter(Boolean).slice(0, MAX_TAGS_PER_ROW)
+        ? row.tags.split(/[;|]/).map((t) => t.trim().slice(0, MAX_TAG_LENGTH)).filter(Boolean).slice(0, MAX_TAGS_PER_ROW)
         : [];
       const assigneeId = row.assignee_clerk_id && validAssignees.has(row.assignee_clerk_id)
         ? row.assignee_clerk_id
@@ -218,8 +293,11 @@ router.post('/', async (req, res, next) => {
       client.release();
     }
 
-    for (const task of imported) {
-      fireWebhooks(req.workspace.id, 'task.created', { task });
+    if (imported.length > 0) {
+      const workspaceId = req.workspace.id;
+      void trackBackground(runPostImportEffects(workspaceId, imported)).catch((err) => {
+        logger.warn({ err, workspaceId }, '[csvImport] post-import webhooks/automations failed');
+      });
     }
 
     res.status(201).json({

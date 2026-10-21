@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { HelpCircle, ExternalLink, CheckCircle } from 'lucide-react';
 import {
@@ -19,11 +19,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useApiClient } from '@/lib/api';
+import { ApiError, useApiClient } from '@/lib/api';
 
 interface TicketResult {
   ticketNumber: string;
   portalUrl: string;
+}
+
+const SUBJECT_MAX = 200;
+
+/** Only http(s) portal links are rendered (never javascript:/data: from an upstream payload). */
+function safePortalUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 interface Props {
@@ -38,11 +51,30 @@ export function ContactSupportDialog({ trigger }: Props) {
   const [priority, setPriority]     = useState<string>('medium');
   const [result, setResult]         = useState<TicketResult | null>(null);
 
-  const mutation = useMutation<TicketResult>({
+  // Bumped whenever the dialog closes, so a submit that resolves after the user closed (and maybe
+  // reopened) the dialog doesn't flash the old ticket's success screen.
+  const session = useRef(0);
+  const mutation = useMutation<TicketResult, Error, number>({
     mutationFn: () =>
-      apiRequest('POST', '/api/support/ticket', { subject, description, priority }),
-    onSuccess: (data) => setResult(data),
+      apiRequest('POST', '/api/support/ticket', { subject: subject.trim(), description, priority }),
+    onSuccess: (data, startedIn) => {
+      if (startedIn === session.current) setResult(data);
+    },
   });
+
+  // Per-field messages from a zod flatten() 400 ({ error: { formErrors, fieldErrors } }).
+  const fieldErrors = useMemo(() => {
+    const err = mutation.error;
+    if (!(err instanceof ApiError) || err.status !== 400) return {} as Record<string, string>;
+    const body = err.body as { error?: { fieldErrors?: Record<string, unknown> } } | undefined;
+    const out: Record<string, string> = {};
+    for (const [field, msgs] of Object.entries(body?.error?.fieldErrors ?? {})) {
+      const list = Array.isArray(msgs) ? msgs.filter((m): m is string => typeof m === 'string' && !!m) : [];
+      if (list.length > 0) out[field] = list.join(', ');
+    }
+    return out;
+  }, [mutation.error]);
+  const hasFieldErrors = Object.keys(fieldErrors).length > 0;
 
   const resetTimer = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => () => clearTimeout(resetTimer.current), []);
@@ -50,6 +82,7 @@ export function ContactSupportDialog({ trigger }: Props) {
   function handleClose(isOpen: boolean) {
     setOpen(isOpen);
     if (!isOpen) {
+      session.current += 1;
       clearTimeout(resetTimer.current);
       resetTimer.current = setTimeout(() => {
         setSubject('');
@@ -89,9 +122,9 @@ export function ContactSupportDialog({ trigger }: Props) {
                 Your ticket has been submitted. We'll reply to your email shortly.
               </p>
             </div>
-            {result.portalUrl && (
+            {safePortalUrl(result.portalUrl) && (
               <a
-                href={result.portalUrl}
+                href={safePortalUrl(result.portalUrl)!}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary underline-offset-4 hover:underline"
@@ -109,7 +142,8 @@ export function ContactSupportDialog({ trigger }: Props) {
             className="space-y-4"
             onSubmit={(e) => {
               e.preventDefault();
-              mutation.mutate();
+              if (mutation.isPending) return;
+              mutation.mutate(session.current);
             }}
           >
             <div className="space-y-1.5">
@@ -119,8 +153,11 @@ export function ContactSupportDialog({ trigger }: Props) {
                 placeholder="Brief description of your issue"
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
+                maxLength={SUBJECT_MAX}
+                aria-invalid={!!fieldErrors.subject}
                 required
               />
+              {fieldErrors.subject && <p className="text-xs text-destructive">{fieldErrors.subject}</p>}
             </div>
 
             <div className="space-y-1.5">
@@ -131,8 +168,10 @@ export function ContactSupportDialog({ trigger }: Props) {
                 rows={4}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
+                aria-invalid={!!fieldErrors.description}
                 required
               />
+              {fieldErrors.description && <p className="text-xs text-destructive">{fieldErrors.description}</p>}
             </div>
 
             <div className="space-y-1.5">
@@ -148,11 +187,14 @@ export function ContactSupportDialog({ trigger }: Props) {
                   <SelectItem value="urgent">Urgent</SelectItem>
                 </SelectContent>
               </Select>
+              {fieldErrors.priority && <p className="text-xs text-destructive">{fieldErrors.priority}</p>}
             </div>
 
             {mutation.isError && (
               <p className="text-sm text-destructive">
-                {(mutation.error as Error).message || 'Failed to submit ticket. Please try again.'}
+                {hasFieldErrors
+                  ? 'Please fix the highlighted fields.'
+                  : mutation.error?.message || 'Failed to submit ticket. Please try again.'}
               </p>
             )}
 

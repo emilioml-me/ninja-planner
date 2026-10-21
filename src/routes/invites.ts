@@ -9,6 +9,7 @@ import { requireAdmin } from '../middleware/requireAdmin.js';
 import type { PoolClient } from 'pg';
 import { pool } from '../config/db.js';
 import { ensureClerkOrgMembership } from '../services/workspaceService.js';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
 
 // Tight rate limit for public invite-lookup — prevents brute-force token scanning
 const inviteLookupLimiter = rateLimit({
@@ -16,6 +17,7 @@ const inviteLookupLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => ipBucket(getClientIp(req)),
   message: { error: 'Too many requests, please try again later' },
 });
 
@@ -130,33 +132,55 @@ publicInvitesRouter.post('/token/:token/accept', requireAuth, async (req, res, n
 
     const { id: inviteId, workspace_id, clerk_org_id } = inviteResult.rows[0];
 
-    // C2b: requireWorkspace resolves the workspace from the Clerk org claim in the session token,
-    // so a local workspace_members row alone never grants access — the user must also be a
-    // member of the Clerk organization. Idempotent: "already a member" is treated as success.
-    // Done before COMMIT so a Clerk failure rolls back and leaves the invite unconsumed.
-    await ensureClerkOrgMembership(clerk_org_id, req.auth.userId);
-
     const existing = await client.query(
       `SELECT id FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2`,
       [workspace_id, req.auth.userId],
     );
-    if (existing.rows.length > 0) {
+    const alreadyMember = existing.rows.length > 0;
+    let insertedMember = false;
+    if (!alreadyMember) {
       // C2c: existing members don't consume the (single-use) invite — it stays valid for the
       // person it was actually meant for.
-      await client.query('COMMIT');
-      res.json({ ok: true, workspace_id, clerk_org_id, already_member: true }); return;
+      const ins = await client.query(
+        `INSERT INTO workspace_members (workspace_id, clerk_user_id, role)
+         VALUES ($1, $2, 'org:member')
+         ON CONFLICT (workspace_id, clerk_user_id) DO NOTHING`,
+        [workspace_id, req.auth.userId],
+      );
+      insertedMember = (ins.rowCount ?? 0) > 0;
+      await client.query(`UPDATE workspace_invites SET used_at = now(), used_by = $1 WHERE id = $2`, [req.auth.userId, inviteId]);
+    }
+    await client.query('COMMIT');
+    client.release();
+    client = undefined;
+
+    // C2b: requireWorkspace resolves the workspace from the Clerk org claim in the session token,
+    // so a local workspace_members row alone never grants access — the user must also be a
+    // member of the Clerk organization. Idempotent: "already a member" is treated as success.
+    // L20: done AFTER commit so the invite row lock isn't held across the Clerk round trip; on
+    // failure the local effects are compensated (member row removed, invite un-consumed).
+    try {
+      await ensureClerkOrgMembership(clerk_org_id, req.auth.userId);
+    } catch (clerkErr) {
+      if (!alreadyMember) {
+        await (async () => {
+          if (insertedMember) {
+            await pool.query(
+              'DELETE FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+              [workspace_id, req.auth.userId],
+            );
+          }
+          await pool.query(
+            `UPDATE workspace_invites SET used_at = NULL, used_by = NULL
+             WHERE id = $1 AND used_by = $2 AND expires_at > now()`,
+            [inviteId, req.auth.userId],
+          );
+        })().catch(() => { /* best-effort; Clerk error below is what the caller needs */ });
+      }
+      throw clerkErr;
     }
 
-    await client.query(
-      `INSERT INTO workspace_members (workspace_id, clerk_user_id, role)
-       VALUES ($1, $2, 'org:member')
-       ON CONFLICT (workspace_id, clerk_user_id) DO NOTHING`,
-      [workspace_id, req.auth.userId],
-    );
-    await client.query(`UPDATE workspace_invites SET used_at = now(), used_by = $1 WHERE id = $2`, [req.auth.userId, inviteId]);
-    await client.query('COMMIT');
-
-    res.json({ ok: true, workspace_id, clerk_org_id, already_member: false });
+    res.json({ ok: true, workspace_id, clerk_org_id, already_member: alreadyMember });
   } catch (err) {
     await client?.query('ROLLBACK').catch(() => {});
     next(err);

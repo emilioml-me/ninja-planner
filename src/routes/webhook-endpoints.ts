@@ -8,6 +8,7 @@ import {
   updateEndpoint,
   deleteEndpoint,
   getDeliveries,
+  rotateEndpointSecret,
   ALL_EVENTS,
 } from '../services/webhookService.js';
 import { isSafeWebhookUrl } from '../lib/ssrf.js';
@@ -15,9 +16,16 @@ import { isSafeWebhookUrl } from '../lib/ssrf.js';
 const router = Router();
 router.use(requireWorkspace);
 
-const safeUrl = z.string().url().max(2048).refine(isSafeWebhookUrl, {
-  message: 'URL must not point to a private or internal address',
-});
+// Payloads carry task/epic data and are HMAC-signed; plain http would expose both in transit,
+// so production only accepts https receivers (http stays allowed for local development).
+function hasAllowedProtocol(raw: string): boolean {
+  if (process.env.NODE_ENV !== 'production') return true;
+  try { return new URL(raw).protocol === 'https:'; } catch { return false; }
+}
+
+const safeUrl = z.string().url().max(2048)
+  .refine(hasAllowedProtocol, { message: 'URL must use https' })
+  .refine(isSafeWebhookUrl, { message: 'URL must not point to a private or internal address' });
 
 // Shared with webhookService so the validated set and the fired set can't drift.
 const VALID_EVENTS = ALL_EVENTS;
@@ -65,8 +73,14 @@ router.get('/health', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/webhooks
-router.get('/', async (req, res, next) => {
+// GET /api/webhooks/events  — subscribable event types (any member; must be before /:id)
+router.get('/events', (_req, res) => {
+  res.json({ events: [...ALL_EVENTS] });
+});
+
+// GET /api/webhooks  [admin only] - receiver URLs often embed credentials (Slack/Zapier/Make
+// paths), so even the secret-stripped list is not shown to members/viewers.
+router.get('/', requireAdmin, async (req, res, next) => {
   try {
     const endpoints = await getEndpoints(req.workspace.id);
     // Never expose the secret in list responses
@@ -95,6 +109,17 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     if (!endpoint) { res.status(404).json({ error: 'Endpoint not found' }); return; }
     const { secret: _s, ...safe } = endpoint;
     res.json(safe);
+  } catch (err) { next(err); }
+});
+
+// POST /api/webhooks/:id/rotate-secret  [admin only]
+// Returns the endpoint including the NEW secret - the only time it is shown; the old secret stops
+// validating immediately.
+router.post('/:id/rotate-secret', requireAdmin, async (req, res, next) => {
+  try {
+    const endpoint = await rotateEndpointSecret(req.params.id, req.workspace.id);
+    if (!endpoint) { res.status(404).json({ error: 'Endpoint not found' }); return; }
+    res.json(endpoint);
   } catch (err) { next(err); }
 });
 

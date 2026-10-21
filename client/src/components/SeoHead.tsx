@@ -10,8 +10,8 @@ import { useEffect } from "react";
 interface SeoHeadProps {
   /** Page title — will be appended with " | AppName" */
   title: string;
-  /** Meta description — 150-160 chars, Spanish, keyword-rich */
-  description: string;
+  /** Meta description — 150-160 chars, keyword-rich (left unchanged when omitted) */
+  description?: string;
   /** Comma-separated keywords (optional, low SEO value but harmless) */
   keywords?: string;
   /** Canonical URL for this page — always use absolute URL */
@@ -20,8 +20,12 @@ interface SeoHeadProps {
   ogImage?: string;
   /** og:type — default "website" */
   ogType?: "website" | "article" | "product";
-  /** Set true on /login, /register, /dashboard — prevents indexing */
+  /** Set true on private / token pages (guest views, shared roadmaps, invites) — prevents indexing */
   noIndex?: boolean;
+  /** Alias of noIndex. */
+  noindex?: boolean;
+  /** og:locale of the title/description copy (default "es_MX": the public SEO copy targets MX search) */
+  locale?: string;
   /** JSON-LD structured data object — pass output from structured-data.ts helpers */
   structuredData?: object | object[];
 }
@@ -63,17 +67,19 @@ export function SeoHead({
   canonical,
   ogImage = DEFAULT_OG_IMAGE,
   ogType = "website",
-  noIndex = false,
+  noIndex: noIndexProp = false,
+  noindex = false,
+  locale = "es_MX",
   structuredData,
 }: SeoHeadProps) {
   const fullTitle = `${title} | ${APP_NAME}`;
   const canonicalUrl = canonical ?? APP_URL;
+  const noIndex = noIndexProp || noindex;
 
   useEffect(() => {
-    // ── Core ──
+    // ── Core ── (the document language stays the UI's, set in index.html)
     document.title = fullTitle;
-    document.documentElement.setAttribute("lang", "es");
-    setMeta('meta[name="description"]', description);
+    if (description) setMeta('meta[name="description"]', description);
     setLink("canonical", canonicalUrl);
 
     if (keywords) {
@@ -91,19 +97,19 @@ export function SeoHead({
     // ── Open Graph ──
     setMeta('meta[property="og:site_name"]', APP_NAME);
     setMeta('meta[property="og:title"]', fullTitle);
-    setMeta('meta[property="og:description"]', description);
+    if (description) setMeta('meta[property="og:description"]', description);
     setMeta('meta[property="og:type"]', ogType);
     setMeta('meta[property="og:url"]', canonicalUrl);
     setMeta('meta[property="og:image"]', ogImage);
     setMeta('meta[property="og:image:width"]', "1200");
     setMeta('meta[property="og:image:height"]', "630");
-    setMeta('meta[property="og:locale"]', "es_MX");
+    setMeta('meta[property="og:locale"]', locale);
 
     // ── Twitter Card ──
     setMeta('meta[name="twitter:card"]', "summary_large_image");
     setMeta('meta[name="twitter:site"]', TWITTER_HANDLE);
     setMeta('meta[name="twitter:title"]', fullTitle);
-    setMeta('meta[name="twitter:description"]', description);
+    if (description) setMeta('meta[name="twitter:description"]', description);
     setMeta('meta[name="twitter:image"]', ogImage);
 
     // ── Structured Data ──
@@ -124,7 +130,7 @@ export function SeoHead({
         document.head.appendChild(script);
       });
     }
-  }, [fullTitle, description, keywords, canonicalUrl, ogImage, ogType, noIndex, structuredData]);
+  }, [fullTitle, description, keywords, canonicalUrl, ogImage, ogType, noIndex, locale, structuredData]);
 
   return null;
 }

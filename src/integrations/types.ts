@@ -35,6 +35,9 @@ export interface CrmClient {
   id: string;
   name: string;
   email: string | null;
+  // Optional: not sent by crm-ninja today (its contacts are people, so `name` is the contact);
+  // synced into clients.contact_name when present.
+  contact_name?: string | null;
   mrr: number | null;
   stage: string;
 }

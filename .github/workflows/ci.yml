@@ -17,10 +17,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -79,24 +79,27 @@ jobs:
           build-args: |
             VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY_STG }}
 
+  # GitHub-hosted runners cannot reach the private staging host (10.10.0.50), so this job runs on
+  # a self-hosted runner ON the staging host. It only runs once a runner with these labels has
+  # been registered there (repo Settings -> Actions -> Runners -> New self-hosted runner, labels
+  # `ninja-stg`); until then the job just stays queued.
+  # The deploy is the same pull + build + compose flow as a manual staging deploy:
+  # scripts/deploy-stg.sh (docker-compose.stg.yml, /srv/secrets/ninja-planner.stg.env, port 3208).
+  # The checkout it runs in is the server's own clone, so the runner's workspace is not used.
   deploy-staging:
-    name: Deploy → Staging
+    name: Deploy -> Staging
     needs: docker
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ninja-stg]
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
     steps:
       - name: Deploy to ninja-stg001
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 10.10.0.50
-          username: ubuntu
-          key: ${{ secrets.STG_SSH_KEY }}
-          script: |
-            set -e
-            IMAGE_TAG="${{ needs.docker.outputs.image_tag }}"
-            COMPOSE_FILE="/srv/apps/ninja-planner/docker-compose.prod.saas.yml"
-            sed -i "s|ghcr.io/emilioml-me/ninja-planner:.*|ghcr.io/emilioml-me/ninja-planner:${IMAGE_TAG}|" "${COMPOSE_FILE}"
-            docker compose -f "${COMPOSE_FILE}" pull
-            docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
-            docker system prune -f
-            echo "✅ ninja-planner:${IMAGE_TAG} live on staging"
+        env:
+          APP_DIR: /srv/apps/ninja-planner
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          bash scripts/deploy-stg.sh
+          echo "ninja-planner ${GITHUB_SHA::7} live on staging"

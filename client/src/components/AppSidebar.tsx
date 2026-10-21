@@ -1,6 +1,7 @@
 import { Link, useLocation } from 'wouter';
-import { UserButton } from '@clerk/clerk-react';
+import { UserButton, OrganizationSwitcher } from '@clerk/clerk-react';
 import { ContactSupportDialog } from '@/components/ContactSupportDialog';
+import { useMyRole } from '@/hooks/use-is-admin';
 import {
   LayoutDashboard,
   CheckSquare,
@@ -30,12 +31,21 @@ import {
   Copy,
   Building2,
   Bell,
+  Files,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { ThemeToggle } from '@/components/ThemeToggle';
 import { Button } from '@/components/ui/button';
 
-const NAV = [
+export interface NavItem {
+  href: string;
+  label: string;
+  icon: React.ElementType;
+  /** Shown only to workspace admins/owners (the page and its API are admin-only). */
+  adminOnly?: boolean;
+}
+
+/** App navigation, shared with CommandPalette so both list the same destinations. */
+export const NAV: NavItem[] = [
   { href: '/dashboard', label: 'Dashboard',     icon: LayoutDashboard },
   { href: '/my-tasks',  label: 'My Tasks',      icon: User },
   { href: '/tasks',     label: 'All Tasks',     icon: CheckSquare },
@@ -53,18 +63,25 @@ const NAV = [
   { href: '/analytics',     label: 'Analytics',     icon: LineChart },
   { href: '/calendar',      label: 'Calendar',      icon: Calendar },
   { href: '/meeting-notes', label: 'Meeting Notes', icon: FileText },
-  { href: '/automations',   label: 'Automations',   icon: Zap },
+  { href: '/automations',   label: 'Automations',   icon: Zap, adminOnly: true },
   { href: '/members',       label: 'Team',          icon: UsersRound },
   { href: '/integrations',  label: 'Integrations',  icon: Plug },
-  { href: '/webhooks',      label: 'Webhooks',       icon: Webhook },
+  { href: '/webhooks',      label: 'Webhooks',       icon: Webhook, adminOnly: true },
+  { href: '/task-templates',          label: 'Task Templates',   icon: Files },
   { href: '/sprint-templates',        label: 'Sprint Templates', icon: Copy },
   { href: '/epic-templates',          label: 'Epic Templates',   icon: Layers },
-  { href: '/settings/api-keys',       label: 'API Keys',         icon: Key },
-  { href: '/settings/custom-fields',  label: 'Custom Fields',    icon: Settings2 },
-  { href: '/settings/guest-links',    label: 'Guest Links',      icon: Link2 },
+  { href: '/settings/api-keys',       label: 'API Keys',         icon: Key, adminOnly: true },
+  { href: '/settings/custom-fields',  label: 'Custom Fields',    icon: Settings2, adminOnly: true },
+  { href: '/settings/guest-links',    label: 'Guest Links',      icon: Link2, adminOnly: true },
   { href: '/settings/notifications',  label: 'Notifications',    icon: Bell },
   { href: '/settings/billing',        label: 'Billing',          icon: CreditCard },
 ];
+
+/** NAV filtered to what the current user may open (admin-only links hidden until the role is known). */
+export function useVisibleNav(): NavItem[] {
+  const { isAdmin } = useMyRole();
+  return isAdmin ? NAV : NAV.filter((n) => !n.adminOnly);
+}
 
 interface AppSidebarProps {
   onClose?: () => void;
@@ -72,6 +89,7 @@ interface AppSidebarProps {
 
 export function AppSidebar({ onClose }: AppSidebarProps) {
   const [location] = useLocation();
+  const nav = useVisibleNav();
 
   return (
     <aside className="flex flex-col w-60 shrink-0 h-screen border-r bg-card">
@@ -93,10 +111,20 @@ export function AppSidebar({ onClose }: AppSidebarProps) {
         )}
       </div>
 
+      {/* Workspace switcher - multi-workspace users switch the active org here */}
+      <div className="px-3 pt-3">
+        <OrganizationSwitcher
+          hidePersonal
+          afterSelectOrganizationUrl="/dashboard"
+          afterCreateOrganizationUrl="/dashboard"
+          appearance={{ elements: { rootBox: 'w-full', organizationSwitcherTrigger: 'w-full justify-between' } }}
+        />
+      </div>
+
       {/* Nav */}
       <nav className="flex-1 py-4 space-y-1 px-2 overflow-y-auto">
-        {NAV.map(({ href, label, icon: Icon }) => {
-          const active = location === href || (href !== '/' && location.startsWith(href));
+        {nav.map(({ href, label, icon: Icon }) => {
+          const active = location === href || (href !== '/' && location.startsWith(`${href}/`));
           // asChild: without it, wouter v3's <Link> wraps children in its OWN <a>, so the
           // literal <a> below became a real <a> nested inside another <a> in the live DOM —
           // invalid markup that can double-announce to screen readers.
@@ -122,9 +150,8 @@ export function AppSidebar({ onClose }: AppSidebarProps) {
       <div className="px-2 pb-1">
         <ContactSupportDialog />
       </div>
-      <div className="flex items-center justify-between px-4 py-3 border-t">
-        <UserButton afterSignOutUrl="/" />
-        <ThemeToggle />
+      <div className="flex items-center px-4 py-3 border-t">
+        <UserButton />
       </div>
     </aside>
   );

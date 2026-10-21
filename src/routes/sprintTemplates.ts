@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
+import { getRequestTz, todayInTz } from '../lib/tz.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -23,7 +24,7 @@ const useTemplateSchema = z.object({
 router.get('/', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM sprint_templates WHERE workspace_id = $1 ORDER BY created_at DESC',
+      'SELECT * FROM sprint_templates WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 500',
       [req.workspace.id],
     );
     res.json(rows);
@@ -101,7 +102,7 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
 
     // end = start + duration - 1 (inclusive range). Pure UTC date arithmetic on the
     // 'YYYY-MM-DD' string so the result can't shift a day with the server's local timezone.
-    const startDate = parsed.data.start_date ?? new Date().toISOString().split('T')[0];
+    const startDate = parsed.data.start_date ?? todayInTz(getRequestTz(req));
     const end = new Date(`${startDate}T00:00:00Z`);
     end.setUTCDate(end.getUTCDate() + t.duration_days - 1);
     const endDate = end.toISOString().split('T')[0];

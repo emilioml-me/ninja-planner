@@ -5,6 +5,7 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import type { Pool } from 'pg';
 import { z } from 'zod';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
 
 /** Deliveries older than this (or dated in the future beyond the same skew) are rejected as replays. */
 const MAX_EVENT_AGE_MS = 5 * 60_000;
@@ -20,14 +21,38 @@ const eventSchema = z.object({
   timestamp:   z.string().max(64),
   payload: z.object({
     externalCrmId: z.string().min(1).max(255),
-    name:          z.string().trim().min(1).max(255),
+    // Over-long names are truncated rather than rejecting the whole upsert (crm-ninja only logs a
+    // 4xx, so the client would never be mirrored).
+    name:          z.string().trim().min(1).transform((s) => s.slice(0, 255)),
     stage:         z.string().max(50).optional().nullable(),
     // clients.mrr is numeric(12,2)
     mrr:           z.number().finite().min(0).max(9_999_999_999.99).optional().nullable(),
-    contactName:   z.string().max(255).optional().nullable(),
-    contactEmail:  z.string().email().max(255).optional().nullable(),
+    // Contact fields: absent = keep the stored value, null/'' = clear it. Values are normalized
+    // below (truncation / email validation) instead of failing the delivery.
+    contactName:   z.string().optional().nullable(),
+    contactEmail:  z.string().optional().nullable(),
   }),
 });
+
+const contactEmailSchema = z.string().email().max(255);
+
+/**
+ * Returns [provided, value]: provided=false means "leave the stored value alone".
+ * '' / whitespace / explicit null clear the column; a malformed email is ignored (kept as-is
+ * locally) rather than wiping a previously valid address.
+ */
+function normalizeContactName(v: string | null | undefined): [boolean, string | null] {
+  if (v === undefined) return [false, null];
+  const trimmed = v?.trim() ?? '';
+  return [true, trimmed ? trimmed.slice(0, 255) : null];
+}
+
+function normalizeContactEmail(v: string | null | undefined): [boolean, string | null] {
+  if (v === undefined) return [false, null];
+  const trimmed = v?.trim() ?? '';
+  if (!trimmed) return [true, null];
+  return contactEmailSchema.safeParse(trimmed).success ? [true, trimmed] : [false, null];
+}
 
 export function createCrmWebhookRouter(pool: Pool) {
   const router = Router();
@@ -37,6 +62,7 @@ export function createCrmWebhookRouter(pool: Pool) {
     max: 30,
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => ipBucket(getClientIp(req)),
     message: { error: 'Too many requests' },
   });
 
@@ -132,6 +158,8 @@ export function createCrmWebhookRouter(pool: Pool) {
     const { workspaceId, tenantId, payload } = event;
     const stageParsed = stageSchema.safeParse(payload.stage);
     const stage = stageParsed.success ? stageParsed.data : null;
+    const [hasContactName, contactName] = normalizeContactName(payload.contactName);
+    const [hasContactEmail, contactEmail] = normalizeContactEmail(payload.contactEmail);
 
     (async () => {
       // The workspace must exist AND be linked to this exact crm-ninja account.
@@ -144,6 +172,15 @@ export function createCrmWebhookRouter(pool: Pool) {
         res.status(403).json({ error: 'Workspace is not linked to this CRM account' });
         return;
       }
+      // Deleted locally by a workspace admin -> tombstoned; ack without re-creating it.
+      const tomb = await pool.query(
+        'SELECT 1 FROM crm_client_tombstones WHERE workspace_id = $1 AND external_crm_id = $2',
+        [workspaceId, payload.externalCrmId],
+      );
+      if (tomb.rows.length > 0) {
+        res.json({ ok: true, ignored: 'deleted_locally' });
+        return;
+      }
       await pool.query(
         `INSERT INTO clients (workspace_id, external_crm_id, name, stage, mrr, contact_name, contact_email)
          VALUES ($1, $2, $3, COALESCE($4, 'prospect'), COALESCE($5, 0), $6, $7)
@@ -151,12 +188,12 @@ export function createCrmWebhookRouter(pool: Pool) {
            name          = EXCLUDED.name,
            stage         = COALESCE($4, clients.stage),
            mrr           = COALESCE($5, clients.mrr),
-           contact_name  = COALESCE($6, clients.contact_name),
-           contact_email = COALESCE($7, clients.contact_email),
+           contact_name  = CASE WHEN $8::boolean THEN $6 ELSE clients.contact_name END,
+           contact_email = CASE WHEN $9::boolean THEN $7 ELSE clients.contact_email END,
            updated_at    = now()`,
         [
           workspaceId, payload.externalCrmId, payload.name, stage,
-          payload.mrr ?? null, payload.contactName ?? null, payload.contactEmail ?? null,
+          payload.mrr ?? null, contactName, contactEmail, hasContactName, hasContactEmail,
         ],
       );
       console.info('[crm-webhook] client.upserted synced', { workspaceId, externalCrmId: payload.externalCrmId });

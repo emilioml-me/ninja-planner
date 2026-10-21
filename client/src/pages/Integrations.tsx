@@ -15,6 +15,7 @@ import {
   CheckCircle2, Circle, RefreshCw, Plug, Link2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { QueryError } from '@/components/QueryError';
 
 const INTEGRATION_META = {
   crm:       { icon: Users,           color: 'text-blue-500',   bg: 'bg-blue-500/10' },
@@ -26,8 +27,22 @@ const INTEGRATION_META = {
 
 type IntegrationKey = keyof typeof INTEGRATION_META;
 
+/** Upstream summary JSON is not validated: format a number only if it really is one. */
+function num(v: unknown): string {
+  const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+  return typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString() : '—';
+}
+
+function text(v: unknown): string {
+  return typeof v === 'string' || typeof v === 'number' ? String(v) : '';
+}
+
 export default function Integrations() {
-  const { data: status, isLoading: statusLoading } = useIntegrationsStatus();
+  // Only admins may bypass the server cache (?refresh=1 is ignored for other roles).
+  const isAdmin = useIsAdmin();
+  const {
+    data: status, isLoading: statusLoading, isError: statusIsError, error: statusError, refetch: refetchStatus,
+  } = useIntegrationsStatus();
   const {
     data: summary, isLoading: summaryLoading, isFetching: summaryFetching, isError: summaryIsError, dataUpdatedAt,
   } = useIntegrationsSummary();
@@ -59,17 +74,23 @@ export default function Integrations() {
             </p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-2"
-          onClick={() => refreshMut.mutate()}
-          disabled={refreshing}
-        >
-          <RefreshCw className={cn('h-3.5 w-3.5', refreshing && 'animate-spin')} />
-          Refresh
-        </Button>
+        {isAdmin && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-2"
+            onClick={() => refreshMut.mutate()}
+            disabled={refreshing}
+          >
+            <RefreshCw className={cn('h-3.5 w-3.5', refreshing && 'animate-spin')} />
+            Refresh
+          </Button>
+        )}
       </div>
+
+      {statusIsError && !status && (
+        <QueryError error={statusError} onRetry={() => refetchStatus()} />
+      )}
 
       {dataUpdatedAt > 0 && (
         <p className="text-xs text-muted-foreground">
@@ -180,7 +201,7 @@ function CrmTenantLink() {
   const [input, setInput] = useState('');
   const [code, setCode] = useState('');
 
-  const { data } = useQuery<{ tenantId: number | null }>({
+  const { data, isLoading, isError, error, refetch } = useQuery<{ tenantId: number | null }>({
     queryKey: ['/api/integrations/crm-tenant'],
     queryFn: () => apiRequest<{ tenantId: number | null }>('GET', '/api/integrations/crm-tenant'),
     enabled: isAdmin,
@@ -206,6 +227,27 @@ function CrmTenantLink() {
   const parsedTenantId = /^\d{1,10}$/.test(trimmedInput) ? Number(trimmedInput) : NaN;
   const validTenantId = Number.isSafeInteger(parsedTenantId) && parsedTenantId > 0 && parsedTenantId <= 2147483647;
 
+  // Don't flash the link form for an already-linked workspace while the tenant query loads.
+  if (isLoading) {
+    return (
+      <CardContent className="pt-0 border-t">
+        <Skeleton className="h-7 w-full mt-3" />
+      </CardContent>
+    );
+  }
+  if (isError && !data) {
+    return (
+      <CardContent className="pt-0 border-t">
+        <QueryError error={error} onRetry={() => refetch()} className="mt-3 py-3" />
+      </CardContent>
+    );
+  }
+
+  const confirmUnlink = (tenantId: number) => {
+    if (!window.confirm(`Unlink crm-ninja user #${tenantId}? CRM data and revenue/client sync stop until a new link is made (it needs a fresh linking code).`)) return;
+    mutation.mutate({ tenantId: null });
+  };
+
   return (
     <CardContent className="pt-0 border-t">
       <div className="flex items-center gap-2 pt-3">
@@ -218,7 +260,7 @@ function CrmTenantLink() {
             <Button
               variant="ghost" size="sm" className="h-7 text-xs"
               disabled={mutation.isPending}
-              onClick={() => mutation.mutate({ tenantId: null })}
+              onClick={() => confirmUnlink(data.tenantId as number)}
             >
               Unlink
             </Button>
@@ -264,8 +306,8 @@ function IntegrationDataPreview({ integrationKey, data }: { integrationKey: Inte
     const d = data as import('@/types/integrations').CrmSummary;
     return (
       <div className="flex gap-6 text-sm">
-        <div><p className="text-xs text-muted-foreground">Active clients</p><p className="font-semibold">{d.activeClients}</p></div>
-        <div><p className="text-xs text-muted-foreground">Total MRR</p><p className="font-semibold">${d.totalMRR.toLocaleString()}</p></div>
+        <div><p className="text-xs text-muted-foreground">Active clients</p><p className="font-semibold">{num(d.activeClients)}</p></div>
+        <div><p className="text-xs text-muted-foreground">Total MRR</p><p className="font-semibold">${num(d.totalMRR)}</p></div>
       </div>
     );
   }
@@ -273,8 +315,8 @@ function IntegrationDataPreview({ integrationKey, data }: { integrationKey: Inte
     const d = data as import('@/types/integrations').PaymentSummary;
     return (
       <div className="flex gap-6 text-sm">
-        <div><p className="text-xs text-muted-foreground">This month</p><p className="font-semibold">{d.currency} {d.currentMonthRevenue.toLocaleString()}</p></div>
-        <div><p className="text-xs text-muted-foreground">Transactions</p><p className="font-semibold">{d.transactionCount}</p></div>
+        <div><p className="text-xs text-muted-foreground">This month</p><p className="font-semibold">{text(d.currency)} {num(d.currentMonthRevenue)}</p></div>
+        <div><p className="text-xs text-muted-foreground">Transactions</p><p className="font-semibold">{num(d.transactionCount)}</p></div>
       </div>
     );
   }
@@ -282,9 +324,9 @@ function IntegrationDataPreview({ integrationKey, data }: { integrationKey: Inte
     const d = data as import('@/types/integrations').HelpdeskSummary;
     return (
       <div className="flex gap-6 text-sm">
-        <div><p className="text-xs text-muted-foreground">Open tickets</p><p className="font-semibold">{d.openTickets}</p></div>
-        <div><p className="text-xs text-muted-foreground">Urgent</p><p className={cn('font-semibold', d.urgentTickets > 0 && 'text-destructive')}>{d.urgentTickets}</p></div>
-        <div><p className="text-xs text-muted-foreground">Resolved today</p><p className="font-semibold text-green-600">{d.resolvedToday}</p></div>
+        <div><p className="text-xs text-muted-foreground">Open tickets</p><p className="font-semibold">{num(d.openTickets)}</p></div>
+        <div><p className="text-xs text-muted-foreground">Urgent</p><p className={cn('font-semibold', Number(d.urgentTickets) > 0 && 'text-destructive')}>{num(d.urgentTickets)}</p></div>
+        <div><p className="text-xs text-muted-foreground">Resolved today</p><p className="font-semibold text-green-600">{num(d.resolvedToday)}</p></div>
       </div>
     );
   }
@@ -292,7 +334,7 @@ function IntegrationDataPreview({ integrationKey, data }: { integrationKey: Inte
     const d = data as import('@/types/integrations').ScheduleSummary;
     return (
       <div className="flex gap-6 text-sm">
-        <div><p className="text-xs text-muted-foreground">Today</p><p className="font-semibold">{d.todayCount} appointments</p></div>
+        <div><p className="text-xs text-muted-foreground">Today</p><p className="font-semibold">{num(d.todayCount)} appointments</p></div>
       </div>
     );
   }
@@ -300,9 +342,9 @@ function IntegrationDataPreview({ integrationKey, data }: { integrationKey: Inte
     const d = data as import('@/types/integrations').NinjaTaskSummary;
     return (
       <div className="flex gap-6 text-sm">
-        <div><p className="text-xs text-muted-foreground">Level</p><p className="font-semibold">{d.level}</p></div>
-        <div><p className="text-xs text-muted-foreground">XP</p><p className="font-semibold">{d.xp.toLocaleString()}</p></div>
-        <div><p className="text-xs text-muted-foreground">Coins</p><p className="font-semibold">{d.coins.toLocaleString()}</p></div>
+        <div><p className="text-xs text-muted-foreground">Level</p><p className="font-semibold">{num(d.level)}</p></div>
+        <div><p className="text-xs text-muted-foreground">XP</p><p className="font-semibold">{num(d.xp)}</p></div>
+        <div><p className="text-xs text-muted-foreground">Coins</p><p className="font-semibold">{num(d.coins)}</p></div>
       </div>
     );
   }

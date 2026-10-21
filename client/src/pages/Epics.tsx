@@ -6,8 +6,9 @@ import { z } from 'zod';
 import { useAuth } from '@clerk/clerk-react';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
 import { useMembers } from '@/hooks/use-members';
+import { QueryError } from '@/components/QueryError';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -90,9 +91,9 @@ interface EpicRetroData {
 }
 
 const epicRetroSchema = z.object({
-  went_well:    z.string().optional(),
-  to_improve:   z.string().optional(),
-  action_items: z.string().optional(),
+  went_well:    z.string().max(5000, 'Max 5000 characters').optional(),
+  to_improve:   z.string().max(5000, 'Max 5000 characters').optional(),
+  action_items: z.string().max(5000, 'Max 5000 characters').optional(),
 });
 type EpicRetroForm = z.infer<typeof epicRetroSchema>;
 
@@ -102,7 +103,7 @@ function EpicRetro({ epicId, isAdmin }: { epicId: string; isAdmin: boolean }) {
   const { toast } = useToast();
   const [editing, setEditing] = useState(false);
 
-  const { data: retro } = useQuery<EpicRetroData | null>({
+  const { data: retro, isError, error, refetch } = useQuery<EpicRetroData | null>({
     queryKey: ['/api/epics', epicId, 'retro'],
     queryFn: () => apiRequest('GET', `/api/epics/${epicId}/retro`),
   });
@@ -119,7 +120,7 @@ function EpicRetro({ epicId, isAdmin }: { epicId: string; isAdmin: boolean }) {
       setEditing(false);
       toast({ title: 'Retrospective saved' });
     },
-    onError: () => toast({ title: 'Failed to save retro', variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Failed to save retro', description: e.message, variant: 'destructive' }),
   });
 
   const openEdit = () => {
@@ -133,6 +134,9 @@ function EpicRetro({ epicId, isAdmin }: { epicId: string; isAdmin: boolean }) {
 
   const hasContent = retro && (retro.went_well || retro.to_improve || retro.action_items);
 
+  if (isError && retro === undefined) {
+    return <QueryError error={error} onRetry={() => refetch()} className="mt-1" />;
+  }
   if (!hasContent && !isAdmin) return null;
 
   return (
@@ -155,18 +159,21 @@ function EpicRetro({ epicId, isAdmin }: { epicId: string; isAdmin: boolean }) {
               <FormItem>
                 <FormLabel className="text-xs">✅ What went well</FormLabel>
                 <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+                <FormMessage />
               </FormItem>
             )} />
             <FormField control={form.control} name="to_improve" render={({ field }) => (
               <FormItem>
                 <FormLabel className="text-xs">🔧 What to improve</FormLabel>
                 <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+                <FormMessage />
               </FormItem>
             )} />
             <FormField control={form.control} name="action_items" render={({ field }) => (
               <FormItem>
                 <FormLabel className="text-xs">🎯 Action items</FormLabel>
                 <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+                <FormMessage />
               </FormItem>
             )} />
             <div className="flex gap-2">
@@ -205,7 +212,7 @@ function EpicRetro({ epicId, isAdmin }: { epicId: string; isAdmin: boolean }) {
   );
 }
 
-function EpicComments({ epicId }: { epicId: string }) {
+function EpicComments({ epicId, isAdmin }: { epicId: string; isAdmin: boolean }) {
   const { userId } = useAuth();
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
@@ -213,10 +220,13 @@ function EpicComments({ epicId }: { epicId: string }) {
   const { displayName, initials: memberInitials } = useMembers();
   const [draft, setDraft] = useState('');
 
-  const { data: comments = [] } = useQuery<EpicComment[]>({
+  const {
+    data: commentsData, isLoading: commentsLoading, isError: commentsError, error: commentsErr, refetch: refetchComments,
+  } = useQuery<EpicComment[]>({
     queryKey: ['/api/epics', epicId, 'comments'],
     queryFn: () => apiRequest<EpicComment[]>('GET', `/api/epics/${epicId}/comments`),
   });
+  const comments = commentsData ?? [];
 
   const addMut = useMutation({
     mutationFn: (body: string) => apiRequest('POST', `/api/epics/${epicId}/comments`, { body }),
@@ -224,7 +234,7 @@ function EpicComments({ epicId }: { epicId: string }) {
       qc.invalidateQueries({ queryKey: ['/api/epics', epicId, 'comments'] });
       setDraft('');
     },
-    onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Failed to add comment', description: e.message, variant: 'destructive' }),
   });
 
   const deleteMut = useMutation({
@@ -246,7 +256,11 @@ function EpicComments({ epicId }: { epicId: string }) {
         <MessageSquare className="h-3.5 w-3.5" /> Comments
       </p>
       <div className="space-y-3 max-h-52 overflow-y-auto pr-1">
-        {comments.length === 0 ? (
+        {commentsLoading ? (
+          <Skeleton className="h-10 w-full" />
+        ) : commentsError && !commentsData ? (
+          <QueryError error={commentsErr} onRetry={() => refetchComments()} />
+        ) : comments.length === 0 ? (
           <p className="text-xs text-muted-foreground text-center py-3">No comments yet. Be the first!</p>
         ) : (
           comments.map((c) => {
@@ -266,11 +280,13 @@ function EpicComments({ epicId }: { epicId: string }) {
                   </div>
                   <p className="text-sm mt-0.5 whitespace-pre-wrap break-words">{c.body}</p>
                 </div>
-                {isOwn && (
+                {/* Authors delete their own comments; admins may delete any. */}
+                {(isOwn || isAdmin) && (
                   <Button
                     variant="ghost" size="icon"
-                    className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5"
+                    className="h-6 w-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity shrink-0 mt-0.5"
                     onClick={() => { if (confirm('Delete this comment?')) deleteMut.mutate(c.id); }}
+                    aria-label="Delete comment"
                   >
                     <Trash2 className="h-3 w-3" />
                   </Button>
@@ -282,7 +298,7 @@ function EpicComments({ epicId }: { epicId: string }) {
       </div>
       <div className="flex gap-2">
         <Textarea
-          placeholder="Add a comment…" rows={2} value={draft}
+          placeholder="Add a comment…" rows={2} value={draft} maxLength={5000}
           onChange={(e) => setDraft(e.target.value)}
           className="text-sm"
         />
@@ -326,8 +342,8 @@ const httpUrlSchema = z.string().max(500).refine(
 );
 
 const formSchema = z.object({
-  title:        z.string().min(1, 'Required').max(500),
-  description:  z.string().optional(),
+  title:        z.string().trim().min(1, 'Required').max(500),
+  description:  z.string().max(5000, 'Max 5000 characters').optional(),
   status:       z.enum(['active', 'completed', 'archived']),
   color:        z.string().regex(/^#[0-9a-fA-F]{6}$/),
   external_ref: httpUrlSchema.or(z.literal('')).optional(),
@@ -378,7 +394,7 @@ function EpicDetailDialog({
             <Progress value={pct} className="h-1.5" />
             <EpicAiSummary epicId={epic.id} />
             <EpicRetro epicId={epic.id} isAdmin={isAdmin} />
-            <EpicComments epicId={epic.id} />
+            <EpicComments epicId={epic.id} isAdmin={isAdmin} />
           </>
         )}
       </DialogContent>
@@ -516,35 +532,47 @@ export default function Epics() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
-  const isAdmin = useIsAdmin();
+  // Privileged controls stay hidden until the workspace role has loaded (no flash).
+  const { isAdmin, isLoading: roleLoading } = useMyRole();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Epic | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Epic | null>(null);
   const [viewingId, setViewingId] = useState<string | null>(null);
 
-  const { data: epics = [], isLoading } = useQuery<Epic[]>({
+  const { data, isLoading: epicsLoading, isError, error, refetch } = useQuery<Epic[]>({
     queryKey: ['/api/epics'],
     queryFn: () => apiRequest('GET', '/api/epics'),
   });
+  const epics = data ?? [];
+  const isLoading = epicsLoading || roleLoading;
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/epics'] });
 
+  // A cleared description is sent as null so the clear persists on PATCH.
+  const toPayload = (d: FormData) => ({ ...d, description: d.description?.trim() ? d.description : null });
+
   const createMutation = useMutation({
-    mutationFn: (data: FormData) => apiRequest('POST', '/api/epics', data),
+    mutationFn: (data: FormData) => apiRequest('POST', '/api/epics', toPayload(data)),
     onSuccess: () => { invalidate(); setOpen(false); toast({ title: 'Epic created' }); },
-    onError:   () => toast({ title: 'Failed to create epic', variant: 'destructive' }),
+    onError:   (e: Error) => toast({ title: 'Failed to create epic', description: e.message, variant: 'destructive' }),
   });
 
   const updateMutation = useMutation({
-    mutationFn: (data: FormData) => apiRequest('PATCH', `/api/epics/${editing!.id}`, data),
+    mutationFn: (data: FormData) => apiRequest('PATCH', `/api/epics/${editing!.id}`, toPayload(data)),
     onSuccess: () => { invalidate(); setEditing(null); toast({ title: 'Epic updated' }); },
-    onError:   () => toast({ title: 'Failed to update epic', variant: 'destructive' }),
+    onError:   (e: Error) => toast({ title: 'Failed to update epic', description: e.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/epics/${id}`),
-    onSuccess: () => { invalidate(); setDeleteTarget(null); toast({ title: 'Epic deleted' }); },
-    onError:   () => toast({ title: 'Failed to delete epic', variant: 'destructive' }),
+    onSuccess: () => {
+      invalidate();
+      // Tasks (and budgets / meeting notes) lose their epic link server-side.
+      qc.invalidateQueries({ queryKey: ['/api/tasks'] });
+      setDeleteTarget(null);
+      toast({ title: 'Epic deleted' });
+    },
+    onError:   (e: Error) => toast({ title: 'Failed to delete epic', description: e.message, variant: 'destructive' }),
   });
 
   // Track the viewed epic by id so the detail dialog reflects refetched progress/status.
@@ -566,30 +594,35 @@ export default function Epics() {
               : 0;
             const { label: statusLabel, variant } = STATUS_META[epic.status] ?? STATUS_META.active;
             return (
+              // The card itself is not interactive: the title button opens the detail view and its
+              // ::after overlay stretches over the whole card, while the menu and external link
+              // sit above it (z-10). No interactive elements nested inside another one.
               <Card
                 key={epic.id}
-                className="relative overflow-hidden cursor-pointer hover:border-primary/40 transition-colors"
-                role="button"
-                tabIndex={0}
-                onClick={() => setViewingId(epic.id)}
-                onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setViewingId(epic.id); } }}
+                className="relative overflow-hidden hover:border-primary/40 focus-within:border-primary/40 transition-colors"
               >
                 {/* Color stripe */}
                 <div className="absolute top-0 left-0 right-0 h-1" style={{ backgroundColor: epic.color }} />
                 <CardHeader className="pt-4 pb-2 flex flex-row items-start justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     <Layers className="h-4 w-4 shrink-0" style={{ color: epic.color }} />
-                    <h3 className="font-semibold text-sm leading-tight truncate">{epic.title}</h3>
+                    <h3 className="font-semibold text-sm leading-tight min-w-0">
+                      <button
+                        type="button"
+                        className="block max-w-full truncate text-left after:absolute after:inset-0 after:content-[''] focus-visible:outline-none focus-visible:underline"
+                        onClick={() => setViewingId(epic.id)}
+                      >
+                        {epic.title}
+                      </button>
+                    </h3>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <Badge variant={variant} className="text-[10px] px-1.5">{statusLabel}</Badge>
                     {isAdmin && (
-                      // React events bubble through portals, so menu-item clicks would also hit
-                      // the card's onClick (opening the detail view) without this.
-                      <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                      <div className="relative z-10">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon" className="h-6 w-6">
+                          <Button variant="ghost" size="icon" className="h-6 w-6" aria-label={`Actions for ${epic.title}`}>
                             <MoreVertical className="h-3.5 w-3.5" />
                           </Button>
                         </DropdownMenuTrigger>
@@ -618,8 +651,7 @@ export default function Epics() {
                       href={epic.external_ref}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                      onClick={(e) => e.stopPropagation()}
+                      className="relative z-10 inline-flex items-center gap-1 text-xs text-primary hover:underline"
                     >
                       <ExternalLink className="h-3 w-3" />
                       {externalRefLabel(epic.external_ref)}
@@ -659,6 +691,8 @@ export default function Epics() {
         <div className="flex items-center gap-2">
           <Button
             size="sm" variant="outline" className="gap-1.5"
+            disabled={epics.length === 0}
+            title={epics.length === 0 ? 'Nothing to export yet' : undefined}
             onClick={() => downloadCsv('epics.csv', epics.map((e) => ({
               title: e.title,
               status: e.status,
@@ -686,6 +720,8 @@ export default function Epics() {
             <Card key={i}><CardContent className="pt-4"><Skeleton className="h-24 w-full" /></CardContent></Card>
           ))}
         </div>
+      ) : isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : epics.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 text-center">
           <Layers className="h-10 w-10 text-muted-foreground/30 mb-3" />
@@ -737,8 +773,9 @@ export default function Epics() {
           <DialogHeader>
             <DialogTitle>Delete epic?</DialogTitle>
             <DialogDescription>
-              <strong>"{deleteTarget?.title}"</strong> will be removed. Tasks assigned to this epic
-              will become unassigned. This cannot be undone.
+              <strong>"{deleteTarget?.title}"</strong> will be removed. Its tasks are kept but lose
+              their link to this epic, and linked budgets and meeting notes are unlinked. The epic's
+              retrospective and comments are permanently deleted. This cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

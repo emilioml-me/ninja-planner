@@ -31,6 +31,23 @@ export function formatApiError(body: unknown, fallback: string): string {
   const obj = body as Record<string, unknown>;
   const err = 'error' in obj ? obj.error : obj;
 
+  // `{ error: 'Invalid request', details: <flatten() | issues[]> }` - show the field messages
+  // instead of only the generic summary.
+  if (typeof err === 'string' && obj.details && typeof obj.details === 'object') {
+    const detail = Array.isArray(obj.details)
+      ? obj.details
+          .map((i) => {
+            const issue = i as { path?: unknown; message?: unknown };
+            if (typeof issue?.message !== 'string') return '';
+            const path = Array.isArray(issue.path) ? issue.path.join('.') : '';
+            return path ? `${path}: ${issue.message}` : issue.message;
+          })
+          .filter(Boolean)
+          .join('; ')
+      : formatApiError({ error: obj.details }, '');
+    if (detail) return err.trim() ? `${err.trim()}: ${detail}` : detail;
+  }
+
   if (typeof err === 'string') return err.trim() || fallback;
   if (err && typeof err === 'object') {
     const e = err as Record<string, unknown>;
@@ -51,6 +68,25 @@ export function formatApiError(body: unknown, fallback: string): string {
   return fallback;
 }
 
+/** The browser's IANA timezone (e.g. 'America/Mexico_City'), or '' when unavailable. */
+export function getBrowserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Headers every request to our API should carry. X-Timezone lets the server compute "today" and
+ * date-of-timestamp buckets in the user's local calendar instead of UTC. Use it for raw fetch()
+ * calls too (public pages that don't go through useApiClient).
+ */
+export function baseHeaders(): Record<string, string> {
+  const tz = getBrowserTimeZone();
+  return tz ? { 'X-Timezone': tz } : {};
+}
+
 export function useApiClient() {
   const { getToken } = useAuth();
 
@@ -63,6 +99,7 @@ export function useApiClient() {
       res = await fetch(url, {
         method,
         headers: {
+          ...baseHeaders(),
           ...(data != null ? { 'Content-Type': 'application/json' } : {}),
           Authorization: `Bearer ${token}`,
         },

@@ -9,6 +9,17 @@ import {
   removeRoadmapVote,
   type VoteResult,
 } from '../services/shareService.js';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
+
+/**
+ * C1/L27: the network a vote is attributed to - the real client IP (Cloudflare-aware, see
+ * lib/clientIp) with IPv6 collapsed to its /64, so rotating addresses inside one IPv6 allocation
+ * doesn't reset the per-network vote cap.
+ */
+function voterNetwork(req: import('express').Request): string | undefined {
+  const ip = getClientIp(req);
+  return ip ? ipBucket(ip) : undefined;
+}
 
 /**
  * Key for hashing voter IPs. A plain SHA-256 of an IPv4 address is trivially reversible by
@@ -69,6 +80,7 @@ const voteLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => ipBucket(getClientIp(req)),
   message: { error: 'Too many votes, please try again later' },
 });
 
@@ -79,6 +91,7 @@ const publicReadLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => ipBucket(getClientIp(req)),
   message: { error: 'Too many requests' },
 });
 
@@ -118,7 +131,7 @@ router.post('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, next)
       res.status(404).json({ error: 'Roadmap not found or link expired' });
       return;
     }
-    const ipHash = hashIp(req.ip);
+    const ipHash = hashIp(voterNetwork(req));
     if (!ipHash) {
       res.status(400).json({ error: 'Unable to process vote: client IP could not be determined' });
       return;
@@ -147,13 +160,14 @@ router.delete('/roadmap/:token/votes/:itemId', voteLimiter, async (req, res, nex
       res.status(404).json({ error: 'Roadmap not found or link expired' });
       return;
     }
-    const ipHash = hashIp(req.ip);
+    const network = voterNetwork(req);
+    const ipHash = hashIp(network);
     if (!ipHash) {
       res.status(400).json({ error: 'Unable to process vote: client IP could not be determined' });
       return;
     }
     const result = await removeRoadmapVote(
-      req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash, legacyHashIp(req.ip),
+      req.params.itemId, workspaceId, parsed.data.visitor_id, ipHash, legacyHashIp(network),
     );
     sendVoteResult(res, result);
   } catch (err) {

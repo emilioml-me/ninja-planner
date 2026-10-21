@@ -25,7 +25,13 @@ const createSchema = z.object({
 // DB errors (e.g. 23505 duplicate period) are passed to next(err) and mapped centrally by
 // middleware/errorHandler.ts (23505 -> 409).
 
-const updateSchema = createSchema.partial();
+// period_start is snapped to the first day of its month/quarter/year by the service (M5).
+// PATCH: notes may be cleared with null; actual_source accepts only null (hand the month back to
+// integration syncs) - a manual actual_amount change marks the row 'manual' automatically.
+const updateSchema = createSchema.partial().extend({
+  notes:         z.string().max(2000).nullable().optional(),
+  actual_source: z.null().optional(),
+});
 
 // GET /api/revenue
 router.get('/', async (req, res, next) => {

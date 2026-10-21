@@ -4,9 +4,13 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY}
+        # Baked into the Vite bundle at build time. Fail the build instead of shipping an empty key:
+        #   export VITE_CLERK_PUBLISHABLE_KEY=$(grep -E '^VITE_CLERK_PUBLISHABLE_KEY=' /srv/secrets/ninja-planner.env | cut -d= -f2- | tr -d "\"'")
+        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY:?VITE_CLERK_PUBLISHABLE_KEY must be exported before docker compose build}
     container_name: ninja-planner
     restart: unless-stopped
+    # Graceful shutdown drains in-flight background work for up to 20s (hard exit at 25s).
+    stop_grace_period: 30s
     env_file: /srv/secrets/ninja-planner.env
     ports:
       - "127.0.0.1:3207:3206"

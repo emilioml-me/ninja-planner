@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -29,6 +29,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Plus, MoreVertical, Pencil, Trash2, Users, RefreshCw } from 'lucide-react';
 import { CustomFieldsSection } from '@/components/CustomFieldsSection';
+import { QueryError } from '@/components/QueryError';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 import { cn } from '@/lib/utils';
 
@@ -48,10 +49,10 @@ const STAGES = ['prospect', 'proposal', 'active', 'churned'] as const;
 const formSchema = z.object({
   name: z.string().min(1, 'Required').max(255),
   contact_name: z.string().max(255).optional(),
-  contact_email: z.string().email('Invalid email').optional().or(z.literal('')),
+  contact_email: z.string().email('Invalid email').max(255).optional().or(z.literal('')),
   stage: z.enum(STAGES),
-  mrr: z.coerce.number().min(0),
-  notes: z.string().optional(),
+  mrr: z.coerce.number().finite().min(0, 'Must be >= 0').max(9_999_999_999.99, 'Too large'),
+  notes: z.string().max(10_000, 'Max 10000 characters').optional(),
 });
 type FormData = z.infer<typeof formSchema>;
 
@@ -80,11 +81,18 @@ export default function Clients() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Client | null>(null);
   const [tab, setTab] = useState('all');
+  // Save function registered by the dialog's CustomFieldsSection; "Update" awaits it so custom
+  // field edits are saved together with the client instead of needing a separate button.
+  const customFieldsSaveRef = useRef<(() => Promise<void>) | null>(null);
+  const registerCustomFieldsSave = useCallback((save: (() => Promise<void>) | null) => {
+    customFieldsSaveRef.current = save;
+  }, []);
 
-  const { data: clients = [], isLoading } = useQuery<Client[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<Client[]>({
     queryKey: ['/api/clients'],
     queryFn: () => apiRequest<Client[]>('GET', '/api/clients'),
   });
+  const clients = data ?? [];
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
@@ -121,7 +129,16 @@ export default function Clients() {
   });
 
   const updateMut = useMutation({
-    mutationFn: (d: ClientPayload) => apiRequest('PATCH', `/api/clients/${editing!.id}`, d),
+    mutationFn: async (d: ClientPayload) => {
+      // Custom fields first: if they can't be saved (values not loaded yet / PUT failed) nothing
+      // is written and the dialog stays open with the error.
+      try {
+        await customFieldsSaveRef.current?.();
+      } catch (e) {
+        throw new Error(`Custom fields could not be saved: ${e instanceof Error ? e.message : 'unknown error'}`);
+      }
+      await apiRequest('PATCH', `/api/clients/${editing!.id}`, d);
+    },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/clients'] }); setOpen(false); setEditing(null); toast({ title: 'Client updated' }); },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
@@ -134,10 +151,21 @@ export default function Clients() {
 
   const isAdmin = useIsAdmin();
   const syncMut = useMutation({
-    mutationFn: () => apiRequest<{ synced: number }>('POST', '/api/integrations/sync-clients'),
-    onSuccess: (data) => {
+    mutationFn: () => apiRequest<{ synced: number; skipped?: number | unknown[]; ignored_deleted?: number }>(
+      'POST', '/api/integrations/sync-clients',
+    ),
+    onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['/api/clients'] });
-      toast({ title: `Synced ${data.synced} client${data.synced === 1 ? '' : 's'} from CRM` });
+      const synced = Number(res.synced) || 0;
+      const skipped = Array.isArray(res.skipped) ? res.skipped.length : Number(res.skipped ?? 0) || 0;
+      const ignoredDeleted = Number(res.ignored_deleted ?? 0) || 0;
+      const notes: string[] = [];
+      if (skipped > 0) notes.push(`${skipped} skipped (missing id or name)`);
+      if (ignoredDeleted > 0) notes.push(`${ignoredDeleted} not re-created (deleted here)`);
+      toast({
+        title: `Synced ${synced} client${synced === 1 ? '' : 's'} from CRM`,
+        description: notes.length ? notes.join(', ') : undefined,
+      });
     },
     onError: (e: Error) => toast({ title: 'CRM sync failed', description: e.message, variant: 'destructive' }),
   });
@@ -210,7 +238,9 @@ export default function Clients() {
           </TabsList>
 
           <TabsContent value={tab}>
-            {isLoading ? (
+            {isError && !data ? (
+              <QueryError error={error} onRetry={() => refetch()} className="mt-2" />
+            ) : isLoading ? (
               <div className="space-y-2 mt-2">
                 {[1,2,3].map(i => <Skeleton key={i} className="h-14 w-full" />)}
               </div>
@@ -264,7 +294,12 @@ export default function Clients() {
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               className="text-destructive"
-                              onClick={() => { if (confirm(`Delete client "${c.name}"?`)) deleteMut.mutate(c.id); }}
+                              onClick={() => {
+                                const msg = c.external_crm_id
+                                  ? `Delete client "${c.name}"? It is linked to the CRM and will not be re-created by future CRM syncs.`
+                                  : `Delete client "${c.name}"?`;
+                                if (confirm(msg)) deleteMut.mutate(c.id);
+                              }}
                             >
                               <Trash2 className="h-4 w-4 mr-2" /> Delete
                             </DropdownMenuItem>
@@ -350,8 +385,10 @@ export default function Clients() {
             </form>
           </Form>
 
-          {/* Custom fields only make sense once the client exists */}
-          {editing && <CustomFieldsSection entityType="client" entityId={editing.id} />}
+          {/* Custom fields only make sense once the client exists; saved by "Update" above. */}
+          {editing && (
+            <CustomFieldsSection entityType="client" entityId={editing.id} registerSave={registerCustomFieldsSave} />
+          )}
         </DialogContent>
       </Dialog>
     </div>

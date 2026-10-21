@@ -5,7 +5,8 @@ import {
   DragOverlay,
   closestCorners,
   KeyboardSensor,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   useSensor,
   useSensors,
   type DragStartEvent,
@@ -57,6 +58,7 @@ interface KanbanBoardProps {
 const BASE_POSITION = 1024;
 const MIN_GAP = 4;
 const MIN_BASE = 256;
+const RESEQUENCE_MAX = 2000;
 
 export function KanbanBoard({
   columns,
@@ -69,9 +71,17 @@ export function KanbanBoard({
 }: KanbanBoardProps) {
   const [activeCard, setActiveCard] = useState<KanbanCard | null>(null);
 
+  // Without an activation constraint every pointerdown started a drag and dnd-kit swallowed the
+  // following click, so cards never opened. Mouse drags start after 5px of movement; touch drags
+  // need a short press-and-hold so swiping still scrolls the board. Keyboard drags start with
+  // Space only -- Enter on a focused card opens it (see KanbanColumn).
   const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+      keyboardCodes: { start: ['Space'], cancel: ['Escape'], end: ['Space', 'Enter'] },
+    }),
   );
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -157,7 +167,8 @@ export function KanbanBoard({
     }
 
     let resequenceData: Array<{ id: string; position: number }> | undefined;
-    if (needsResequence) {
+    // Only the target column is resequenced; the server accepts up to RESEQUENCE_MAX rows.
+    if (needsResequence && sortedTarget.length + 1 <= RESEQUENCE_MAX) {
       const reordered = [...sortedTarget];
       reordered.splice(insertIndex, 0, draggedCard);
       resequenceData = reordered.map((card, i) => ({ id: card.id, position: (i + 1) * BASE_POSITION }));
@@ -182,7 +193,8 @@ export function KanbanBoard({
               columnId={column.id}
               title={column.title}
               cards={column.cards}
-              onAddCard={() => onAddCard?.(column.id)}
+              onAddCard={onAddCard ? () => onAddCard(column.id) : undefined}
+              dragDisabled={!onReorder}
               onCardClick={onCardClick}
               onDeleteCard={onDeleteCard}
               members={members}

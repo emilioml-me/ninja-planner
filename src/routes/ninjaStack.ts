@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
@@ -8,14 +8,13 @@ import { requirePlatformAdmin } from '../config/platformAdmins.js';
 import { getSubscriptionStatus, activateSubscription } from '../services/subscriptionService.js';
 
 const router = Router();
-router.use(requireWorkspace);
 
 // Plan slugs as issued by ninja-core (e.g. 'starter', 'pro'). Validated as a short slug rather
 // than a hard-coded enum so new ninja-core plans don't need a deploy here.
 const planSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_-]{0,49}$/, 'Invalid plan');
 
 // GET /api/ninja-stack/status
-router.get('/status', async (req, res, next) => {
+router.get('/status', requireWorkspace, async (req, res, next) => {
   try {
     const status = await getSubscriptionStatus(req.workspace.id);
     res.json(status);
@@ -23,7 +22,7 @@ router.get('/status', async (req, res, next) => {
 });
 
 // POST /api/ninja-stack/activate  [admin only]
-router.post('/activate', requireAdmin, async (req, res, next) => {
+router.post('/activate', requireWorkspace, requireAdmin, async (req, res, next) => {
   try {
     const { code } = z.object({ code: z.string().trim().min(1).max(200) }).parse(req.body);
     const status = await activateSubscription(req.workspace.id, code);
@@ -39,16 +38,35 @@ router.post('/activate', requireAdmin, async (req, res, next) => {
   }
 });
 
-// POST /api/ninja-stack/override  (platform admin only — grant free access)
+// ─── Platform-admin override routes ───────────────────────────────────────────
+// M13: these take an explicit target workspace id and do NOT run requireWorkspace - an operator
+// must be able to grant/revoke an override on any workspace without joining it as a member
+// (joining = full data access). requirePlatformAdmin is the only gate. Audit rows record the
+// target workspace (admin_override_audit.workspace_id) and the acting operator.
+
+const workspaceIdSchema = z.string().uuid();
+
+/** Resolves :workspaceId to an existing workspace id, or sends 400/404 and returns null. */
+async function resolveTargetWorkspace(req: Request, res: Response): Promise<string | null> {
+  const parsed = workspaceIdSchema.safeParse(req.params.workspaceId);
+  if (!parsed.success) { res.status(400).json({ error: 'Invalid workspace id' }); return null; }
+  const { rows } = await pool.query<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [parsed.data]);
+  if (rows.length === 0) { res.status(404).json({ error: 'Workspace not found' }); return null; }
+  return rows[0].id;
+}
+
+// POST /api/ninja-stack/workspaces/:workspaceId/override  (platform admin only — grant free access)
 // C6: previously gated by requireAdmin, i.e. any WORKSPACE admin could grant their own workspace
 // a free paid plan. Now restricted to ninja-stack operators listed in PLATFORM_ADMIN_USER_IDS.
-router.post('/override', requirePlatformAdmin, async (req, res, next) => {
+router.post('/workspaces/:workspaceId/override', requirePlatformAdmin, async (req, res, next) => {
   const parsed = z.object({ plan: planSchema.default('pro') }).safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
   const { plan } = parsed.data;
 
   let client: PoolClient | undefined;
   try {
+    const workspaceId = await resolveTargetWorkspace(req, res);
+    if (!workspaceId) return;
     client = await pool.connect();
     await client.query('BEGIN');
     // ON CONFLICT deliberately leaves `code`/`allowed_apps` untouched when a real subscription
@@ -63,16 +81,16 @@ router.post('/override', requirePlatformAdmin, async (req, res, next) => {
          admin_override = TRUE,
          overridden_by = EXCLUDED.overridden_by,
          last_verified_at = NOW()`,
-      [req.workspace.id, plan, req.auth.userId],
+      [workspaceId, plan, req.auth.userId],
     );
     // Same transaction: an override must never exist without its audit row.
     await client.query(
       `INSERT INTO admin_override_audit (workspace_id, action, plan, actor_clerk_id)
        VALUES ($1, 'granted', $2, $3)`,
-      [req.workspace.id, plan, req.auth.userId],
+      [workspaceId, plan, req.auth.userId],
     );
     await client.query('COMMIT');
-    res.json({ ok: true, plan });
+    res.json({ ok: true, workspace_id: workspaceId, plan });
   } catch (err) {
     await client?.query('ROLLBACK').catch(() => {});
     next(err);
@@ -81,10 +99,12 @@ router.post('/override', requirePlatformAdmin, async (req, res, next) => {
   }
 });
 
-// DELETE /api/ninja-stack/override  (platform admin only — revoke a free-access override)
-router.delete('/override', requirePlatformAdmin, async (req, res, next) => {
+// DELETE /api/ninja-stack/workspaces/:workspaceId/override  (platform admin only — revoke a free-access override)
+router.delete('/workspaces/:workspaceId/override', requirePlatformAdmin, async (req, res, next) => {
   let client: PoolClient | undefined;
   try {
+    const workspaceId = await resolveTargetWorkspace(req, res);
+    if (!workspaceId) return;
     client = await pool.connect();
     await client.query('BEGIN');
     // Just flipping admin_override to FALSE wasn't enough: getSubscriptionStatus() only
@@ -100,34 +120,34 @@ router.delete('/override', requirePlatformAdmin, async (req, res, next) => {
     // immediate revalidation against the real underlying code by resetting last_verified_at.
     const target = await client.query<{ code: string }>(
       'SELECT code FROM ninja_stack_subscriptions WHERE workspace_id = $1 AND admin_override = TRUE FOR UPDATE',
-      [req.workspace.id],
+      [workspaceId],
     );
     if (target.rows.length === 0) {
       await client.query('COMMIT');
-      res.json({ ok: true });
+      res.json({ ok: true, workspace_id: workspaceId });
       return;
     }
 
     const result = target.rows[0].code === 'admin-override'
       ? await client.query(
           'DELETE FROM ninja_stack_subscriptions WHERE workspace_id = $1 AND admin_override = TRUE',
-          [req.workspace.id],
+          [workspaceId],
         )
       : await client.query(
           `UPDATE ninja_stack_subscriptions
            SET admin_override = FALSE, overridden_by = NULL, last_verified_at = to_timestamp(0)
            WHERE workspace_id = $1 AND admin_override = TRUE`,
-          [req.workspace.id],
+          [workspaceId],
         );
     if ((result.rowCount ?? 0) > 0) {
       await client.query(
         `INSERT INTO admin_override_audit (workspace_id, action, actor_clerk_id)
          VALUES ($1, 'revoked', $2)`,
-        [req.workspace.id, req.auth.userId],
+        [workspaceId, req.auth.userId],
       );
     }
     await client.query('COMMIT');
-    res.json({ ok: true });
+    res.json({ ok: true, workspace_id: workspaceId });
   } catch (err) {
     await client?.query('ROLLBACK').catch(() => {});
     next(err);
@@ -136,17 +156,23 @@ router.delete('/override', requirePlatformAdmin, async (req, res, next) => {
   }
 });
 
-// GET /api/ninja-stack/override/audit  (platform admin only)
-router.get('/override/audit', requirePlatformAdmin, async (req, res, next) => {
+// GET /api/ninja-stack/workspaces/:workspaceId/override/audit  (platform admin only)
+router.get('/workspaces/:workspaceId/override/audit', requirePlatformAdmin, async (req, res, next) => {
   try {
+    const workspaceId = await resolveTargetWorkspace(req, res);
+    if (!workspaceId) return;
+    // Operators usually aren't members of the target workspace, so display_name is best-effort
+    // (any workspace where the operator has a cached profile).
     const { rows } = await pool.query(
-      `SELECT a.action, a.plan, a.actor_clerk_id, a.created_at, wm.display_name
+      `SELECT a.workspace_id, a.action, a.plan, a.actor_clerk_id, a.created_at,
+              (SELECT wm.display_name FROM workspace_members wm
+                WHERE wm.clerk_user_id = a.actor_clerk_id AND wm.display_name IS NOT NULL
+                ORDER BY (wm.workspace_id = a.workspace_id) DESC LIMIT 1) AS display_name
        FROM admin_override_audit a
-       LEFT JOIN workspace_members wm ON wm.clerk_user_id = a.actor_clerk_id AND wm.workspace_id = a.workspace_id
        WHERE a.workspace_id = $1
        ORDER BY a.created_at DESC
        LIMIT 100`,
-      [req.workspace.id],
+      [workspaceId],
     );
     res.json(rows);
   } catch (err) { next(err); }

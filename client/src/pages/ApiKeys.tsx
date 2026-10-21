@@ -10,6 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Plus, Trash2, Copy, Key, Eye, EyeOff } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { QueryError } from '@/components/QueryError';
 
 interface ApiKey {
   id: string;
@@ -36,13 +37,14 @@ export default function ApiKeys() {
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [showKey,     setShowKey]     = useState(false);
 
-  const { data: keys = [], isLoading } = useQuery<ApiKey[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<ApiKey[]>({
     queryKey: ['api-keys'],
     queryFn: () => apiRequest('GET', '/api/api-keys'),
     // Previously fired unconditionally, guaranteeing a 403 (this route is requireAdmin-gated
     // server-side) plus react-query's default retry for any non-admin who reaches this page.
     enabled: isAdmin,
   });
+  const keys = data ?? [];
 
   const activeKeys = keys.filter((k) => !k.revoked_at);
 
@@ -59,13 +61,13 @@ export default function ApiKeys() {
       setRevealedKey(res.key);
       setShowKey(true);
     },
-    onError: () => toast({ title: 'Failed to create key', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create key', description: err.message, variant: 'destructive' }),
   });
 
   const revokeMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/api-keys/${id}`),
     onSuccess: () => { invalidate(); toast({ title: 'Key revoked' }); },
-    onError: () => toast({ title: 'Failed to revoke key', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to revoke key', description: err.message, variant: 'destructive' }),
   });
 
   function toggleScope(scope: string) {
@@ -91,10 +93,18 @@ export default function ApiKeys() {
     revokeMutation.mutate(k.id);
   }
 
-  // Wait for Clerk to resolve before rendering the admin-required block — otherwise an actual
-  // admin sees this flash briefly on every cold load/refresh, since orgRole (and thus isAdmin)
-  // is undefined/false until Clerk finishes loading.
-  if (isAdminLoaded && !isAdmin) {
+  // While the role is loading show skeletons: neither the admin-required block nor the
+  // (not yet fetched) empty key list.
+  if (!isAdminLoaded) {
+    return (
+      <div className="p-6 space-y-3">
+        <Skeleton className="h-8 w-40" />
+        {[1, 2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
+      </div>
+    );
+  }
+
+  if (!isAdmin) {
     return (
       <div className="p-6">
         <h1 className="text-2xl font-bold mb-2">API Keys</h1>
@@ -155,7 +165,7 @@ export default function ApiKeys() {
           <div className="space-y-4">
             <div>
               <label className="text-sm font-medium">Name</label>
-              <Input value={newName} onChange={(e) => setNewName(e.target.value)}
+              <Input value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={100}
                 placeholder="e.g. Production integration" className="mt-1" />
             </div>
             <div>
@@ -186,7 +196,9 @@ export default function ApiKeys() {
       </Dialog>
 
       {/* Key list */}
-      {isLoading ? (
+      {isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
+      ) : isLoading ? (
         <div className="space-y-3">{[1,2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}</div>
       ) : activeKeys.length === 0 ? (
         <div className="text-center py-20 text-muted-foreground">

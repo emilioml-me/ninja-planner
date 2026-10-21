@@ -4,7 +4,9 @@ import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 
 // Env is read lazily (not at module load) so the app can boot without R2 configured — attachment
 // routes check isR2Configured() and return 503 instead of the whole process crashing at import.
-export const bucket = process.env.R2_BUCKET ?? 'ninja-planner';
+export function getBucket(): string {
+  return (process.env.R2_BUCKET ?? '').trim() || 'ninja-planner';
+}
 
 export function isR2Configured(): boolean {
   return Boolean(
@@ -45,7 +47,7 @@ const UPLOAD_URL_TTL_SECONDS = 120;
  */
 export async function getUploadUrl(key: string, mimeType: string): Promise<string> {
   const cmd = new PutObjectCommand({
-    Bucket:      bucket,
+    Bucket:      getBucket(),
     Key:         key,
     ContentType: mimeType,
   });
@@ -60,15 +62,21 @@ export async function getDownloadUrl(key: string, fileName: string): Promise<str
   // response header, so an unescaped \r\n in a stored filename could inject additional header
   // lines into that response).
   const safeName = fileName
-    .replace(/\0/g, '')          // null bytes
-    .replace(/[\r\n]/g, '')      // CR/LF — header-splitting guard
-    .replace(/[/\\]/g, '_');     // path separators
+    .replace(/[\u0000-\u001f\u007f]/g, '')                  // control chars incl. NUL, CR/LF (header-splitting guard)
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '') // bidi overrides (U+202E extension spoofing)
+    .replace(/[/\\]/g, '_');                                 // path separators
+  // Legacy filename="..." must be plain ASCII (non-ASCII in a header is mangled); filename* carries
+  // the real name. encodeURIComponent leaves ' ( ) * unescaped, but RFC 5987 attr-char excludes
+  // them (' is the charset/language delimiter), so escape those too.
+  const asciiName = safeName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '') || 'download';
+  const encodedName = encodeURIComponent(safeName)
+    .replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
   const disposition =
-    `attachment; filename="${safeName.replace(/"/g, '')}"; ` +
-    `filename*=UTF-8''${encodeURIComponent(safeName)}`;
+    `attachment; filename="${asciiName}"; ` +
+    `filename*=UTF-8''${encodedName}`;
 
   const cmd = new GetObjectCommand({
-    Bucket:                     bucket,
+    Bucket:                     getBucket(),
     Key:                        key,
     ResponseContentDisposition: disposition,
   });
@@ -78,7 +86,7 @@ export async function getDownloadUrl(key: string, fileName: string): Promise<str
 /** Verify an uploaded object's Content-Type matches the expected MIME (C2) */
 export async function verifyObjectMimeType(key: string, expectedMime: string): Promise<boolean> {
   try {
-    const head = await r2().send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    const head = await r2().send(new HeadObjectCommand({ Bucket: getBucket(), Key: key }));
     return (head.ContentType ?? '').split(';')[0].trim() === expectedMime;
   } catch {
     return false; // object not found or error — treat as mismatch
@@ -88,7 +96,7 @@ export async function verifyObjectMimeType(key: string, expectedMime: string): P
 /** Real size (bytes) of an uploaded object, or null if it doesn't exist / HEAD fails. */
 export async function getObjectSize(key: string): Promise<number | null> {
   try {
-    const head = await r2().send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    const head = await r2().send(new HeadObjectCommand({ Bucket: getBucket(), Key: key }));
     return head.ContentLength ?? null;
   } catch {
     return null;
@@ -97,5 +105,5 @@ export async function getObjectSize(key: string): Promise<number | null> {
 
 /** Delete an object from R2 */
 export async function deleteObject(key: string): Promise<void> {
-  await r2().send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  await r2().send(new DeleteObjectCommand({ Bucket: getBucket(), Key: key }));
 }

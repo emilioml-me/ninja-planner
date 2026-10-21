@@ -28,7 +28,7 @@ const httpUrlSchema = z.string().max(500).refine(
 
 const createSchema = z.object({
   title:        z.string().min(1).max(500),
-  description:  z.string().optional(),
+  description:  z.string().max(5000).nullable().optional(),
   status:       z.enum(EPIC_STATUSES).optional(),
   color:        z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   external_ref: httpUrlSchema.or(z.literal('')).nullable().optional(),
@@ -45,8 +45,10 @@ const retroSchema = z.object({
 // GET /api/epics?status=active|completed|archived
 router.get('/', async (req, res, next) => {
   try {
-    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-    res.json(await getEpics(req.workspace.id, status));
+    const rawStatus = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const parsedStatus = z.enum(EPIC_STATUSES).optional().safeParse(rawStatus);
+    if (!parsedStatus.success) { res.status(400).json({ error: 'Invalid status filter' }); return; }
+    res.json(await getEpics(req.workspace.id, parsedStatus.data));
   } catch (err) { next(err); }
 });
 
@@ -139,9 +141,10 @@ router.put('/:id/retro', requireAdmin, async (req, res, next) => {
       `INSERT INTO epic_retros (epic_id, workspace_id, went_well, to_improve, action_items, created_by)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (epic_id) DO UPDATE SET
-         went_well    = EXCLUDED.went_well,
-         to_improve   = EXCLUDED.to_improve,
-         action_items = EXCLUDED.action_items,
+         -- Omitted fields keep their stored value (send '' to clear one).
+         went_well    = COALESCE(EXCLUDED.went_well, epic_retros.went_well),
+         to_improve   = COALESCE(EXCLUDED.to_improve, epic_retros.to_improve),
+         action_items = COALESCE(EXCLUDED.action_items, epic_retros.action_items),
          updated_at   = now()
        RETURNING *`,
       [req.params.id, req.workspace.id, went_well ?? null, to_improve ?? null, action_items ?? null, req.auth.userId],

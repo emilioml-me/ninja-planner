@@ -18,8 +18,17 @@ main() {
   cd "$APP_DIR"
 
   if [[ "${DEPLOY_STG_PULLED:-}" != "1" ]]; then
+    # Staging always deploys main. Refuse to run from another branch instead of merging main
+    # into it (a plain `git pull origin main` on a feature branch creates a merge commit).
+    local BRANCH
+    BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    if [[ "$BRANCH" != "main" ]]; then
+      echo "ERROR: $APP_DIR is on branch '$BRANCH', staging deploys main only."
+      echo "       Run 'git checkout main' there first (commit or discard local changes), then re-run."
+      exit 1
+    fi
     echo "==> Pulling latest code..."
-    git pull origin main
+    git pull --ff-only origin main
     DEPLOY_STG_PULLED=1 exec bash "$APP_DIR/scripts/deploy-stg.sh" "$@"
   fi
 
@@ -30,7 +39,13 @@ main() {
   fi
 
   local VITE_CLERK_PUBLISHABLE_KEY
-  VITE_CLERK_PUBLISHABLE_KEY=$(grep -E '^VITE_CLERK_PUBLISHABLE_KEY=' "$SECRETS_FILE" | cut -d= -f2- || true)
+  # Last match wins (same as env_file); strip CR and any surrounding quotes so a value written as
+  # KEY="pk_..." is not baked into the bundle with literal quote characters.
+  VITE_CLERK_PUBLISHABLE_KEY=$(grep -E '^VITE_CLERK_PUBLISHABLE_KEY=' "$SECRETS_FILE" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
+  VITE_CLERK_PUBLISHABLE_KEY="${VITE_CLERK_PUBLISHABLE_KEY#\"}"
+  VITE_CLERK_PUBLISHABLE_KEY="${VITE_CLERK_PUBLISHABLE_KEY%\"}"
+  VITE_CLERK_PUBLISHABLE_KEY="${VITE_CLERK_PUBLISHABLE_KEY#\'}"
+  VITE_CLERK_PUBLISHABLE_KEY="${VITE_CLERK_PUBLISHABLE_KEY%\'}"
   if [[ -z "$VITE_CLERK_PUBLISHABLE_KEY" ]]; then
     echo "ERROR: VITE_CLERK_PUBLISHABLE_KEY not set in $SECRETS_FILE"
     exit 1

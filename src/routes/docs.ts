@@ -33,6 +33,16 @@ router.get('/openapi.json', (_req, res) => {
 });
 
 // ── Swagger UI ────────────────────────────────────────────────────────────
+// Swagger UI's index references its assets relatively (./swagger-ui.css), so /api/docs without
+// the trailing slash would resolve them under /api/ (behind requireAuth -> 401, blank page).
+router.get('/', (req, res, next) => {
+  const path = req.originalUrl.split('?')[0];
+  if (!path.endsWith('/')) {
+    res.redirect(301, `${path}/`);
+    return;
+  }
+  next();
+});
 router.use('/', swaggerUi.serve);
 router.get('/', swaggerUi.setup(undefined, {
   swaggerOptions: { url: '/api/docs/openapi.json' },

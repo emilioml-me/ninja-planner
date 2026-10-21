@@ -12,12 +12,13 @@ function escapeSlack(text: string): string {
  * SLACK_WEBHOOK_URL is a single global (operator-owned) channel, so messages are only sent for
  * operator workspaces (see OPERATOR_WORKSPACE_IDS) — otherwise one tenant's task/review titles
  * would leak into the operator's Slack. Silently no-ops if SLACK_WEBHOOK_URL is not set.
- * Never throws — failures are logged as warnings only.
+ * Never throws — failures are logged as warnings only. Resolves true only when Slack answered
+ * 2xx; false when skipped (no URL / non-operator workspace) or on any failure.
  */
-export async function sendSlackMessage(text: string, workspaceId: string): Promise<void> {
+export async function sendSlackMessage(text: string, workspaceId: string): Promise<boolean> {
   const url = process.env.SLACK_WEBHOOK_URL;
-  if (!url) return;
-  if (!isOperatorWorkspace(workspaceId)) return;
+  if (!url) return false;
+  if (!isOperatorWorkspace(workspaceId)) return false;
 
   try {
     const res = await fetch(url, {
@@ -28,8 +29,11 @@ export async function sendSlackMessage(text: string, workspaceId: string): Promi
     });
     if (!res.ok) {
       logger.warn({ status: res.status }, 'Slack webhook returned non-OK status');
+      return false;
     }
+    return true;
   } catch (err) {
     logger.warn({ err }, 'Failed to send Slack notification');
+    return false;
   }
 }

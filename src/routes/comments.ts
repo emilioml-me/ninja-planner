@@ -2,9 +2,11 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { getComments, createComment, deleteComment } from '../services/commentService.js';
-import { createNotification, isNotificationEnabled } from '../services/notificationService.js';
+import { createNotification } from '../services/notificationService.js';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
+import { getPublicAppUrl } from '../config/origins.js';
+import { trackBackground } from '../lib/background.js';
 import { sendCommentMentionEmail, sendCommentAddedEmail, resolveClerkEmail } from '../services/emailService.js';
 
 const router = Router({ mergeParams: true }); // inherit :taskId from parent
@@ -72,13 +74,14 @@ router.post('/', async (req, res, next) => {
     const task = taskResult.rows[0];
     const workspaceId = req.workspace.id;
     const commenterId = req.auth.userId;
-    const workspaceUrl = process.env.ALLOWED_ORIGIN ?? 'https://plan-ninja.com';
+    const workspaceUrl = getPublicAppUrl();
     const candidates = new Set([task.created_by, task.assignee_clerk_id].filter(Boolean) as string[]);
     candidates.delete(commenterId);
     for (const id of validMentions) candidates.delete(id);
 
     // Fire-and-forget: notification fan-out must never delay or fail the comment response.
-    (async () => {
+    // Tracked so a graceful shutdown waits for it.
+    trackBackground((async () => {
       // Only CURRENT members get anything — the task's creator/assignee may have left the
       // workspace since (mentions were already validated against membership above).
       let recipients: string[] = [];
@@ -95,17 +98,17 @@ router.post('/', async (req, res, next) => {
       const commenterName = commenter?.name ?? 'A teammate';
 
       const notify = async (recipientClerkId: string, type: 'comment_added' | 'mention') => {
-        // createNotification checks the recipient's preference itself; email must honour the
-        // same preference (previously emails went out even when the type was muted).
-        await createNotification({
+        // createNotification checks the recipient's preference and reports it, so the email
+        // honours the same preference without a second lookup.
+        const enabled = await createNotification({
           workspaceId,
           recipientClerkId,
           type,
           title: type === 'mention' ? `You were mentioned in "${task.title}"` : `New comment on "${task.title}"`,
           body: comment.body.slice(0, 120),
-          link: `/tasks`,
+          link: `/tasks?task=${encodeURIComponent(task.id)}`,
         });
-        if (!(await isNotificationEnabled(workspaceId, recipientClerkId, type))) return;
+        if (!enabled) return;
         const recipient = await resolveClerkEmail(recipientClerkId);
         if (!recipient) return;
         const emailOpts = {
@@ -115,6 +118,7 @@ router.post('/', async (req, res, next) => {
           taskTitle: task.title,
           commentBody: comment.body,
           workspaceUrl,
+          taskId: task.id,
         };
         // "You were mentioned" only for actual mentions; owner/assignee get a plain comment email.
         if (type === 'mention') await sendCommentMentionEmail(emailOpts);
@@ -125,7 +129,7 @@ router.post('/', async (req, res, next) => {
         ...recipients.map((id) => notify(id, 'comment_added')),
         ...[...validMentions].map((id) => notify(id, 'mention')),
       ]);
-    })().catch((err) => {
+    })()).catch((err) => {
       logger.warn({ err, taskId: task.id }, 'comment notification fan-out failed');
     });
 

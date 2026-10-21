@@ -4,6 +4,7 @@ import { createHash } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
 
 function hashKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
@@ -19,6 +20,7 @@ export const apiKeyAuthLimiter = rateLimit({
   skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => ipBucket(getClientIp(req)),
   message: { error: 'Too many authentication attempts, please try again later' },
 });
 

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import { useMyRole } from '@/hooks/use-is-admin';
 import type { Task } from '@/components/TaskFormDialog';
 import {
   CheckSquare,
@@ -68,6 +69,9 @@ interface OnboardingWizardProps {
 
 export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
   const { user } = useUser();
+  // Invites are admin-only and viewers can't create tasks: invited members/viewers get a
+  // "you're in" final step instead of being told to invite people, and viewers skip step 1.
+  const { isAdmin, isViewer } = useMyRole();
   const { apiRequest } = useApiClient();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -146,7 +150,7 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
                 </div>
               ))}
             </div>
-            <Button className="w-full gap-2" onClick={() => setStep(1)}>
+            <Button className="w-full gap-2" onClick={() => setStep(isViewer ? 2 : 1)}>
               Get started <ArrowRight className="h-4 w-4" />
             </Button>
           </div>
@@ -191,8 +195,8 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
           </div>
         )}
 
-        {/* Step 2 — Invite team */}
-        {step === 2 && (
+        {/* Step 2 — Invite team (admins) */}
+        {step === 2 && isAdmin && (
           <div className="text-center space-y-4 py-2">
             <div className="mx-auto h-14 w-14 rounded-2xl bg-primary/10 flex items-center justify-center">
               <Users className="h-7 w-7 text-primary" />
@@ -207,6 +211,31 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
             <div className="flex flex-col gap-2">
               <Button className="w-full gap-2" onClick={() => { onComplete(); navigate('/members'); }}>
                 Invite teammates <Users className="h-4 w-4" />
+              </Button>
+              <Button variant="outline" className="w-full gap-2" onClick={onComplete}>
+                Open dashboard <Rocket className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2 — Members / viewers who joined via an invite */}
+        {step === 2 && !isAdmin && (
+          <div className="text-center space-y-4 py-2">
+            <div className="mx-auto h-14 w-14 rounded-2xl bg-primary/10 flex items-center justify-center">
+              <Users className="h-7 w-7 text-primary" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold">You're all set</h2>
+              <p className="text-sm text-muted-foreground mt-1">
+                {isViewer
+                  ? 'You have read-only access to this workspace. Browse tasks, the roadmap and goals to see what the team is working on.'
+                  : 'Tasks your teammates assign to you show up under My Tasks, and you\'ll get a notification when something needs your attention.'}
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Button className="w-full gap-2" onClick={() => { onComplete(); navigate(isViewer ? '/tasks' : '/my-tasks'); }}>
+                {isViewer ? 'Browse tasks' : 'See my tasks'} <CheckSquare className="h-4 w-4" />
               </Button>
               <Button variant="outline" className="w-full gap-2" onClick={onComplete}>
                 Open dashboard <Rocket className="h-4 w-4" />

@@ -2,7 +2,43 @@ import type { Request, Response, NextFunction } from 'express';
 import { pool } from '../config/db.js';
 import { syncMemberDisplayName } from '../services/workspaceService.js';
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+// Requests whose workspace was already resolved by an earlier requireWorkspace* in the chain.
+// Nested routers (e.g. /api/tasks + /api/tasks/:taskId/comments) each mount the middleware, so
+// without this the membership query ran twice for the same request (L2).
+const resolved = new WeakSet<Request>();
+
+function blockViewerWrites(req: Request, res: Response): boolean {
+  // Viewer is a read-only role — block any mutating request centrally here rather than
+  // re-checking it in every route, since requireWorkspace runs first on virtually every router.
+  if (req.auth?.memberRole === 'viewer' && !SAFE_METHODS.has(req.method)) {
+    res.status(403).json({ error: 'Viewers have read-only access' });
+    return true;
+  }
+  return false;
+}
+
 export async function requireWorkspace(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await resolveWorkspace(req, res, next, false);
+}
+
+/**
+ * Same as requireWorkspace but lets viewers through on non-GET methods. For per-user routes a
+ * read-only member still needs (marking notifications read, notification preferences, AI
+ * summaries) — the route itself must not mutate shared workspace data.
+ */
+export async function requireWorkspaceAllowViewerWrites(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await resolveWorkspace(req, res, next, true);
+}
+
+async function resolveWorkspace(req: Request, res: Response, next: NextFunction, allowViewerWrites: boolean): Promise<void> {
+  if (resolved.has(req) && req.workspace) {
+    if (!allowViewerWrites && blockViewerWrites(req, res)) return;
+    next();
+    return;
+  }
+
   const { userId, orgId } = req.auth;
 
   if (!orgId || (orgId as string).trim() === '') {
@@ -28,14 +64,9 @@ export async function requireWorkspace(req: Request, res: Response, next: NextFu
     const { role, display_name, ...workspace } = result.rows[0];
     req.auth.memberRole = role;
     req.workspace = workspace;
+    resolved.add(req);
 
-    // Viewer is a read-only role — block any mutating request centrally here rather than
-    // re-checking it in every route, since requireWorkspace runs first on virtually every router.
-    const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-    if (role === 'viewer' && !SAFE_METHODS.has(req.method)) {
-      res.status(403).json({ error: 'Viewers have read-only access' });
-      return;
-    }
+    if (!allowViewerWrites && blockViewerWrites(req, res)) return;
 
     // Lazily backfill display_name from Clerk the first time it is missing
     if (display_name === null) {

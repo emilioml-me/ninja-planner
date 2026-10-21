@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useApiClient } from '@/lib/api';
 import { useMembers } from '@/hooks/use-members';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
@@ -10,7 +10,8 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
+import { QueryError } from '@/components/QueryError';
 import { BarChart2, Gauge, Pencil, Check, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -20,11 +21,14 @@ interface WorkloadRow {
   count: number;
 }
 
+// Point sums can arrive as NUMERIC strings; always read them through Number().
 interface CapacityRow {
   user_clerk_id: string;
-  assigned_points: number;
-  task_count: number;
-  capacity_points: number;
+  assigned_points: number | string;
+  task_count: number | string;
+  capacity_points: number | string;
+  /** Points of not-done tasks in the sprint. */
+  remaining_points?: number | string;
   /** True when capacity_points comes from a per-sprint override (then sprint_id is set). */
   is_override?: boolean;
   sprint_id?: string | null;
@@ -48,49 +52,67 @@ const STATUS_META: Record<string, { label: string; color: string }> = {
 const STATUS_ORDER = ['todo', 'in_progress', 'blocked', 'done'];
 
 function CapacityEditor({
-  clerkId, current, onSave,
-}: { clerkId: string; current: number; onSave: (pts: number) => void }) {
+  memberName, current, onSave,
+}: { memberName: string; current: number; onSave: (pts: number) => Promise<unknown> }) {
   const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [val, setVal] = useState(String(current));
   const parsed = parseCapacity(val);
-  const save = () => {
-    if (parsed === null) return;
-    onSave(parsed);
-    setEditing(false);
+  // Stays open until the PUT resolves; on failure the typed value and the reason remain visible.
+  const save = async () => {
+    if (parsed === null || saving) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onSave(parsed);
+      setEditing(false);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Could not save capacity');
+    } finally {
+      setSaving(false);
+    }
   };
+  const cancel = () => { setEditing(false); setSaveError(null); };
 
   if (!editing) {
     return (
       <button
+        type="button"
         className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-        onClick={() => { setVal(String(current)); setEditing(true); }}
+        onClick={() => { setVal(String(current)); setSaveError(null); setEditing(true); }}
       >
         <Pencil className="h-3 w-3" /> {current} pts capacity
       </button>
     );
   }
   return (
-    <div className="flex items-center gap-1">
-      <Input
-        type="number" min={0} max={MAX_CAPACITY}
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-        className={cn('h-6 w-20 text-xs', parsed === null && 'border-destructive')}
-        title={parsed === null ? `Enter a whole number from 0 to ${MAX_CAPACITY}` : undefined}
-        autoFocus
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') save();
-          if (e.key === 'Escape') setEditing(false);
-        }}
-      />
-      <Button size="icon" variant="ghost" className="h-6 w-6" disabled={parsed === null}
-        onClick={save}>
-        <Check className="h-3 w-3 text-green-600" />
-      </Button>
-      <Button size="icon" variant="ghost" className="h-6 w-6"
-        onClick={() => setEditing(false)}>
-        <X className="h-3 w-3 text-muted-foreground" />
-      </Button>
+    <div className="space-y-1">
+      <div className="flex items-center gap-1">
+        <Input
+          type="number" min={0} max={MAX_CAPACITY}
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          className={cn('h-6 w-20 text-xs', parsed === null && 'border-destructive')}
+          aria-label={`Capacity points for ${memberName}`}
+          title={parsed === null ? `Enter a whole number from 0 to ${MAX_CAPACITY}` : undefined}
+          disabled={saving}
+          autoFocus
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void save();
+            if (e.key === 'Escape') cancel();
+          }}
+        />
+        <Button size="icon" variant="ghost" className="h-6 w-6" disabled={parsed === null || saving}
+          aria-label="Save capacity" onClick={() => void save()}>
+          <Check className="h-3 w-3 text-green-600" />
+        </Button>
+        <Button size="icon" variant="ghost" className="h-6 w-6" disabled={saving}
+          aria-label="Cancel" onClick={cancel}>
+          <X className="h-3 w-3 text-muted-foreground" />
+        </Button>
+      </div>
+      {saveError && <p className="text-[11px] text-destructive">{saveError}</p>}
     </div>
   );
 }
@@ -99,20 +121,26 @@ export default function Workload() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
-  const isAdmin = useIsAdmin();
+  const { isAdmin } = useMyRole();
 
   // Keys live under the ['/api/tasks', ...] prefix so every task mutation's
   // invalidateQueries({ queryKey: ['/api/tasks'] }) also refreshes these views.
-  const { data: rows = [], isLoading: rowsLoading } = useQuery<WorkloadRow[]>({
+  const {
+    data: rowsData, isLoading: rowsLoading, isError: rowsIsError, error: rowsError, refetch: refetchRows,
+  } = useQuery<WorkloadRow[]>({
     queryKey: ['/api/tasks', 'workload'],
     queryFn: () => apiRequest('GET', '/api/tasks/workload'),
     staleTime: 60_000,
   });
-  const { data: capacityRows = [], isLoading: capLoading } = useQuery<CapacityRow[]>({
+  const rows = rowsData ?? [];
+  const {
+    data: capacityData, isLoading: capLoading, isError: capIsError, error: capError, refetch: refetchCap,
+  } = useQuery<CapacityRow[]>({
     queryKey: ['/api/tasks', 'capacity', 'active'],
     queryFn: () => apiRequest('GET', '/api/tasks/capacity'),
     staleTime: 60_000,
   });
+  const capacityRows = capacityData ?? [];
   const { members, isLoading: membersLoading } = useMembers();
   const isLoading = rowsLoading || membersLoading;
 
@@ -128,13 +156,13 @@ export default function Workload() {
       qc.invalidateQueries({ queryKey: ['/api/tasks', 'capacity'] });
       toast({ title: 'Capacity updated' });
     },
-    onError: (err: Error) => toast({ title: 'Failed to update capacity', description: err.message, variant: 'destructive' }),
+    // Failures are shown inline by CapacityEditor (which awaits mutateAsync).
   });
 
   // Pivot workload rows
   const byMember = rows.reduce<Record<string, Record<string, number>>>((acc, r) => {
     if (!acc[r.assignee_clerk_id]) acc[r.assignee_clerk_id] = {};
-    acc[r.assignee_clerk_id][r.status] = r.count;
+    acc[r.assignee_clerk_id][r.status] = Number(r.count);
     return acc;
   }, {});
 
@@ -202,6 +230,8 @@ export default function Workload() {
                 </div>
               ))}
             </div>
+          ) : rowsIsError && !rowsData ? (
+            <QueryError error={rowsError} onRetry={() => refetchRows()} />
           ) : memberIds.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <BarChart2 className="h-10 w-10 text-muted-foreground/30 mb-3" />
@@ -224,23 +254,32 @@ export default function Workload() {
                       <span className="text-sm font-medium flex-1 min-w-0 truncate">{displayName}</span>
                       <Badge variant="secondary" className="text-xs shrink-0">{total} open task{total !== 1 ? 's' : ''}</Badge>
                     </div>
-                    <div className="flex h-5 rounded-md overflow-hidden gap-px bg-muted">
-                      {OPEN_STATUSES.map((status) => {
-                        const count = statusCounts[status] ?? 0;
-                        if (count === 0) return null;
-                        const pct = (count / maxTotal) * 100;
-                        const meta = STATUS_META[status];
-                        return (
-                          <div
-                            key={status}
-                            className={cn('flex items-center justify-center text-[10px] font-medium text-white transition-all', meta.color)}
-                            style={{ width: `${pct}%`, minWidth: count > 0 ? '1.5rem' : 0 }}
-                            title={`${meta.label}: ${count}`}
-                          >
-                            {count}
-                          </div>
-                        );
-                      })}
+                    {/* The member's bar is sized against the busiest member; its segments share
+                        that width by count (flex-grow) so per-segment minimums can't overflow it. */}
+                    <div className="h-5 rounded-md overflow-hidden bg-muted">
+                      <div
+                        className="flex h-full gap-px max-w-full"
+                        style={{
+                          width: `${(total / maxTotal) * 100}%`,
+                          minWidth: `${OPEN_STATUSES.filter((s) => (statusCounts[s] ?? 0) > 0).length * 1.5}rem`,
+                        }}
+                      >
+                        {OPEN_STATUSES.map((status) => {
+                          const count = statusCounts[status] ?? 0;
+                          if (count === 0) return null;
+                          const meta = STATUS_META[status];
+                          return (
+                            <div
+                              key={status}
+                              className={cn('flex items-center justify-center text-[10px] font-medium text-white transition-all overflow-hidden', meta.color)}
+                              style={{ flexGrow: count, flexBasis: 0, minWidth: '1.5rem' }}
+                              title={`${meta.label}: ${count}`}
+                            >
+                              {count}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                     <div className="flex flex-wrap gap-3 pl-10">
                       {STATUS_ORDER.filter((s) => statusCounts[s]).map((s) => (
@@ -267,21 +306,34 @@ export default function Workload() {
             <div className="space-y-4">
               {[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full" />)}
             </div>
+          ) : capIsError && !capacityData ? (
+            <QueryError error={capError} onRetry={() => refetchCap()} />
           ) : capacityRows.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <Gauge className="h-10 w-10 text-muted-foreground/30 mb-3" />
-              <p className="text-sm font-medium">No active sprint assignments</p>
-              <p className="text-xs text-muted-foreground mt-1">Assign tasks with story points to an active sprint to see capacity.</p>
+              <p className="text-sm font-medium">No members to show</p>
             </div>
           ) : (
             <div className="space-y-4">
+              {/* The endpoint lists every member; sprint_id is null on all rows when no sprint is active. */}
+              {capacityRows.every((r) => !r.sprint_id) && (
+                <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground flex items-center gap-2">
+                  <Gauge className="h-4 w-4 shrink-0" />
+                  No active sprint. Showing each member's default capacity; start a sprint to see assigned points.
+                </div>
+              )}
               {capacityRows.map((row) => {
                 const displayName = nameFor(row.user_clerk_id);
                 const initials = displayName.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
-                const pct = row.capacity_points > 0
-                  ? Math.min(Math.round((row.assigned_points / row.capacity_points) * 100), 100)
-                  : 0;
-                const overloaded = row.assigned_points > row.capacity_points;
+                const assigned = Number(row.assigned_points) || 0;
+                const capacity = Number(row.capacity_points) || 0;
+                const taskCount = Number(row.task_count) || 0;
+                const remaining = row.remaining_points != null ? Number(row.remaining_points) || 0 : null;
+                const overloaded = assigned > capacity;
+                // Capacity 0 with work assigned is fully over, not an empty bar.
+                const pct = capacity > 0
+                  ? Math.min(Math.round((assigned / capacity) * 100), 100)
+                  : overloaded ? 100 : 0;
 
                 return (
                   <Card key={row.user_clerk_id} className={cn(overloaded && 'border-destructive/40')}>
@@ -294,16 +346,17 @@ export default function Workload() {
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-sm font-medium truncate">{displayName}</span>
                             <span className={cn('text-xs font-medium shrink-0', overloaded ? 'text-destructive' : 'text-muted-foreground')}>
-                              {row.assigned_points} / {row.capacity_points} pts
+                              {assigned} / {capacity} pts assigned
+                              {remaining !== null && ` · ${remaining} open`}
                               {overloaded && ' ⚠️ over'}
                             </span>
                           </div>
                           {isAdmin ? (
                             <div className="flex items-center gap-2">
                               <CapacityEditor
-                                clerkId={row.user_clerk_id}
-                                current={row.capacity_points}
-                                onSave={(pts) => saveCapacity.mutate({
+                                memberName={displayName}
+                                current={capacity}
+                                onSave={(pts) => saveCapacity.mutateAsync({
                                   memberId: row.user_clerk_id,
                                   pts,
                                   sprintId: row.is_override ? row.sprint_id : null,
@@ -313,7 +366,7 @@ export default function Workload() {
                             </div>
                           ) : (
                             <span className="text-xs text-muted-foreground">
-                              {row.capacity_points} pts capacity{row.is_override ? ' (sprint override)' : ''}
+                              {capacity} pts capacity{row.is_override ? ' (sprint override)' : ''}
                             </span>
                           )}
                         </div>
@@ -324,7 +377,7 @@ export default function Workload() {
                           style={{ width: `${pct}%` }}
                         />
                       </div>
-                      <p className="text-xs text-muted-foreground">{row.task_count} task{row.task_count !== 1 ? 's' : ''} in active sprint</p>
+                      <p className="text-xs text-muted-foreground">{taskCount} task{taskCount !== 1 ? 's' : ''} in active sprint</p>
                     </CardContent>
                   </Card>
                 );

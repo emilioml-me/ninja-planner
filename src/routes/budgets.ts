@@ -4,6 +4,7 @@ import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin, ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 import { assertLinkableToWorkspace } from '../services/taskService.js';
+import { getRequestTz, todayInTz } from '../lib/tz.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -17,11 +18,28 @@ router.use(requireWorkspace);
 // budgets.target_amount is NUMERIC(14,2): at most 12 integer digits.
 const TARGET_AMOUNT_MAX = 999_999_999_999.99;
 
+const KNOWN_CURRENCIES: Set<string> | null = (() => {
+  const intl = Intl as unknown as { supportedValuesOf?: (key: string) => string[] };
+  try {
+    return intl.supportedValuesOf ? new Set(intl.supportedValuesOf('currency')) : null;
+  } catch {
+    return null;
+  }
+})();
+
+function isKnownCurrency(code: string): boolean {
+  return KNOWN_CURRENCIES === null || KNOWN_CURRENCIES.has(code);
+}
+
 const budgetSchemaBase = z.object({
   name:          z.string().trim().min(1).max(255),
   description:   z.preprocess((v) => (v === '' ? null : v), z.string().max(2000).nullable().optional()),
   target_amount: z.number().min(0).max(TARGET_AMOUNT_MAX),
-  currency:      z.string().length(3).default('USD'),
+  // ISO 4217 code, normalized to upper case. Checked against the runtime's currency list when
+  // available. Note: time_cost (billable time rollup) carries no currency of its own — it is
+  // reported as-is and assumed to be in the budget's currency.
+  currency:      z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/, 'currency must be a 3-letter ISO 4217 code')
+    .refine(isKnownCurrency, { message: 'Unknown currency code' }).default('USD'),
   period_start:  z.string().date().nullable().optional(),
   period_end:    z.string().date().nullable().optional(),
   status:        z.enum(['active', 'closed']).optional(),
@@ -78,13 +96,15 @@ router.get('/', async (req, res, next) => {
          FROM time_logs tl
          JOIN tasks t ON t.id = tl.task_id
          WHERE t.workspace_id = b.workspace_id
+           AND t.deleted_at IS NULL
            AND tl.billable = true
            AND tl.hourly_rate IS NOT NULL
            AND ((b.epic_id IS NOT NULL AND t.epic_id = b.epic_id)
              OR (b.sprint_id IS NOT NULL AND t.sprint_id = b.sprint_id))
        ) tc ON (b.epic_id IS NOT NULL OR b.sprint_id IS NOT NULL)
        WHERE  b.workspace_id = $1
-       ORDER  BY b.created_at DESC`,
+       ORDER  BY b.created_at DESC
+       LIMIT  500`,
       [req.workspace.id],
     );
     res.json(result.rows);
@@ -216,7 +236,8 @@ router.get('/:id/entries', async (req, res, next) => {
               ON wm.clerk_user_id = be.created_by
              AND wm.workspace_id  = be.workspace_id
        WHERE  be.budget_id = $1 AND be.workspace_id = $2   -- M3: defence-in-depth workspace scope
-       ORDER  BY be.entry_date DESC, be.created_at DESC`,
+       ORDER  BY be.entry_date DESC, be.created_at DESC
+       LIMIT  1000`,
       [req.params.id, req.workspace.id],
     );
     res.json(result.rows);
@@ -250,7 +271,7 @@ router.post('/:id/entries', async (req, res, next) => {
       `INSERT INTO budget_entries (budget_id, workspace_id, description, amount, category, entry_date, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [req.params.id, req.workspace.id, description, amount, category ?? null, entry_date ?? new Date().toISOString().slice(0, 10), req.auth.userId],
+      [req.params.id, req.workspace.id, description, amount, category ?? null, entry_date ?? todayInTz(getRequestTz(req)), req.auth.userId],
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { next(err); }
@@ -259,6 +280,16 @@ router.post('/:id/entries', async (req, res, next) => {
 // DELETE /api/budgets/:id/entries/:entryId
 router.delete('/:id/entries/:entryId', async (req, res, next) => {
   try {
+    // Same rule as adding entries: a closed budget's ledger is frozen (reopen it to edit).
+    const check = await pool.query<{ status: string }>(
+      'SELECT status FROM budgets WHERE id = $1 AND workspace_id = $2',
+      [req.params.id, req.workspace.id],
+    );
+    if (check.rows.length === 0) { res.status(404).json({ error: 'Budget not found' }); return; }
+    if (check.rows[0].status === 'closed') {
+      res.status(400).json({ error: 'Cannot delete entries from a closed budget' });
+      return;
+    }
     const isAdmin = ADMIN_ROLES.has(req.auth.memberRole ?? '');
     const query = isAdmin
       ? 'DELETE FROM budget_entries WHERE id = $1 AND budget_id = $2 AND workspace_id = $3'

@@ -106,7 +106,7 @@ function isPrivateIPv4(p: number[]): boolean {
 }
 
 /** Expand an IPv6 literal (optionally with trailing dotted IPv4) into 8 16-bit groups. */
-function parseIPv6(raw: string): number[] | null {
+export function parseIPv6(raw: string): number[] | null {
   let ip = raw.replace(/^\[|\]$/g, '').replace(/%.*$/, '').toLowerCase();
   if (!ip.includes(':')) return null;
   // Trailing embedded IPv4 (e.g. ::ffff:127.0.0.1) -> two hex groups
@@ -141,6 +141,9 @@ function isPrivateIPv6(g: number[]): boolean {
   const first96Zero = g.slice(0, 6).every((n) => n === 0);
   if (first96Zero) return true;                                            // ::, ::1, IPv4-compatible ::/96
   if (g.slice(0, 5).every((n) => n === 0) && g[5] === 0xffff) {            // IPv4-mapped ::ffff:0:0/96
+    return isPrivateIPv4(embeddedV4(g[6], g[7]));
+  }
+  if (g.slice(0, 4).every((n) => n === 0) && g[4] === 0xffff && g[5] === 0) { // IPv4-translated ::ffff:0:0:0/96 (SIIT)
     return isPrivateIPv4(embeddedV4(g[6], g[7]));
   }
   if (g[0] === 0x0064 && g[1] === 0xff9b) {

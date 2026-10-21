@@ -52,6 +52,51 @@ export async function addTimeLog(
   return result.rows[0];
 }
 
+export interface TimeLogPatch {
+  minutes?: number;
+  note?: string | null;
+  billable?: boolean;
+  hourly_rate?: number | null;
+}
+
+/**
+ * Edit a time log. Members may edit only their own logs; admins may edit any. The caller is
+ * responsible for rejecting hourly_rate from non-admins (it drives budget time_cost rollups).
+ * Returns null when the log doesn't exist on this task / workspace or isn't the caller's.
+ */
+export async function updateTimeLog(
+  id: string,
+  taskId: string,
+  workspaceId: string,
+  userClerkId: string,
+  isAdmin: boolean,
+  patch: TimeLogPatch,
+): Promise<TimeLog | null> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const add = (col: string, value: unknown) => {
+    params.push(value);
+    sets.push(`${col} = $${params.length}`);
+  };
+  if (patch.minutes !== undefined)     add('minutes', patch.minutes);
+  if (patch.note !== undefined)        add('note', patch.note);
+  if (patch.billable !== undefined)    add('billable', patch.billable);
+  if (patch.hourly_rate !== undefined) add('hourly_rate', patch.hourly_rate);
+  if (sets.length === 0) return null;
+
+  params.push(id, taskId, workspaceId);
+  let where = `id = $${params.length - 2} AND task_id = $${params.length - 1} AND workspace_id = $${params.length}`;
+  if (!isAdmin) {
+    params.push(userClerkId);
+    where += ` AND user_clerk_id = $${params.length}`;
+  }
+  const result = await pool.query<TimeLog>(
+    `UPDATE time_logs SET ${sets.join(', ')} WHERE ${where} RETURNING *`,
+    params,
+  );
+  return result.rows[0] ?? null;
+}
+
 // Assigns (or clears, when budgetEntryId is null) which budget entry this time log counts
 // toward. Verifies the entry belongs to the same workspace so a log can't be linked cross-tenant.
 // Only the log's own author or a workspace admin may do this — otherwise any member could

@@ -24,6 +24,8 @@ interface KanbanColumnProps {
   onCardClick?: (cardId: string) => void;
   onDeleteCard?: (cardId: string) => void;
   members?: WorkspaceMember[];
+  /** Read-only board (e.g. viewers): cards can be opened but not dragged. */
+  dragDisabled?: boolean;
 }
 
 function SortableCard({
@@ -31,15 +33,28 @@ function SortableCard({
   onCardClick,
   onDeleteCard,
   members = [],
+  dragDisabled = false,
 }: {
   card: KanbanCard;
   onCardClick?: (id: string) => void;
   onDeleteCard?: (id: string) => void;
   members?: WorkspaceMember[];
+  dragDisabled?: boolean;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: card.id,
-  });
+  const {
+    attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging,
+  } = useSortable({ id: card.id, disabled: dragDisabled });
+
+  // Listeners and attributes (tabIndex/role) live on the same focusable element, so keyboard
+  // users can focus a card, press Space to pick it up and arrow keys to move it. Enter opens it.
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Enter' && !isDragging && e.target === e.currentTarget) {
+      e.preventDefault();
+      onCardClick?.(card.id);
+      return;
+    }
+    listeners?.onKeyDown?.(e);
+  };
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -62,12 +77,24 @@ function SortableCard({
     new Date(card.due_date + 'T23:59:59') < new Date();
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes}>
+    <div
+      ref={(el) => { setNodeRef(el); setActivatorNodeRef(el); }}
+      style={style}
+      {...attributes}
+      {...listeners}
+      onKeyDown={handleKeyDown}
+      onClick={() => onCardClick?.(card.id)}
+      aria-label={card.title}
+      className={cn(
+        'rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        dragDisabled ? 'cursor-pointer' : 'cursor-move',
+      )}
+    >
       <Card
         className={cn('p-3 border-l-4 group hover:shadow-md transition-shadow', borderClass)}
       >
         <div className="flex items-start justify-between gap-2 mb-2">
-          <div {...listeners} className="flex-1 cursor-move" onClick={() => onCardClick?.(card.id)}>
+          <div className="flex-1">
             <h4 className="font-medium text-sm line-clamp-2">{card.title}</h4>
           </div>
           <div className="flex items-center gap-1">
@@ -85,13 +112,23 @@ function SortableCard({
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                    className="h-6 w-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                    aria-label="Task actions"
                     onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => e.stopPropagation()}
                   >
                     <MoreVertical className="h-3 w-3" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
+                {/* React events bubble through the portal to the card: keep them off it. */}
+                <DropdownMenuContent
+                  align="end"
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                >
                   <DropdownMenuItem
                     onClick={(e) => {
                       e.stopPropagation();
@@ -108,7 +145,7 @@ function SortableCard({
           </div>
         </div>
 
-        <div {...listeners} className="cursor-move">
+        <div>
           {card.description && (
             <p className="text-xs text-muted-foreground line-clamp-2 mb-3">{card.description}</p>
           )}
@@ -178,6 +215,7 @@ export function KanbanColumn({
   onCardClick,
   onDeleteCard,
   members = [],
+  dragDisabled = false,
 }: KanbanColumnProps) {
   const { setNodeRef } = useDroppable({ id: columnId });
   const sortedCards = [...cards].sort((a, b) => a.position - b.position);
@@ -202,6 +240,7 @@ export function KanbanColumn({
               onCardClick={onCardClick}
               onDeleteCard={onDeleteCard}
               members={members}
+              dragDisabled={dragDisabled}
             />
           ))}
           {sortedCards.length === 0 && (
@@ -212,15 +251,17 @@ export function KanbanColumn({
         </SortableContext>
       </div>
 
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={onAddCard}
-        className="mt-3 gap-2 justify-start"
-      >
-        <Plus className="h-4 w-4" />
-        Add Task
-      </Button>
+      {onAddCard && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onAddCard}
+          className="mt-3 gap-2 justify-start"
+        >
+          <Plus className="h-4 w-4" />
+          Add Task
+        </Button>
+      )}
     </div>
   );
 }

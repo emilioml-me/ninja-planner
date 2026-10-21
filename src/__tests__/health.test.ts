@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 
 // ── Mock heavy modules before importing app ─────────────────────────────────
@@ -6,6 +6,7 @@ vi.mock('../config/db.js', () => ({
   pool: { query: vi.fn().mockResolvedValue({ rows: [] }), end: vi.fn() },
 }));
 vi.mock('@clerk/backend', () => ({
+  verifyToken: vi.fn(),
   createClerkClient: vi.fn(() => ({ verifyToken: vi.fn() })),
 }));
 vi.mock('../config/logger.js', () => ({
@@ -18,9 +19,14 @@ vi.mock('../middleware/auth.js', () => ({
 }));
 vi.mock('../middleware/requireWorkspace.js', () => ({
   requireWorkspace: (_req: any, _res: any, next: any) => next(),
+  requireWorkspaceAllowViewerWrites: (_req: any, _res: any, next: any) => next(),
 }));
 
 let app: any;
+const ORIGINAL_ENV = { ...process.env };
+afterAll(() => {
+  process.env = ORIGINAL_ENV;
+});
 beforeAll(async () => {
   process.env.CLERK_SECRET_KEY     = 'test';
   process.env.CLERK_WEBHOOK_SECRET = 'test';

@@ -9,6 +9,9 @@ export interface Sprint {
   status: string;
   start_date: string | null;
   end_date: string | null;
+  /** NUMERIC -> string on the wire; null until the sprint is first activated (migration 060). */
+  committed_points?: string | null;
+  committed_task_count?: number | null;
   created_by: string;
   created_at: Date;
   updated_at: Date;
@@ -105,6 +108,33 @@ export async function updateSprint(
   return result.rows[0] ?? null;
 }
 
+/**
+ * Snapshots the sprint's committed scope (story points + task count of its current, non-deleted
+ * tasks) into sprints.committed_points / committed_task_count (migration 060). Called when a
+ * sprint becomes active (overwrite) and, if still unset, when it completes and before
+ * move-to-backlog strips unfinished tasks — so velocity's "committed" figure isn't just the work
+ * that happened to remain in the sprint.
+ */
+export async function snapshotSprintCommitment(
+  sprintId: string,
+  workspaceId: string,
+  opts: { onlyIfUnset: boolean },
+): Promise<void> {
+  await pool.query(
+    `UPDATE sprints s SET
+       committed_points     = c.points,
+       committed_task_count = c.task_count
+     FROM (
+       SELECT COALESCE(SUM(t.story_points), 0) AS points, COUNT(t.id)::int AS task_count
+       FROM tasks t
+       WHERE t.sprint_id = $1 AND t.workspace_id = $2 AND t.deleted_at IS NULL
+     ) c
+     WHERE s.id = $1 AND s.workspace_id = $2
+       AND (NOT $3::boolean OR s.committed_points IS NULL)`,
+    [sprintId, workspaceId, opts.onlyIfUnset],
+  );
+}
+
 export async function deleteSprint(id: string, workspaceId: string): Promise<boolean> {
   const result = await pool.query(
     'DELETE FROM sprints WHERE id = $1 AND workspace_id = $2',
@@ -118,7 +148,8 @@ export async function getSprintTasks(sprintId: string, workspaceId: string): Pro
     `SELECT t.* FROM tasks t
      JOIN sprints s ON s.id = t.sprint_id
      WHERE t.sprint_id = $1 AND s.workspace_id = $2 AND t.deleted_at IS NULL
-     ORDER BY t.position, t.created_at`,
+     ORDER BY t.position, t.created_at
+     LIMIT 2000`,
     [sprintId, workspaceId],
   );
   return result.rows;

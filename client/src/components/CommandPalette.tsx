@@ -1,15 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { useQueryClient } from '@tanstack/react-query';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import {
-  Search, LayoutDashboard, CheckSquare, TrendingUp, Map, ClipboardList, UsersRound, User, Plus,
-  ArrowRight, Target, Zap, BarChart2, Plug, Webhook, Layers, Wallet, History, CalendarDays,
-  CreditCard, LineChart, FileText, Calendar, Key, Settings2, Link2, Copy, Building2, Bell,
-} from 'lucide-react';
+import { Search, CheckSquare, Plus, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Task } from '@/components/TaskFormDialog';
+import { useVisibleNav } from '@/components/AppSidebar';
+import { useTaskList } from '@/hooks/use-tasks';
 
 interface CommandItem {
   id: string;
@@ -21,41 +18,7 @@ interface CommandItem {
   action: () => void;
 }
 
-// Kept in sync with AppSidebar.tsx's NAV — previously a stale subset that left 11 of 24
-// destinations unreachable from ⌘K.
-const NAV_ITEMS = [
-  { href: '/dashboard',    label: 'Dashboard',     icon: LayoutDashboard },
-  { href: '/my-tasks',     label: 'My Tasks',      icon: User },
-  { href: '/tasks',        label: 'All Tasks',     icon: CheckSquare },
-  { href: '/revenue',      label: 'Revenue',       icon: TrendingUp },
-  { href: '/roadmap',      label: 'Roadmap',       icon: Map },
-  { href: '/reviews',      label: 'Weekly Review', icon: ClipboardList },
-  { href: '/goals',        label: 'Goals',         icon: Target },
-  { href: '/sprints',      label: 'Sprints',       icon: Zap },
-  { href: '/epics',        label: 'Epics',         icon: Layers },
-  { href: '/clients',      label: 'Clients',       icon: Building2 },
-  { href: '/budgets',      label: 'Budgets',       icon: Wallet },
-  { href: '/changelog',    label: 'Changelog',     icon: History },
-  { href: '/timeline',     label: 'Timeline',      icon: CalendarDays },
-  { href: '/workload',     label: 'Workload',      icon: BarChart2 },
-  { href: '/analytics',    label: 'Analytics',     icon: LineChart },
-  { href: '/calendar',     label: 'Calendar',      icon: Calendar },
-  { href: '/meeting-notes', label: 'Meeting Notes', icon: FileText },
-  { href: '/automations',  label: 'Automations',   icon: Zap },
-  { href: '/members',      label: 'Team',          icon: UsersRound },
-  { href: '/integrations', label: 'Integrations',  icon: Plug },
-  { href: '/webhooks',     label: 'Webhooks',      icon: Webhook },
-  { href: '/sprint-templates',       label: 'Sprint Templates', icon: Copy },
-  { href: '/epic-templates',         label: 'Epic Templates',   icon: Layers },
-  { href: '/settings/api-keys',      label: 'API Keys',         icon: Key },
-  { href: '/settings/custom-fields', label: 'Custom Fields',    icon: Settings2 },
-  { href: '/settings/guest-links',   label: 'Guest Links',      icon: Link2 },
-  { href: '/settings/notifications', label: 'Notifications',    icon: Bell },
-  { href: '/settings/billing',       label: 'Billing',          icon: CreditCard },
-];
-
-// Stable fallback: a fresh `?? []` on every render changed `items`' memo deps each render,
-// which re-ran the "reset active index" effect and made arrow-key navigation snap back to 0.
+// Stable fallback so `items`' memo deps don't change on every render while there's no data.
 const NO_TASKS: Task[] = [];
 
 interface CommandPaletteProps {
@@ -68,8 +31,10 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const [, navigate] = useLocation();
-  const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  // Same destinations as the sidebar (admin-only pages hidden for non-admins).
+  const navList = useVisibleNav();
 
   // Reset on open
   useEffect(() => {
@@ -83,13 +48,20 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
-  // Pull tasks from cache — no extra fetch
-  const cachedTasks = queryClient.getQueryData<Task[]>(['/api/tasks']) ?? NO_TASKS;
+  // Subscribes to the shared task list (re-renders when it loads or changes); only fetches while
+  // the palette is open, otherwise it just reads whatever is cached.
+  const { data: taskData } = useTaskList({ enabled: open });
+  const cachedTasks = taskData ?? NO_TASKS;
+
+  // The parent passes a fresh callback each render; read it through a ref so `items` (and the
+  // active index) don't reset on every parent render.
+  const onCreateTaskRef = useRef(onCreateTask);
+  onCreateTaskRef.current = onCreateTask;
 
   const items = useMemo<CommandItem[]>(() => {
     const q = query.toLowerCase().trim();
 
-    const navItems: CommandItem[] = NAV_ITEMS
+    const navItems: CommandItem[] = navList
       .filter((n) => !q || n.label.toLowerCase().includes(q))
       .map((n) => ({
         id: `nav:${n.href}`,
@@ -125,19 +97,27 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
         group: 'Actions',
         icon: Plus,
         iconClass: 'text-green-600',
-        action: () => { onCreateTask?.(); close(); },
+        action: () => { onCreateTaskRef.current?.(); close(); },
       });
     }
 
-    // Group order: Actions first if query empty, then Navigate, then Tasks
-    if (!q) {
-      return [...actions, ...navItems, ...taskItems];
-    }
+    // Group order: Actions, then Navigate, then Tasks
     return [...actions, ...navItems, ...taskItems];
-  }, [query, cachedTasks, navigate, close, onCreateTask]);
+  }, [query, cachedTasks, navList, navigate, close]);
 
-  // Reset active index when items change
-  useEffect(() => setActiveIndex(0), [items]);
+  // Reset the highlight when the search text changes; keep it in range if the list shrinks
+  // (e.g. tasks refetched) without snapping back to the top otherwise.
+  useEffect(() => setActiveIndex(0), [query]);
+  useEffect(() => {
+    setActiveIndex((i) => Math.min(i, Math.max(items.length - 1, 0)));
+  }, [items.length]);
+
+  // Keep the highlighted row visible during arrow-key navigation.
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`);
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex, open]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
@@ -188,7 +168,7 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
         </div>
 
         {/* Results */}
-        <div className="max-h-80 overflow-y-auto py-2">
+        <div ref={listRef} className="max-h-80 overflow-y-auto py-2">
           {items.length === 0 ? (
             <p className="text-center text-sm text-muted-foreground py-8">No results for "{query}"</p>
           ) : (
@@ -204,6 +184,7 @@ export function CommandPalette({ open, onOpenChange, onCreateTask }: CommandPale
                   return (
                     <button
                       key={item.id}
+                      data-index={currentIndex}
                       className={cn(
                         'w-full flex items-center gap-3 px-4 py-2.5 text-sm text-left transition-colors',
                         isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50',

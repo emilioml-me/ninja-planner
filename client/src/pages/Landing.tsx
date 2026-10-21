@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth, SignIn, SignUp } from '@clerk/clerk-react';
 import { Redirect } from 'wouter';
 import {
@@ -14,30 +14,32 @@ import {
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
+import { cn, safeRedirectPath } from '@/lib/utils';
 import { SeoHead } from '@/components/SeoHead';
 import { buildSoftwareApp, buildFAQ } from '@/lib/structured-data';
 
+// Spanish on purpose: the public SEO copy (meta + FAQ structured data) targets MX search. Only
+// claim what the app actually does.
 const FAQ_ITEMS = [
   {
-    question: '¿Que es Ninja Planner y para quien esta pensado?',
-    answer: 'Ninja Planner es un planificador de equipo y dashboard empresarial diseñado para pymes y equipos en Mexico y LATAM. Centraliza tareas, metas, roadmap y metricas de negocio en un solo workspace.',
+    question: '¿Qué es Ninja Planner y para quién está pensado?',
+    answer: 'Ninja Planner es un planificador de equipo y dashboard empresarial diseñado para pymes y equipos en México y LATAM. Centraliza tareas, metas, roadmap y métricas de negocio en un solo workspace.',
   },
   {
-    question: '¿Como ayuda Ninja Planner a organizar a mi equipo?',
-    answer: 'Con tableros Kanban, asignacion de tareas, seguimiento de sprints y un dashboard compartido, todo el equipo ve el trabajo pendiente, los avances y los bloqueos en tiempo real.',
+    question: '¿Cómo ayuda Ninja Planner a organizar a mi equipo?',
+    answer: 'Con tableros Kanban, asignación de tareas, seguimiento de sprints y un dashboard compartido, todo el equipo ve el trabajo pendiente, los avances y los bloqueos.',
   },
   {
-    question: '¿Puedo monitorear las metricas de negocio desde Ninja Planner?',
-    answer: 'Si. El dashboard centraliza KPIs como MRR, pipeline de ventas y avance hacia metas. Se conecta con tu CRM para mantener los datos actualizados automaticamente.',
+    question: '¿Puedo monitorear las métricas de negocio desde Ninja Planner?',
+    answer: 'Sí. Puedes definir metas de ingresos mensuales, trimestrales o anuales y registrar los ingresos reales para ver el avance frente a la meta, junto con el progreso de tus objetivos y la carga de trabajo del equipo.',
   },
   {
-    question: '¿Ninja Planner tiene una version gratuita?',
-    answer: 'Si. Puedes empezar gratis con un workspace para tu equipo, tableros ilimitados y acceso a todas las funciones principales. Los planes de pago desbloquean integraciones avanzadas y mas miembros.',
+    question: '¿Cómo empiezo a usar Ninja Planner?',
+    answer: 'Crea tu cuenta, crea el workspace de tu equipo e invita a tus compañeros con un enlace de invitación. El acceso continuo se activa con una suscripción de ninja-stack.',
   },
   {
-    question: '¿Ninja Planner funciona para equipos remotos o hibridos?',
-    answer: 'Absolutamente. Ninja Planner es 100% web, por lo que tu equipo puede acceder desde cualquier lugar. Las revisiones semanales y el board de tareas mantienen a todos alineados sin importar donde esten.',
+    question: '¿Ninja Planner funciona para equipos remotos o híbridos?',
+    answer: 'Sí. Ninja Planner es 100% web, por lo que tu equipo puede acceder desde cualquier lugar. Las revisiones semanales y el tablero de tareas mantienen a todos alineados sin importar dónde estén.',
   },
 ];
 
@@ -45,7 +47,7 @@ const STRUCTURED_DATA = [
   buildSoftwareApp({
     name: 'Ninja Planner',
     url: 'https://ninja-planner.com',
-    description: 'Planificador de equipo y dashboard empresarial para pymes en Mexico y LATAM.',
+    description: 'Planificador de equipo y dashboard empresarial para pymes en México y LATAM.',
     applicationCategory: 'ProductivityApplication',
     price: '0',
     priceCurrency: 'MXN',
@@ -77,7 +79,7 @@ const FEATURES = [
   {
     icon: Users,
     title: 'Business Dashboard',
-    description: 'Key numbers in one place — MRR, pipeline, and progress against goals. Connects with your CRM so data stays in sync.',
+    description: 'Key numbers in one place — revenue against targets, goal progress, and team workload.',
   },
 ];
 
@@ -89,18 +91,45 @@ const STATS = [
 
 export default function Landing() {
   const { isLoaded, isSignedIn } = useAuth();
+  // A signed-out deep link (/tasks?task=...) lands here as /?redirect_url=<path>; send the user
+  // back there after signing in instead of to the dashboard.
+  const [redirectTo] = useState(() => {
+    try {
+      return safeRedirectPath(new URLSearchParams(window.location.search).get('redirect_url'));
+    } catch {
+      return null;
+    }
+  });
+  const target = redirectTo ?? '/dashboard';
   // Which Clerk widget the auth overlay shows ("Get started free" goes to sign-up, not sign-in).
-  const [authMode, setAuthMode] = useState<'signIn' | 'signUp' | null>(null);
+  // Opens straight to sign-in when the visitor arrived from a protected link.
+  const [authMode, setAuthMode] = useState<'signIn' | 'signUp' | null>(redirectTo ? 'signIn' : null);
   const setSignInOpen = (open: boolean) => setAuthMode(open ? 'signIn' : null);
   const openSignUp = () => setAuthMode('signUp');
 
-  if (isLoaded && isSignedIn) return <Redirect to="/dashboard" />;
+  // Auth overlay: Escape closes it, focus moves into it on open and back to the page on close.
+  const overlayRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!authMode) return;
+    const previous = document.activeElement as HTMLElement | null;
+    overlayRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAuthMode(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      previous?.focus?.();
+    };
+  }, [authMode]);
+
+  if (isLoaded && isSignedIn) return <Redirect to={target} />;
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
       <SeoHead
         title="Planificador de Equipo y Dashboard Empresarial"
-        description="Gestiona tareas, proyectos y metricas de tu negocio en un solo lugar. Dashboard para equipos y pymes en Mexico. Sin complicaciones."
+        description="Gestiona tareas, proyectos y métricas de tu negocio en un solo lugar. Dashboard para equipos y pymes en México. Sin complicaciones."
         canonical="https://ninja-planner.com/"
         structuredData={STRUCTURED_DATA}
       />
@@ -199,7 +228,7 @@ export default function Landing() {
       </section>
 
       {/* FAQ — rendered so the FAQPage structured data matches visible content */}
-      <section className="border-t px-6 py-20">
+      <section className="border-t px-6 py-20" lang="es">
         <div className="max-w-3xl mx-auto">
           <h2 className="text-2xl sm:text-3xl font-bold text-center mb-10">Preguntas frecuentes</h2>
           <div className="space-y-3">
@@ -246,18 +275,31 @@ export default function Landing() {
       {/* Sign-in overlay */}
       {authMode && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 overflow-y-auto"
           onClick={() => setSignInOpen(false)}
         >
-          <div className="relative" onClick={(e) => e.stopPropagation()}>
+          <div
+            ref={overlayRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={authMode === 'signUp' ? 'Create your account' : 'Sign in'}
+            tabIndex={-1}
+            className="relative outline-none"
+            onClick={(e) => e.stopPropagation()}
+          >
             <button
+              type="button"
               aria-label="Close"
               onClick={() => setSignInOpen(false)}
               className="absolute -top-3 -right-3 z-10 rounded-full bg-background border shadow-sm h-7 w-7 flex items-center justify-center hover:bg-accent transition-colors"
             >
               <X className="h-4 w-4" />
             </button>
-            {authMode === 'signUp' ? <SignUp routing="hash" /> : <SignIn routing="hash" />}
+            {authMode === 'signUp' ? (
+              <SignUp routing="hash" forceRedirectUrl={target} signInForceRedirectUrl={target} />
+            ) : (
+              <SignIn routing="hash" forceRedirectUrl={target} signUpForceRedirectUrl={target} />
+            )}
           </div>
         </div>
       )}

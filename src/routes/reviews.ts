@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
-import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
   getReviews,
   createReview,
@@ -43,11 +42,19 @@ const updateSchema = z.object({
   health_score:  z.number().int().min(1).max(5).nullable().optional(),
 });
 
-// GET /api/reviews
+const listQuerySchema = z.object({
+  limit:  z.coerce.number().int().min(1).max(500).default(100),
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+});
+
+// GET /api/reviews?limit=&offset=  -> array; total count in the X-Total-Count header
 router.get('/', async (req, res, next) => {
   try {
-    const reviews = await getReviews(req.workspace.id);
-    res.json(reviews);
+    const q = listQuerySchema.safeParse(req.query);
+    if (!q.success) { res.status(400).json({ error: q.error.flatten() }); return; }
+    const { rows, total } = await getReviews(req.workspace.id, q.data.limit, q.data.offset);
+    res.setHeader('X-Total-Count', String(total));
+    res.json(rows);
   } catch (err) {
     next(err);
   }
@@ -157,9 +164,19 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// DELETE /api/reviews/:id  [admin only]
-router.delete('/:id', requireAdmin, async (req, res, next) => {
+// DELETE /api/reviews/:id  — author or admin
+router.delete('/:id', async (req, res, next) => {
   try {
+    const existing = await getReviewById(req.params.id, req.workspace.id);
+    if (!existing) {
+      res.status(404).json({ error: 'Review not found' });
+      return;
+    }
+    const isAdmin = req.auth.memberRole ? REVIEW_ADMIN_ROLES.has(req.auth.memberRole) : false;
+    if (existing.created_by !== req.auth.userId && !isAdmin) {
+      res.status(403).json({ error: 'Only the author or an admin can delete this review' });
+      return;
+    }
     const deleted = await deleteReview(req.params.id, req.workspace.id);
     if (!deleted) {
       res.status(404).json({ error: 'Review not found' });

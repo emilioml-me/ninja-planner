@@ -38,7 +38,23 @@ const PROGRESS_JOIN_AND_COUNTS = `
        COUNT(t.id) FILTER (WHERE gl.entity_type = 'task' AND t.status = 'done' AND t.deleted_at IS NULL)::int
          + COUNT(ri.id) FILTER (WHERE gl.entity_type = 'roadmap_item' AND ri.status = 'live')::int              AS done_tasks`;
 
-export async function getGoals(workspaceId: string): Promise<GoalWithProgress[]> {
+export interface KeyResult {
+  id: string;
+  goal_id: string;
+  workspace_id: string;
+  title: string;
+  /** NUMERIC columns stay strings on the wire (pg default). */
+  target_value: string;
+  current_value: string;
+  unit: string;
+  position: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+const GOALS_LIST_LIMIT = 500;
+
+export async function getGoals(workspaceId: string): Promise<(GoalWithProgress & { key_results: KeyResult[] })[]> {
   // total_tasks must apply the same deleted_at filter as done_tasks — otherwise a soft-deleted
   // task keeps inflating the denominator (or, once its sibling done task is also deleted,
   // corrupts the ratio the other way), permanently desyncing the displayed progress percentage.
@@ -52,10 +68,37 @@ export async function getGoals(workspaceId: string): Promise<GoalWithProgress[]>
      LEFT JOIN roadmap_items ri ON ri.id = gl.entity_id AND gl.entity_type = 'roadmap_item'
      WHERE g.workspace_id = $1
      GROUP BY g.id
-     ORDER BY g.created_at DESC`,
+     ORDER BY g.created_at DESC
+     LIMIT ${GOALS_LIST_LIMIT}`,
     [workspaceId],
   );
-  return result.rows;
+
+  // Key results for every listed goal in one query (avoids an N+1 fetch per goal card).
+  const goalIds = result.rows.map((g) => g.id);
+  const byGoal = new Map<string, KeyResult[]>();
+  if (goalIds.length > 0) {
+    const krs = await pool.query<KeyResult>(
+      `SELECT * FROM key_results
+       WHERE workspace_id = $1 AND goal_id = ANY($2::uuid[])
+       ORDER BY position, created_at`,
+      [workspaceId, goalIds],
+    );
+    for (const kr of krs.rows) {
+      const list = byGoal.get(kr.goal_id);
+      if (list) list.push(kr);
+      else byGoal.set(kr.goal_id, [kr]);
+    }
+  }
+  return result.rows.map((g) => ({ ...g, key_results: byGoal.get(g.id) ?? [] }));
+}
+
+/** Goal creator for permission checks (admin OR goal owner may delete/unlink). */
+export async function getGoalOwner(id: string, workspaceId: string): Promise<string | null> {
+  const r = await pool.query<{ created_by: string }>(
+    'SELECT created_by FROM goals WHERE id = $1 AND workspace_id = $2',
+    [id, workspaceId],
+  );
+  return r.rows[0]?.created_by ?? null;
 }
 
 export async function getGoalById(id: string, workspaceId: string): Promise<GoalWithProgress | null> {
@@ -131,10 +174,15 @@ export async function deleteGoal(id: string, workspaceId: string): Promise<boole
 // ─── goal links ──────────────────────────���─────────────────────��─────────────
 
 export async function getGoalLinks(goalId: string, workspaceId: string): Promise<GoalLink[]> {
+  // Links to soft-deleted tasks are hidden (the link row is kept so a restore brings it back).
   const result = await pool.query<GoalLink>(
     `SELECT gl.* FROM goal_links gl
      JOIN goals g ON g.id = gl.goal_id
-     WHERE gl.goal_id = $1 AND g.workspace_id = $2`,
+     LEFT JOIN tasks t ON gl.entity_type = 'task' AND t.id = gl.entity_id
+     WHERE gl.goal_id = $1 AND g.workspace_id = $2
+       AND (gl.entity_type <> 'task' OR (t.id IS NOT NULL AND t.deleted_at IS NULL))
+     ORDER BY gl.created_at
+     LIMIT 1000`,
     [goalId, workspaceId],
   );
   return result.rows;
@@ -163,6 +211,16 @@ export async function addGoalLink(
     if (taskCheck.rows.length === 0) {
       throw Object.assign(new Error('Task not found in this workspace'), { status: 404 });
     }
+  } else if (entityType === 'roadmap_item') {
+    const itemCheck = await pool.query(
+      'SELECT id FROM roadmap_items WHERE id = $1 AND workspace_id = $2',
+      [entityId, workspaceId],
+    );
+    if (itemCheck.rows.length === 0) {
+      throw Object.assign(new Error('Roadmap item not found in this workspace'), { status: 404 });
+    }
+  } else {
+    throw Object.assign(new Error('Unsupported link type'), { status: 400 });
   }
 
   const result = await pool.query<GoalLink>(
@@ -180,6 +238,17 @@ export async function addGoalLink(
  */
 export async function getGoalProgressForTask(
   taskId: string,
+  workspaceId: string,
+): Promise<{ id: string; title: string; created_by: string; total_tasks: number; done_tasks: number }[]> {
+  return getGoalProgressForEntity('task', taskId, workspaceId);
+}
+
+/**
+ * Same as getGoalProgressForTask, for any linkable entity (task | roadmap_item).
+ */
+export async function getGoalProgressForEntity(
+  entityType: 'task' | 'roadmap_item',
+  entityId: string,
   workspaceId: string,
 ): Promise<{ id: string; title: string; created_by: string; total_tasks: number; done_tasks: number }[]> {
   // Same "count tasks + roadmap_items toward progress" logic as getGoals/getGoalById — a goal
@@ -200,9 +269,9 @@ export async function getGoalProgressForTask(
      LEFT JOIN goal_links gl2 ON gl2.goal_id = g.id
      LEFT JOIN tasks t2 ON t2.id = gl2.entity_id AND gl2.entity_type = 'task'
      LEFT JOIN roadmap_items ri2 ON ri2.id = gl2.entity_id AND gl2.entity_type = 'roadmap_item'
-     WHERE gl.entity_id = $1 AND gl.entity_type = 'task'
+     WHERE gl.entity_id = $1 AND gl.entity_type = $3
      GROUP BY g.id, g.title, g.created_by`,
-    [taskId, workspaceId],
+    [entityId, workspaceId, entityType],
   );
   return result.rows;
 }
@@ -228,33 +297,47 @@ async function _notifyGoalMilestone(
   milestone: '50%' | '100%',
   workspaceUrl: string,
 ): Promise<void> {
-  const dedupBody = `${goal.id}:${milestone === '100%' ? '100' : '50'}`;
+  const dedupKey = `goal_milestone:${goal.id}:${milestone === '100%' ? '100' : '50'}`;
   const title = milestone === '100%'
     ? `Goal complete: "${goal.title}"`
     : `Halfway there on "${goal.title}" (50%)`;
+  const body = milestone === '100%'
+    ? `All work linked to "${goal.title}" is done.`
+    : `Half of the work linked to "${goal.title}" is done.`;
 
-  // Permanent (not time-windowed) dedup: dedupBody is unique per (goal, milestone), and
-  // checkAndNotifyGoalMilestones now re-evaluates "is this goal AT this milestone right now"
+  // The goal creator may have left the workspace since creating the goal — don't notify or
+  // email someone who can no longer open it.
+  const member = await pool.query(
+    'SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND clerk_user_id = $2',
+    [workspaceId, goal.created_by],
+  );
+  if (member.rows.length === 0) return;
+
+  // Permanent (not time-windowed) dedup: dedup_key is unique per (goal, milestone), and
+  // checkAndNotifyGoalMilestones re-evaluates "is this goal AT this milestone right now"
   // on every completion rather than trying to detect a "crossing" from a single-task delta —
   // so this guard is what makes repeated re-checks idempotent instead of re-notifying forever.
   // The email send below is gated on the same guard (via rowCount) so it doesn't re-fire
   // independently of the in-app notification.
   //
-  // Backed by a real unique index (migration 050) rather than a plain WHERE NOT EXISTS — two
-  // concurrent transactions both evaluating NOT EXISTS as true before either commits used to be
-  // able to double-insert (and double-email) the same milestone. ON CONFLICT DO NOTHING makes
-  // the second writer lose atomically instead of racing on a read.
-  const inserted = await pool.query(
-    `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
-     SELECT $1, $2, 'goal_milestone', $3, $4, '/goals'
-     WHERE NOT EXISTS (
-       SELECT 1 FROM notification_preferences
-       WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'goal_milestone' AND enabled = false
-     )
-     ON CONFLICT (workspace_id, recipient_clerk_id, body) WHERE type = 'goal_milestone' DO NOTHING`,
-    [workspaceId, goal.created_by, title, dedupBody],
+  // Backed by the unique dedup_key index (migration 052) — ON CONFLICT DO NOTHING makes a
+  // concurrent second writer lose atomically instead of racing on a read.
+  //
+  // A muted recipient still gets the row, stored as already read: that records the milestone so
+  // unmuting later doesn't fire a stale "halfway there" for a goal that passed 50% long ago.
+  const muted = await pool.query(
+    `SELECT 1 FROM notification_preferences
+     WHERE workspace_id = $1 AND clerk_user_id = $2 AND type = 'goal_milestone' AND enabled = false`,
+    [workspaceId, goal.created_by],
   );
-  if ((inserted.rowCount ?? 0) === 0) return;
+  const isMuted = muted.rows.length > 0;
+  const inserted = await pool.query(
+    `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link, dedup_key, read_at)
+     VALUES ($1, $2, 'goal_milestone', $3, $4, '/goals', $5, CASE WHEN $6::boolean THEN now() ELSE NULL END)
+     ON CONFLICT (workspace_id, recipient_clerk_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING`,
+    [workspaceId, goal.created_by, title, body, dedupKey, isMuted],
+  );
+  if ((inserted.rowCount ?? 0) === 0 || isMuted) return;
 
   const user = await resolveClerkEmail(goal.created_by);
   if (user) {
@@ -285,7 +368,20 @@ export function checkAndNotifyGoalMilestones(
   workspaceId: string,
   workspaceUrl: string,
 ): void {
-  getGoalProgressForTask(taskId, workspaceId).then(async (goals) => {
+  checkAndNotifyGoalMilestonesForEntity('task', taskId, workspaceId, workspaceUrl);
+}
+
+/**
+ * Entity-generic form of checkAndNotifyGoalMilestones — roadmap items count toward goal
+ * progress when they go live, so a roadmap status change must re-check milestones too.
+ */
+export function checkAndNotifyGoalMilestonesForEntity(
+  entityType: 'task' | 'roadmap_item',
+  entityId: string,
+  workspaceId: string,
+  workspaceUrl: string,
+): void {
+  getGoalProgressForEntity(entityType, entityId, workspaceId).then(async (goals) => {
     for (const goal of goals) {
       if (goal.total_tasks === 0) continue;
       const pct = goal.done_tasks / goal.total_tasks;
@@ -297,6 +393,6 @@ export function checkAndNotifyGoalMilestones(
       }
     }
   }).catch((err) => {
-    logger.warn({ err, taskId, workspaceId }, 'checkAndNotifyGoalMilestones failed');
+    logger.warn({ err, entityType, entityId, workspaceId }, 'checkAndNotifyGoalMilestones failed');
   });
 }

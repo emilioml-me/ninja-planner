@@ -1,7 +1,10 @@
 import { createHmac, randomBytes } from 'crypto';
+import { isIP } from 'net';
+import { lookup } from 'dns/promises';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
-import { resolvedIpIsSafe } from '../lib/ssrf.js';
+import { isPrivateIp } from '../lib/ssrf.js';
+import { trackBackground } from '../lib/background.js';
 
 export interface WebhookEndpoint {
   id: string;
@@ -30,7 +33,7 @@ export interface WebhookDelivery {
 
 export async function getEndpoints(workspaceId: string): Promise<WebhookEndpoint[]> {
   const result = await pool.query<WebhookEndpoint>(
-    'SELECT * FROM webhook_endpoints WHERE workspace_id = $1 ORDER BY created_at',
+    'SELECT * FROM webhook_endpoints WHERE workspace_id = $1 ORDER BY created_at LIMIT 500',
     [workspaceId],
   );
   return result.rows;
@@ -67,6 +70,19 @@ export async function updateEndpoint(
   const result = await pool.query<WebhookEndpoint>(
     `UPDATE webhook_endpoints SET ${fields.join(', ')} WHERE id = $${i++} AND workspace_id = $${i} RETURNING *`,
     values,
+  );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Replaces the endpoint's signing secret. Returns the full row (including the new secret, which
+ * the caller shows exactly once) or null if the endpoint isn't in this workspace.
+ */
+export async function rotateEndpointSecret(id: string, workspaceId: string): Promise<WebhookEndpoint | null> {
+  const secret = randomBytes(32).toString('hex');
+  const result = await pool.query<WebhookEndpoint>(
+    'UPDATE webhook_endpoints SET secret = $1 WHERE id = $2 AND workspace_id = $3 RETURNING *',
+    [secret, id, workspaceId],
   );
   return result.rows[0] ?? null;
 }
@@ -118,8 +134,8 @@ export function fireWebhooks(
   eventType: WebhookEventType,
   payload: Record<string, unknown>,
 ): void {
-  // Deliberately not awaited
-  _deliver(workspaceId, eventType, payload).catch((err) => {
+  // Deliberately not awaited by the caller; tracked so graceful shutdown can drain it.
+  void trackBackground(_deliver(workspaceId, eventType, payload)).catch((err) => {
     logger.warn({ err, workspaceId, eventType }, 'Webhook delivery batch error');
   });
 }
@@ -197,25 +213,37 @@ async function _deliverToEndpoint(
 ): Promise<boolean> {
   // Per-endpoint delivery ID so each receiver can correlate retries vs. separate events
   const deliveryId = randomBytes(16).toString('hex');
-  const { hostname } = new URL(endpoint.url);
-  const signature = signPayload(endpoint.secret, body);
   let httpStatus: number | null = null;
   let error: string | null = null;
   let status = 'failed';
 
-  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+  let hostname: string | null = null;
+  try {
+    hostname = new URL(endpoint.url).hostname;
+  } catch {
+    error = 'Invalid endpoint URL';
+  }
+  const signature = signPayload(endpoint.secret, body);
+
+  for (let attempt = 0; hostname !== null && attempt < RETRY_DELAYS_MS.length; attempt++) {
     if (attempt > 0) await sleep(RETRY_DELAYS_MS[attempt]);
 
     // DNS-rebinding guard, re-run on EVERY attempt (retries happen up to 70s later, long enough
     // for attacker-controlled DNS with a short TTL to flip to a private address). All resolved
     // addresses must be public. A narrow TOCTOU window between this lookup and fetch()'s own
     // resolution remains; fully closing it would need a pinned-IP dispatcher (undici is not a
-    // direct dependency).
-    if (!(await resolvedIpIsSafe(hostname))) {
+    // direct dependency). A failed lookup is transient (retried); a private address is not.
+    const hostCheck = await checkResolvedHost(hostname);
+    if (hostCheck === 'private') {
       logger.warn({ endpointId: endpoint.id, url: endpoint.url }, 'SSRF: resolved IP is private, aborting delivery');
       httpStatus = null;
       error = 'SSRF: resolved to private IP';
       break;
+    }
+    if (hostCheck === 'dns_error') {
+      httpStatus = null;
+      error = 'DNS lookup failed';
+      continue;
     }
 
     try {
@@ -254,13 +282,31 @@ async function _deliverToEndpoint(
     );
   }
 
-  // Log delivery (best-effort, don't block or throw)
+  // Log delivery (best-effort, never throws). Awaited so it's covered by the caller's
+  // trackBackground() and isn't dropped on shutdown.
   // delivered_at is only set on success so the health widget shows accurate timestamps.
-  pool.query(
+  await pool.query(
     `INSERT INTO webhook_deliveries (endpoint_id, event_type, payload, status, http_status, error, delivered_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [endpoint.id, eventType, payload, status, httpStatus, error, status === 'success' ? new Date() : null],
   ).catch(() => {});
 
   return status === 'success';
+}
+
+/**
+ * Resolve the endpoint host and classify it: 'ok' (every address public), 'private' (any address
+ * private/internal - SSRF, never retried) or 'dns_error' (lookup failed / no records - transient,
+ * retried like a network error).
+ */
+async function checkResolvedHost(hostname: string): Promise<'ok' | 'private' | 'dns_error'> {
+  const host = hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host)) return isPrivateIp(host) ? 'private' : 'ok';
+  try {
+    const addresses = await lookup(host, { all: true, verbatim: true });
+    if (addresses.length === 0) return 'dns_error';
+    return addresses.every(({ address }) => !isPrivateIp(address)) ? 'ok' : 'private';
+  } catch {
+    return 'dns_error';
+  }
 }

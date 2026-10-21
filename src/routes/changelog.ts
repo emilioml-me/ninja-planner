@@ -2,8 +2,15 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
+import { getRequestTz, todayInTz } from '../lib/tz.js';
 
 const router = Router();
+
+/** Pure calendar arithmetic on a 'YYYY-MM-DD' string (no server-timezone dependence). */
+function addDays(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
 router.use(requireWorkspace);
 
 const querySchema = z.object({
@@ -19,6 +26,8 @@ interface ChangelogTask {
   story_points: number | null;
   assignee_name: string | null;
   completed_at: string;
+  /** completed_at as a YYYY-MM-DD calendar day in the requester's timezone (X-Timezone). */
+  completed_date: string;
   sprint_name: string | null;
   epic_id: string | null;
   epic_title: string | null;
@@ -42,36 +51,53 @@ router.get('/', async (req, res, next) => {
     if (!parsed.success) { res.status(400).json({ error: parsed.error.flatten() }); return; }
 
     const { from, to, limit = 200 } = parsed.data;
-    // H6: Use explicit UTC timestamps to avoid session-timezone ambiguity
-    // Pass date strings and let PostgreSQL cast with timezone: date+time+offset
-    const toDate   = to   ? `${to}T23:59:59Z`   : new Date().toISOString();
-    const fromDate = from ? `${from}T00:00:00Z`  : new Date(Date.now() - 30 * 86400_000).toISOString();
-    // Exclusive upper bound: midnight UTC of the day AFTER `to`. A `<= to 23:59:59` bound dropped
-    // completions in the final (sub-)second of the day (timestamptz has microsecond precision).
-    let toExclusive: string;
-    if (to) {
-      const next = new Date(`${to}T00:00:00Z`);
-      next.setUTCDate(next.getUTCDate() + 1);
-      toExclusive = next.toISOString();
-    } else {
-      // "now" + 1ms so a completion logged in the current millisecond is still included.
-      toExclusive = new Date(Date.now() + 1).toISOString();
+    if (from && to && from > to) {
+      res.status(400).json({ error: 'from must be on or before to' });
+      return;
     }
+
+    // Days are calendar days in the requester's timezone (K6). Bounds are that zone's local
+    // midnights: [from 00:00, day-after-to 00:00). Default range = the last 30 days up to today.
+    const tz = getRequestTz(req);
+    const toDay   = to ?? todayInTz(tz);
+    const fromDay = from ?? addDays(toDay, -30);
 
     // Completion time = start of each done task's current "done" streak: the first status='done'
     // row after its last non-done status row. Taking the LATEST status='done' row instead moved a
     // task's completion forward every time a done task was edited (or dragged within Done).
     // 'created' covers tasks created directly as done (M5); historical 'moved' rows carry the
     // status of Kanban drags logged before the reorder path switched to logging 'updated'.
+    //
+    // A task whose current streak started inside the window necessarily has a status='done' row
+    // inside the window, so `candidates` narrows to those tasks first — the full status history
+    // (needed for the reopen check) is then only scanned for them, not for every done task the
+    // workspace ever had.
     const result = await pool.query<ChangelogTask & { sprint_id: string | null }>(
-      `WITH status_rows AS (
-         SELECT ta.task_id, ta.created_at, ta.payload->>'status' AS status
+      `WITH bounds AS (
+         SELECT ($2::date::timestamp AT TIME ZONE $5)       AS lo,
+                (($3::date + 1)::timestamp AT TIME ZONE $5) AS hi
+       ),
+       candidates AS (
+         SELECT DISTINCT ta.task_id
          FROM task_activity ta
          JOIN tasks t ON t.id = ta.task_id
+         CROSS JOIN bounds b
          WHERE t.workspace_id = $1
            AND t.status = 'done'
            AND t.deleted_at IS NULL
+           -- the updated_at trigger bumps on completion, so a task completed in the window was
+           -- updated at or after its start (same prefilter guestView uses)
+           AND t.updated_at >= b.lo
            AND ta.action IN ('updated', 'created', 'moved')
+           AND ta.payload->>'status' = 'done'
+           AND ta.created_at >= b.lo
+           AND ta.created_at < b.hi
+       ),
+       status_rows AS (
+         SELECT ta.task_id, ta.created_at, ta.payload->>'status' AS status
+         FROM task_activity ta
+         JOIN candidates c ON c.task_id = ta.task_id
+         WHERE ta.action IN ('updated', 'created', 'moved')
            AND (ta.payload->>'status') IS NOT NULL
        ),
        last_reopen AS (
@@ -96,6 +122,7 @@ router.get('/', async (req, res, next) => {
          t.sprint_id,
          wm.display_name                   AS assignee_name,
          dt.completed_at,
+         (dt.completed_at AT TIME ZONE $5)::date::text AS completed_date,
          sp.name                           AS sprint_name,
          e.id::text                        AS epic_id,
          e.title                           AS epic_title,
@@ -105,12 +132,13 @@ router.get('/', async (req, res, next) => {
        LEFT JOIN workspace_members wm ON wm.clerk_user_id = t.assignee_clerk_id AND wm.workspace_id = t.workspace_id
        LEFT JOIN sprints sp            ON sp.id = t.sprint_id
        LEFT JOIN epics   e             ON e.id  = t.epic_id
+       CROSS JOIN bounds b
        WHERE t.workspace_id = $1
-         AND dt.completed_at >= $2
-         AND dt.completed_at < $3
+         AND dt.completed_at >= b.lo
+         AND dt.completed_at < b.hi
        ORDER BY dt.completed_at DESC
        LIMIT $4`,
-      [req.workspace.id, fromDate, toExclusive, limit],
+      [req.workspace.id, fromDay, toDay, limit, tz],
     );
 
     // One group per sprint; tasks with no sprint are grouped by their epic instead (or into a
@@ -137,8 +165,8 @@ router.get('/', async (req, res, next) => {
     }
 
     res.json({
-      from: fromDate.slice(0, 10),
-      to:   toDate.slice(0, 10),
+      from: fromDay,
+      to:   toDay,
       total_tasks: result.rows.length,
       total_points: result.rows.reduce((s, r) => s + (r.story_points ?? 0), 0),
       groups: Array.from(groupMap.values()),

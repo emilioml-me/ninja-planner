@@ -9,12 +9,14 @@ import { pool } from '../config/db.js';
 const router = Router();
 router.use(requireWorkspace);
 
-const VALID_SCOPES = ['tasks:read', 'tasks:write', 'roadmap:read', 'goals:read', 'sprints:read'];
+const VALID_SCOPES = ['tasks:read', 'tasks:write', 'roadmap:read', 'goals:read', 'sprints:read'] as const;
+
+// L10: cap on active (non-revoked) keys per workspace.
+const MAX_ACTIVE_KEYS_PER_WORKSPACE = 25;
 
 const createSchema = z.object({
   name:   z.string().min(1).max(100),
-  scopes: z.array(z.enum(['tasks:read', 'tasks:write', 'roadmap:read', 'goals:read', 'sprints:read']))
-           .min(1).default(['tasks:read']),
+  scopes: z.array(z.enum(VALID_SCOPES)).min(1).default(['tasks:read']),
 });
 
 function hashKey(key: string): string {
@@ -44,14 +46,38 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const keyHash  = hashKey(rawKey);
     const keyPrefix = rawKey.slice(0, 12);
 
-    const { rows } = await pool.query(
-      `INSERT INTO api_keys (workspace_id, name, key_hash, key_prefix, scopes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       RETURNING id, name, key_prefix, scopes, created_at`,
-      [req.workspace.id, name, keyHash, keyPrefix, scopes, req.auth.userId],
-    );
+    // Count + insert serialized per workspace (advisory xact lock) so concurrent creates can't
+    // both pass the cap check.
+    const client = await pool.connect();
+    let created: Record<string, unknown> | undefined;
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`api_keys:${req.workspace.id}`]);
+      const { rows: countRows } = await client.query<{ n: number }>(
+        'SELECT COUNT(*)::int AS n FROM api_keys WHERE workspace_id = $1 AND revoked_at IS NULL',
+        [req.workspace.id],
+      );
+      if ((countRows[0]?.n ?? 0) >= MAX_ACTIVE_KEYS_PER_WORKSPACE) {
+        await client.query('ROLLBACK');
+        res.status(400).json({ error: `A workspace can have at most ${MAX_ACTIVE_KEYS_PER_WORKSPACE} active API keys. Revoke an unused key first.` });
+        return;
+      }
+      const { rows } = await client.query(
+        `INSERT INTO api_keys (workspace_id, name, key_hash, key_prefix, scopes, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         RETURNING id, name, key_prefix, scopes, created_at`,
+        [req.workspace.id, name, keyHash, keyPrefix, scopes, req.auth.userId],
+      );
+      await client.query('COMMIT');
+      created = rows[0];
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
     // Return the raw key in this response only — it cannot be recovered later
-    res.status(201).json({ ...rows[0], key: rawKey });
+    res.status(201).json({ ...created, key: rawKey });
   } catch (err) { next(err); }
 });
 

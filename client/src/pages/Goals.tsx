@@ -27,19 +27,9 @@ import {
 import { Target, Plus, MoreVertical, Pencil, Trash2, CheckCircle2, Circle, XCircle, ChevronDown, ChevronRight, Loader2, Download, Link2, X } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
 import { cn, safeFormat } from '@/lib/utils';
-import { useIsAdmin } from '@/hooks/use-is-admin';
-import { useMembers } from '@/hooks/use-members';
-
-/**
- * Local helper: true when the current user's workspace role is 'viewer'. The server
- * (requireWorkspace) rejects every non-GET request from viewers, so edit controls are hidden
- * for them. Role comes from the members list (useIsAdmin only exposes Clerk org roles).
- */
-function useIsViewer(): boolean {
-  const { userId } = useAuth();
-  const { lookup } = useMembers();
-  return !!userId && lookup.get(userId)?.role === 'viewer';
-}
+import { useMyRole } from '@/hooks/use-is-admin';
+import { useTaskList } from '@/hooks/use-tasks';
+import { QueryError } from '@/components/QueryError';
 
 interface GoalLink {
   id: string;
@@ -48,8 +38,18 @@ interface GoalLink {
   entity_id: string;
 }
 
-interface LinkableTask { id: string; title: string; status: string }
 interface LinkableRoadmapItem { id: string; title: string; status: string }
+
+interface KeyResult {
+  id: string;
+  goal_id: string;
+  title: string;
+  /** pg NUMERIC: arrives as a string on the wire - always read through Number(). */
+  target_value: string | number;
+  current_value: string | number;
+  unit: string;
+  position: number;
+}
 
 interface Goal {
   id: string;
@@ -57,19 +57,37 @@ interface Goal {
   description: string | null;
   status: string;
   due_date: string | null;
+  /** Linked items (tasks + roadmap items) despite the column names. */
   total_tasks: number;
   done_tasks: number;
+  created_by: string;
   created_at: string;
+  /** Included by GET /api/goals (one grouped query server-side - no per-card fetch). */
+  key_results?: KeyResult[];
 }
 
-interface KeyResult {
-  id: string;
-  goal_id: string;
-  title: string;
-  target_value: number;
-  current_value: number;
-  unit: string;
-  position: number;
+const KR_MAX_VALUE = 1_000_000_000;
+
+/** Parses a KR number input; null when blank, non-numeric, negative or above the server max. */
+function parseKrValue(raw: string): number | null {
+  if (raw.trim() === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= KR_MAX_VALUE ? n : null;
+}
+
+/** Progress of one KR in percent. A target of 0 is met once the current value is down to 0. */
+function krProgress(kr: KeyResult): number {
+  const target = Number(kr.target_value);
+  const current = Number(kr.current_value);
+  if (!Number.isFinite(target) || !Number.isFinite(current)) return 0;
+  if (target <= 0) return current <= 0 ? 100 : 0;
+  return Math.max(0, Math.min(100, (current / target) * 100));
+}
+
+/** Formats a NUMERIC string without trailing zeros ("12.50" -> "12.5"). */
+function formatKrValue(v: string | number): string {
+  const n = Number(v);
+  return Number.isFinite(n) ? String(n) : String(v);
 }
 
 const STATUS_META: Record<string, { label: string; icon: React.ElementType; color: string }> = {
@@ -79,8 +97,8 @@ const STATUS_META: Record<string, { label: string; icon: React.ElementType; colo
 };
 
 const formSchema = z.object({
-  title:       z.string().min(1, 'Required').max(500),
-  description: z.string().optional(),
+  title:       z.string().trim().min(1, 'Required').max(500),
+  description: z.string().max(5000, 'Max 5000 characters').optional(),
   due_date:    z.string().optional(),
 });
 type FormData = z.infer<typeof formSchema>;
@@ -89,16 +107,23 @@ export default function Goals() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
-  const isAdmin = useIsAdmin();
-  const isViewer = useIsViewer();
+  // Edit controls stay hidden until the workspace role has loaded (no flash for viewers).
+  const { isAdmin, isViewer, isLoading: roleLoading } = useMyRole();
+  const canEdit = !roleLoading && !isViewer;
+  const { userId } = useAuth();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Goal | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Goal | null>(null);
 
-  const { data: goals = [], isLoading } = useQuery<Goal[]>({
+  const { data, isLoading: goalsLoading, isError, error, refetch } = useQuery<Goal[]>({
     queryKey: ['/api/goals'],
     queryFn: () => apiRequest('GET', '/api/goals'),
   });
+  const goals = data ?? [];
+  const isLoading = goalsLoading || roleLoading;
+  // Exact: the list carries progress + key results; per-goal link lists are refreshed by the
+  // link mutations themselves.
+  const invalidateGoals = () => qc.invalidateQueries({ queryKey: ['/api/goals'], exact: true });
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
@@ -126,7 +151,7 @@ export default function Goals() {
         : apiRequest('POST', '/api/goals', payload);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['/api/goals'] });
+      invalidateGoals();
       setOpen(false);
       toast({ title: editing ? 'Goal updated' : 'Goal created' });
     },
@@ -136,14 +161,15 @@ export default function Goals() {
   const statusMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) =>
       apiRequest('PATCH', `/api/goals/${id}`, { status }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['/api/goals'] }),
+    onSuccess: () => invalidateGoals(),
     onError: (err: Error) => toast({ title: 'Failed to update goal status', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/goals/${id}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['/api/goals'] });
+    onSuccess: (_data, id) => {
+      invalidateGoals();
+      qc.removeQueries({ queryKey: ['/api/goals', id] });
       setDeleteTarget(null);
       toast({ title: 'Goal deleted' });
     },
@@ -168,18 +194,20 @@ export default function Goals() {
         <div className="flex items-center gap-2">
           <Button
             size="sm" variant="outline" className="gap-2"
+            disabled={goals.length === 0}
+            title={goals.length === 0 ? 'Nothing to export yet' : undefined}
             onClick={() => downloadCsv('goals.csv', goals.map((g) => ({
               title: g.title,
               status: g.status,
               due_date: g.due_date ?? '',
-              total_tasks: g.total_tasks,
-              done_tasks: g.done_tasks,
+              linked_items: g.total_tasks,
+              done_items: g.done_tasks,
             })))}
           >
             <Download className="h-4 w-4" />
             <span className="hidden sm:inline">Export</span>
           </Button>
-          {!isViewer && <Button onClick={openCreate} className="gap-2"><Plus className="h-4 w-4" />New Goal</Button>}
+          {canEdit && <Button onClick={openCreate} className="gap-2"><Plus className="h-4 w-4" />New Goal</Button>}
         </div>
       </div>
 
@@ -187,12 +215,14 @@ export default function Goals() {
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-28 w-full rounded-lg" />)}
         </div>
+      ) : isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : goals.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <Target className="h-10 w-10 text-muted-foreground/30 mb-3" />
           <p className="text-sm font-medium">No goals yet</p>
           <p className="text-xs text-muted-foreground mt-1">Create a goal to track your team's objectives.</p>
-          {!isViewer && <Button className="mt-4 gap-2" onClick={openCreate}><Plus className="h-4 w-4" />Create first goal</Button>}
+          {canEdit && <Button className="mt-4 gap-2" onClick={openCreate}><Plus className="h-4 w-4" />Create first goal</Button>}
         </div>
       ) : (
         <>
@@ -201,7 +231,17 @@ export default function Goals() {
             .map(({ title, items }) => (
               <div key={title} className="space-y-3">
                 <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{title}</h2>
-                {items.map((goal) => <GoalCard key={goal.id} goal={goal} canEdit={!isViewer} onEdit={openEdit} onDelete={isAdmin ? setDeleteTarget : undefined} onStatusChange={(s) => statusMutation.mutate({ id: goal.id, status: s })} />)}
+                {items.map((goal) => {
+                  // Server: goal delete, link removal and KR delete are admin OR goal creator.
+                  const canManage = canEdit && (isAdmin || goal.created_by === userId);
+                  return (
+                    <GoalCard
+                      key={goal.id} goal={goal} canEdit={canEdit} canManage={canManage} onEdit={openEdit}
+                      onDelete={canManage ? setDeleteTarget : undefined}
+                      onStatusChange={(s) => statusMutation.mutate({ id: goal.id, status: s })}
+                    />
+                  );
+                })}
               </div>
             ))}
         </>
@@ -239,7 +279,7 @@ export default function Goals() {
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>Delete goal?</DialogTitle>
-            <DialogDescription>This will permanently delete "{deleteTarget?.title}" and all its task links. Tasks themselves won't be deleted.</DialogDescription>
+            <DialogDescription>This will permanently delete "{deleteTarget?.title}", its key results and all its links. Linked tasks and roadmap items themselves won't be deleted.</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
@@ -253,7 +293,7 @@ export default function Goals() {
 
 // Linked tasks / roadmap items drive the goal's progress (server counts done tasks and 'live'
 // roadmap items). The link routes existed server-side but had no UI, so progress was always 0.
-function GoalLinks({ goalId, canEdit }: { goalId: string; canEdit: boolean }) {
+function GoalLinks({ goalId, canEdit, canUnlink }: { goalId: string; canEdit: boolean; canUnlink: boolean }) {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
@@ -261,29 +301,33 @@ function GoalLinks({ goalId, canEdit }: { goalId: string; canEdit: boolean }) {
   const [entityType, setEntityType] = useState<'task' | 'roadmap_item'>('task');
   const [search, setSearch] = useState('');
 
-  const { data: links = [], isLoading } = useQuery<GoalLink[]>({
+  const {
+    data: linksData, isLoading, isError, error, refetch,
+  } = useQuery<GoalLink[]>({
     queryKey: ['/api/goals', goalId, 'links'],
     queryFn: () => apiRequest<GoalLink[]>('GET', `/api/goals/${goalId}/links`),
   });
-  // Distinct key suffixes so these lookups don't share a cache entry with pages that store a
-  // differently-shaped result under the bare key, while prefix invalidation still reaches them.
-  const { data: tasks = [] } = useQuery<LinkableTask[]>({
-    queryKey: ['/api/tasks', 'goal-links'],
-    queryFn: () => apiRequest<LinkableTask[]>('GET', '/api/tasks'),
-    staleTime: 60_000,
-  });
-  const { data: roadmapItems = [] } = useQuery<LinkableRoadmapItem[]>({
+  const links = linksData ?? [];
+  // The workspace task list comes from the shared useTaskList() cache (the only reader of
+  // ['/api/tasks']); it is capped, so say so when the picker may be missing tasks.
+  const {
+    tasks, truncated: tasksTruncated, isError: tasksError, error: tasksErr, refetch: refetchTasks,
+  } = useTaskList();
+  // Distinct key suffix so this lookup doesn't share a cache entry with pages that store a
+  // differently-shaped result under the bare key, while prefix invalidation still reaches it.
+  const roadmapQuery = useQuery<LinkableRoadmapItem[]>({
     queryKey: ['/api/roadmap', 'goal-links'],
     queryFn: () => apiRequest<LinkableRoadmapItem[]>('GET', '/api/roadmap'),
     staleTime: 60_000,
   });
+  const roadmapItems = roadmapQuery.data ?? [];
 
   const taskMap = new Map(tasks.map((t) => [t.id, t]));
   const roadmapMap = new Map(roadmapItems.map((r) => [r.id, r]));
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['/api/goals', goalId, 'links'] });
-    qc.invalidateQueries({ queryKey: ['/api/goals'] });
+    qc.invalidateQueries({ queryKey: ['/api/goals'], exact: true });
   };
 
   const linkMut = useMutation({
@@ -304,11 +348,16 @@ function GoalLinks({ goalId, canEdit }: { goalId: string; canEdit: boolean }) {
   const candidates = (entityType === 'task' ? tasks : roadmapItems)
     .filter((c) => !linkedIds.has(c.id) && (!q || c.title.toLowerCase().includes(q)))
     .slice(0, 8);
+  const pickerError = entityType === 'task'
+    ? (tasksError && tasks.length === 0 ? { error: tasksErr, retry: () => refetchTasks() } : null)
+    : (roadmapQuery.isError && !roadmapQuery.data ? { error: roadmapQuery.error, retry: () => roadmapQuery.refetch() } : null);
 
   return (
     <div className="space-y-2 pl-1">
       {isLoading ? (
         <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      ) : isError && !linksData ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : links.length === 0 ? (
         <p className="text-xs text-muted-foreground">Nothing linked yet — link tasks or roadmap items to track progress.</p>
       ) : (
@@ -324,10 +373,10 @@ function GoalLinks({ goalId, canEdit }: { goalId: string; canEdit: boolean }) {
               <Badge variant="outline" className="text-[9px] px-1 shrink-0">
                 {l.entity_type === 'task' ? 'Task' : 'Roadmap'}
               </Badge>
-              {canEdit && (
+              {canEdit && canUnlink && (
                 <Button
                   size="icon" variant="ghost"
-                  className="h-5 w-5 opacity-50 hover:opacity-100 hover:text-destructive shrink-0"
+                  className="h-5 w-5 opacity-50 hover:opacity-100 focus-visible:opacity-100 hover:text-destructive shrink-0"
                   disabled={unlinkMut.isPending}
                   onClick={() => unlinkMut.mutate(l.entity_id)}
                   aria-label="Unlink"
@@ -361,7 +410,9 @@ function GoalLinks({ goalId, canEdit }: { goalId: string; canEdit: boolean }) {
               Done
             </Button>
           </div>
-          {candidates.length === 0 ? (
+          {pickerError ? (
+            <QueryError error={pickerError.error} onRetry={pickerError.retry} />
+          ) : candidates.length === 0 ? (
             <p className="text-xs text-muted-foreground">No matching {entityType === 'task' ? 'tasks' : 'roadmap items'}.</p>
           ) : (
             <div className="space-y-0.5">
@@ -378,6 +429,11 @@ function GoalLinks({ goalId, canEdit }: { goalId: string; canEdit: boolean }) {
               ))}
             </div>
           )}
+          {entityType === 'task' && tasksTruncated && !pickerError && (
+            <p className="text-[10px] text-muted-foreground">
+              Only the first {tasks.length} tasks are searchable here.
+            </p>
+          )}
         </div>
       ) : (
         <Button
@@ -392,9 +448,11 @@ function GoalLinks({ goalId, canEdit }: { goalId: string; canEdit: boolean }) {
   );
 }
 
-function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
+function GoalCard({ goal, canEdit, canManage, onEdit, onDelete, onStatusChange }: {
   goal: Goal;
   canEdit: boolean;
+  /** Admin or the goal's creator: may delete the goal, unlink items and delete key results. */
+  canManage: boolean;
   onEdit: (g: Goal) => void;
   onDelete?: (g: Goal) => void;
   onStatusChange: (status: string) => void;
@@ -421,18 +479,15 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
   // any UTC-negative timezone — the app's own stated LATAM/Mexico target market included.
   const overdue = goal.due_date && goal.status === 'active' && isPast(new Date(goal.due_date + 'T23:59:59'));
 
-  const { data: keyResults = [], isLoading: krLoading } = useQuery<KeyResult[]>({
-    queryKey: ['/api/goals', goal.id, 'key-results'],
-    queryFn: () => apiRequest<KeyResult[]>('GET', `/api/goals/${goal.id}/key-results`),
-    // Fetched up front (not only when expanded) so the collapsed "N% avg" summary can show.
-    staleTime: 30_000,
-  });
+  // Key results arrive with the goals list (GET /api/goals) - no per-card request.
+  const keyResults = goal.key_results ?? [];
+  const invalidateGoals = () => qc.invalidateQueries({ queryKey: ['/api/goals'], exact: true });
 
   const addKrMut = useMutation({
     mutationFn: (data: { title: string; target_value: number; unit: string }) =>
       apiRequest('POST', `/api/goals/${goal.id}/key-results`, data),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['/api/goals', goal.id, 'key-results'] });
+      invalidateGoals();
       setAddingKr(false);
       setNewKrTitle('');
       setNewKrTarget('100');
@@ -445,7 +500,7 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
     mutationFn: ({ id, current_value }: { id: string; current_value: number }) =>
       apiRequest('PATCH', `/api/goals/${goal.id}/key-results/${id}`, { current_value }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['/api/goals', goal.id, 'key-results'] });
+      invalidateGoals();
       setEditingKr(null);
     },
     onError: (err: Error) => toast({ title: 'Failed to update key result', description: err.message, variant: 'destructive' }),
@@ -455,18 +510,18 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
     mutationFn: (id: string) =>
       apiRequest('DELETE', `/api/goals/${goal.id}/key-results/${id}`),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['/api/goals', goal.id, 'key-results'] });
+      invalidateGoals();
       toast({ title: 'Key result removed' });
     },
     onError: (err: Error) => toast({ title: 'Failed to remove key result', description: err.message, variant: 'destructive' }),
   });
 
   const avgKrPct = keyResults.length > 0
-    ? Math.round(keyResults.reduce((sum, kr) => {
-        const t = kr.target_value > 0 ? kr.target_value : 1;
-        return sum + Math.min(100, (kr.current_value / t) * 100);
-      }, 0) / keyResults.length)
+    ? Math.round(keyResults.reduce((sum, kr) => sum + krProgress(kr), 0) / keyResults.length)
     : null;
+  const editKrValue = parseKrValue(editKrCurrent);
+  // Blank target falls back to the server default (100); anything else must be a valid number.
+  const newKrTargetValue = newKrTarget.trim() === '' ? 100 : parseKrValue(newKrTarget);
 
   return (
     <Card className={cn(goal.status !== 'active' && 'opacity-70')}>
@@ -504,18 +559,18 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
       </CardHeader>
 
       <CardContent className="px-4 pb-4 space-y-3">
-        {/* Task progress */}
+        {/* Linked-item progress (tasks done + roadmap items live) */}
         {goal.total_tasks > 0 && (
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-muted-foreground">
-              <span>{goal.done_tasks} / {goal.total_tasks} tasks done</span>
+              <span>{goal.done_tasks} / {goal.total_tasks} linked items done</span>
               <span>{pct}%</span>
             </div>
             <Progress value={pct} className="h-1.5" />
           </div>
         )}
         {goal.total_tasks === 0 && (
-          <p className="text-xs text-muted-foreground">No tasks linked yet.</p>
+          <p className="text-xs text-muted-foreground">No tasks or roadmap items linked yet.</p>
         )}
 
         {/* Linked items toggle */}
@@ -529,7 +584,7 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
             <span className="ml-auto font-medium text-foreground">{goal.total_tasks}</span>
           )}
         </button>
-        {linksExpanded && <GoalLinks goalId={goal.id} canEdit={canEdit} />}
+        {linksExpanded && <GoalLinks goalId={goal.id} canEdit={canEdit} canUnlink={canManage} />}
 
         {/* Key results toggle */}
         <button
@@ -545,14 +600,11 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
 
         {krExpanded && (
           <div className="space-y-2 pl-1">
-            {krLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-            ) : keyResults.length === 0 ? (
+            {keyResults.length === 0 ? (
               <p className="text-xs text-muted-foreground">No key results yet.</p>
             ) : (
               keyResults.map((kr) => {
-                const t = kr.target_value > 0 ? kr.target_value : 1;
-                const krPct = Math.min(100, Math.round((kr.current_value / t) * 100));
+                const krPct = Math.round(krProgress(kr));
                 return (
                   <div key={kr.id} className="space-y-1">
                     <div className="flex items-center justify-between gap-2">
@@ -562,45 +614,58 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
                           <>
                             <Input
                               type="number"
-                              className="h-6 w-20 text-xs px-1.5"
+                              min={0}
+                              max={KR_MAX_VALUE}
+                              step="any"
+                              className={cn('h-6 w-20 text-xs px-1.5', editKrValue === null && 'border-destructive')}
                               value={editKrCurrent}
                               onChange={(e) => setEditKrCurrent(e.target.value)}
+                              aria-label="Current value"
+                              aria-invalid={editKrValue === null}
+                              title={editKrValue === null ? 'Enter a number between 0 and 1,000,000,000' : undefined}
                             />
                             <Button
                               size="icon"
                               variant="ghost"
                               className="h-6 w-6"
-                              disabled={updateKrMut.isPending}
-                              onClick={() => updateKrMut.mutate({ id: kr.id, current_value: parseFloat(editKrCurrent) || 0 })}
+                              // A cleared/invalid value is rejected instead of silently saving 0.
+                              disabled={updateKrMut.isPending || editKrValue === null}
+                              onClick={() => { if (editKrValue !== null) updateKrMut.mutate({ id: kr.id, current_value: editKrValue }); }}
+                              aria-label="Save current value"
                             >
                               <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
                             </Button>
-                            <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => setEditingKr(null)}>
+                            <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => setEditingKr(null)} aria-label="Cancel">
                               <XCircle className="h-3.5 w-3.5" />
                             </Button>
                           </>
                         ) : (
                           <>
                             <span className="text-xs text-muted-foreground">
-                              {kr.current_value}/{kr.target_value} {kr.unit}
+                              {formatKrValue(kr.current_value)}/{formatKrValue(kr.target_value)} {kr.unit}
                             </span>
                             {canEdit && (<>
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-6 w-6 opacity-50 hover:opacity-100"
-                              onClick={() => { setEditingKr(kr.id); setEditKrCurrent(String(kr.current_value)); }}
+                              className="h-6 w-6 opacity-50 hover:opacity-100 focus-visible:opacity-100"
+                              onClick={() => { setEditingKr(kr.id); setEditKrCurrent(formatKrValue(kr.current_value)); }}
+                              aria-label="Edit current value"
                             >
                               <Pencil className="h-3 w-3" />
                             </Button>
+                            {/* KR delete is admin-or-goal-creator server-side. */}
+                            {canManage && (
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-6 w-6 opacity-50 hover:opacity-100 hover:text-destructive"
+                              className="h-6 w-6 opacity-50 hover:opacity-100 focus-visible:opacity-100 hover:text-destructive"
                               onClick={() => { if (confirm(`Remove key result "${kr.title}"?`)) deleteKrMut.mutate(kr.id); }}
+                              aria-label="Remove key result"
                             >
                               <Trash2 className="h-3 w-3" />
                             </Button>
+                            )}
                             </>)}
                           </>
                         )}
@@ -618,6 +683,7 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
                 <Input
                   placeholder="Key result title"
                   className="h-7 text-xs"
+                  maxLength={500}
                   value={newKrTitle}
                   onChange={(e) => setNewKrTitle(e.target.value)}
                   autoFocus
@@ -625,30 +691,34 @@ function GoalCard({ goal, canEdit, onEdit, onDelete, onStatusChange }: {
                 <div className="flex gap-1.5">
                   <Input
                     type="number"
+                    min={0}
+                    max={KR_MAX_VALUE}
+                    step="any"
                     placeholder="Target"
-                    className="h-7 text-xs w-24"
+                    className={cn('h-7 text-xs w-24', newKrTargetValue === null && 'border-destructive')}
                     value={newKrTarget}
                     onChange={(e) => setNewKrTarget(e.target.value)}
+                    aria-invalid={newKrTargetValue === null}
+                    title={newKrTargetValue === null ? 'Enter a number between 0 and 1,000,000,000' : undefined}
                   />
                   <Input
                     placeholder="Unit"
                     className="h-7 text-xs w-20"
+                    maxLength={30}
                     value={newKrUnit}
                     onChange={(e) => setNewKrUnit(e.target.value)}
                   />
                   <Button
                     size="sm"
                     className="h-7 px-2 text-xs"
-                    disabled={!newKrTitle.trim() || addKrMut.isPending}
+                    disabled={!newKrTitle.trim() || newKrTargetValue === null || addKrMut.isPending}
                     onClick={() => {
-                      // `|| 100` previously overrode an intentionally-entered 0 (parseFloat("0")
-                      // is falsy) with 100 — a valid target for some KR types was silently
-                      // replaced with no indication to the user. Only fall back when the input
-                      // didn't parse to a number at all (blank, or non-numeric).
-                      const parsedTarget = parseFloat(newKrTarget);
+                      // An entered 0 is kept as-is (a "get it down to zero" KR); only a blank
+                      // target falls back to 100, and invalid input disables the button.
+                      if (newKrTargetValue === null) return;
                       addKrMut.mutate({
                         title: newKrTitle.trim(),
-                        target_value: Number.isFinite(parsedTarget) ? parsedTarget : 100,
+                        target_value: newKrTargetValue,
                         unit: newKrUnit.trim() || '%',
                       });
                     }}

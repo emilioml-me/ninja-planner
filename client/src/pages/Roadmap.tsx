@@ -42,7 +42,9 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Plus, MoreVertical, Pencil, Trash2, Share2, Copy, Trash, ExternalLink, Search, X, Link, CheckSquare, ThumbsUp } from 'lucide-react';
 import { cn, externalRefLabel } from '@/lib/utils';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
+import { useTaskList } from '@/hooks/use-tasks';
+import { QueryError } from '@/components/QueryError';
 
 interface RoadmapItem {
   id: string;
@@ -77,10 +79,10 @@ const httpUrlSchema = z.string().max(500).refine(
 
 const formSchema = z.object({
   title: z.string().min(1, 'Required').max(500),
-  description: z.string().optional(),
+  description: z.string().max(5000, 'Max 5000 characters').optional(),
   phase: z.string().max(100).optional(),
   status: z.enum(STATUSES),
-  priority: z.coerce.number().int().min(0),
+  priority: z.coerce.number().int().min(0).max(1_000_000),
   external_ref: httpUrlSchema.or(z.literal('')).optional(),
 });
 type FormData = z.infer<typeof formSchema>;
@@ -97,10 +99,10 @@ export default function Roadmap() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
-  const isAdmin = useIsAdmin();
+  // isAdmin is false while the role is loading, so privileged controls stay hidden until known.
+  const { isAdmin } = useMyRole();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<RoadmapItem | null>(null);
-  const [defaultStatus, setDefaultStatus] = useState<typeof STATUSES[number]>('idea');
   const [shareOpen, setShareOpen] = useState(false);
   const [shareToken, setShareToken] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -112,10 +114,11 @@ export default function Roadmap() {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
 
-  const { data: items = [], isLoading } = useQuery<RoadmapItem[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<RoadmapItem[]>({
     queryKey: ['/api/roadmap'],
     queryFn: () => apiRequest<RoadmapItem[]>('GET', '/api/roadmap'),
   });
+  const items = data ?? [];
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
@@ -124,7 +127,6 @@ export default function Roadmap() {
 
   const openCreate = (status: typeof STATUSES[number] = 'idea') => {
     setEditing(null);
-    setDefaultStatus(status);
     form.reset({ title: '', description: '', phase: '', status, priority: 0, external_ref: '' });
     setOpen(true);
   };
@@ -142,7 +144,9 @@ export default function Roadmap() {
     setOpen(true);
   };
 
-  type ItemPayload = Omit<FormData, 'external_ref'> & { external_ref?: string | null };
+  type ItemPayload = Omit<FormData, 'external_ref' | 'phase' | 'description'> & {
+    external_ref?: string | null; phase?: string | null; description?: string | null;
+  };
 
   const createMut = useMutation({
     mutationFn: (d: ItemPayload) => apiRequest('POST', '/api/roadmap', d),
@@ -174,9 +178,9 @@ export default function Roadmap() {
   const reorderMut = useMutation({
     mutationFn: (data: { id: string; priority: number }[]) =>
       apiRequest('PATCH', '/api/roadmap/reorder', { items: data }),
-    onError: () => {
+    onError: (e: Error) => {
       qc.invalidateQueries({ queryKey: ['/api/roadmap'] });
-      toast({ title: 'Reorder failed', variant: 'destructive' });
+      toast({ title: 'Reorder failed', description: e.message, variant: 'destructive' });
     },
   });
 
@@ -219,11 +223,33 @@ export default function Roadmap() {
     reorderMut.mutate(updated.map((item, idx) => ({ id: item.id, priority: idx })));
   };
 
+  // Priority just past the last item of a column, so a new/moved item lands at the end of it
+  // instead of tying with (or jumping ahead of) the column's drag order.
+  const endOfColumnPriority = (status: string, excludeId?: string) => {
+    const col = items.filter((i) => i.status === status && i.id !== excludeId);
+    return col.length === 0 ? 0 : Math.max(...col.map((i) => i.priority)) + 1;
+  };
+
   const handleSubmit = (d: FormData) => {
+    // An explicitly typed priority wins; otherwise a new item, or one whose status changed,
+    // goes to the end of its target column.
+    const priorityTouched = !!form.formState.dirtyFields.priority;
+    const statusChanged = !editing || editing.status !== d.status;
+    const priority = !priorityTouched && statusChanged ? endOfColumnPriority(d.status, editing?.id) : d.priority;
     // Backend rejects '' as an invalid URL. On edit a cleared link must be sent as null —
     // undefined means "unchanged" on PATCH, so the old link would silently persist.
-    if (editing) updateMut.mutate({ ...d, external_ref: d.external_ref || null });
-    else createMut.mutate({ ...d, external_ref: d.external_ref || undefined });
+    // Same for cleared phase/description: null clears them on edit.
+    if (editing) {
+      updateMut.mutate({
+        ...d, priority, external_ref: d.external_ref || null,
+        phase: d.phase?.trim() || null, description: d.description?.trim() ? d.description : null,
+      });
+    } else {
+      createMut.mutate({
+        ...d, priority, external_ref: d.external_ref || undefined,
+        phase: d.phase?.trim() || undefined, description: d.description?.trim() ? d.description : undefined,
+      });
+    }
   };
 
   const openShare = async () => {
@@ -355,6 +381,8 @@ export default function Roadmap() {
 
       {isLoading ? (
         <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading…</div>
+      ) : isError && !data ? (
+        <div className="p-6"><QueryError error={error} onRetry={() => refetch()} /></div>
       ) : (
         <div className="flex-1 overflow-x-auto">
           <div className="flex gap-6 p-6 h-full min-h-0" style={{ minWidth: `${STATUSES.length * 320}px` }}>
@@ -426,6 +454,7 @@ export default function Roadmap() {
           onClose={() => setLinkTaskItem(null)}
           onLink={(taskId) => linkTaskMut.mutate({ itemId: linkTaskItem.id, taskId })}
           onUnlink={(taskId) => unlinkTaskMut.mutate({ itemId: linkTaskItem.id, taskId })}
+          pending={linkTaskMut.isPending || unlinkTaskMut.isPending}
         />
       )}
 
@@ -448,7 +477,7 @@ export default function Roadmap() {
               <FormField control={form.control} name="description" render={({ field }) => (
                 <FormItem>
                   <FormLabel>Description</FormLabel>
-                  <FormControl><Textarea rows={2} placeholder="What and why…" {...field} /></FormControl>
+                  <FormControl><Textarea rows={2} maxLength={5000} placeholder="What and why…" {...field} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )} />
@@ -475,7 +504,7 @@ export default function Roadmap() {
               </div>
               <FormField control={form.control} name="priority" render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Priority (lower = higher priority)</FormLabel>
+                  <FormLabel>Priority (lower = higher; leave as is to keep drag order)</FormLabel>
                   <FormControl><Input type="number" min="0" {...field} /></FormControl>
                   <FormMessage />
                 </FormItem>
@@ -504,7 +533,7 @@ export default function Roadmap() {
           <DialogHeader>
             <DialogTitle>Share Public Roadmap</DialogTitle>
             <DialogDescription>
-              Anyone with the link can view your roadmap (read-only, no login required).
+              Anyone with the link can view your roadmap and upvote items (no login required). They cannot edit anything.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -633,7 +662,14 @@ function RoadmapCardContent({
           {!overlay && onEdit && onDelete && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Actions for ${item.title}`}
+                  // Always visible on touch screens; on hover-capable devices it appears on
+                  // hover, keyboard focus, or while its menu is open.
+                  className="h-6 w-6 shrink-0 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:data-[state=open]:opacity-100"
+                >
                   <MoreVertical className="h-3 w-3" />
                 </Button>
               </DropdownMenuTrigger>
@@ -712,25 +748,24 @@ function LinkTasksDialog({
   onClose,
   onLink,
   onUnlink,
+  pending,
 }: {
   item: RoadmapItem;
   onClose: () => void;
   onLink: (taskId: string) => void;
   onUnlink: (taskId: string) => void;
+  pending: boolean;
 }) {
   const { apiRequest } = useApiClient();
   const [search, setSearch] = useState('');
 
-  const { data: linkedTasks = [], isLoading: linkedLoading } = useQuery<LinkedTask[]>({
+  const { data: linkedTasks = [], isLoading: linkedLoading, isError: linkedError, error: linkedErr, refetch: refetchLinked } = useQuery<LinkedTask[]>({
     queryKey: ['/api/roadmap', item.id, 'tasks'],
     queryFn: () => apiRequest<LinkedTask[]>('GET', `/api/roadmap/${item.id}/tasks`),
   });
 
-  const { data: allTasks = [] } = useQuery<LinkedTask[]>({
-    queryKey: ['/api/tasks'],
-    queryFn: () => apiRequest<LinkedTask[]>('GET', '/api/tasks'),
-    staleTime: 30_000,
-  });
+  // Shared workspace task list (same cache entry as Tasks/Dashboard/CommandPalette).
+  const { tasks: allTasks, truncated, isError: tasksError, error: tasksErr, refetch: refetchTasks } = useTaskList();
 
   const linkedIds = new Set(linkedTasks.map((t) => t.id));
 
@@ -760,6 +795,8 @@ function LinkTasksDialog({
           {/* Currently linked */}
           {linkedLoading ? (
             <p className="text-xs text-muted-foreground">Loading…</p>
+          ) : linkedError ? (
+            <QueryError error={linkedErr} onRetry={() => refetchLinked()} />
           ) : linkedTasks.length > 0 ? (
             <div className="space-y-1.5">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Linked</p>
@@ -769,6 +806,8 @@ function LinkTasksDialog({
                   <span className="flex-1 text-sm truncate">{t.title}</span>
                   <Button
                     variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                    aria-label={`Unlink ${t.title}`}
+                    disabled={pending}
                     onClick={() => onUnlink(t.id)}
                   >
                     <X className="h-3 w-3" />
@@ -791,12 +830,21 @@ function LinkTasksDialog({
                 className="w-full pl-8 pr-3 py-1.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
-            {filtered.length > 0 ? (
+            {truncated && (
+              <p className="text-[11px] text-muted-foreground">
+                Searching the first {allTasks.length} tasks of the workspace.
+              </p>
+            )}
+            {tasksError && allTasks.length === 0 ? (
+              <QueryError error={tasksErr} onRetry={() => refetchTasks()} />
+            ) : filtered.length > 0 ? (
               <div className="space-y-1">
                 {filtered.map((t) => (
                   <button
                     key={t.id}
-                    className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted/60 transition-colors"
+                    type="button"
+                    disabled={pending}
+                    className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted/60 transition-colors disabled:opacity-50 disabled:pointer-events-none"
                     onClick={() => { onLink(t.id); setSearch(''); }}
                   >
                     <span className={cn('h-2 w-2 rounded-full shrink-0', statusDot[t.status] ?? 'bg-muted-foreground')} />

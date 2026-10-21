@@ -1,27 +1,15 @@
-export type Theme = 'light' | 'dark';
-
 const STORAGE_KEY = 'theme';
 
-/** Saved choice, else the OS preference (prefers-color-scheme). */
-export function getInitialTheme(): Theme {
+/**
+ * The app is light-only: it never follows the OS prefers-color-scheme and has no dark toggle.
+ * Removes the `dark` class and clears a 'dark' choice saved by the old theme toggle. The `.dark`
+ * tokens stay in index.css but are unused.
+ */
+export function applyLightTheme(): void {
+  document.documentElement.classList.remove('dark');
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === 'light' || saved === 'dark') return saved;
+    if (localStorage.getItem(STORAGE_KEY) !== null) localStorage.removeItem(STORAGE_KEY);
   } catch {
-    // storage unavailable (private mode / blocked) - fall through to the OS preference
+    // storage unavailable (private mode / blocked) - nothing to clear
   }
-  try {
-    if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) return 'dark';
-  } catch {
-    // matchMedia unsupported
-  }
-  return 'light';
-}
-
-export function applyTheme(theme: Theme): void {
-  document.documentElement.classList.toggle('dark', theme === 'dark');
-}
-
-export function saveTheme(theme: Theme): void {
-  try { localStorage.setItem(STORAGE_KEY, theme); } catch { /* noop */ }
 }

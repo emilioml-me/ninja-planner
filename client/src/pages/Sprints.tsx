@@ -26,7 +26,8 @@ import { Zap, Plus, MoreVertical, Pencil, Trash2, ChevronDown, ChevronRight, X, 
 import { downloadCsv } from '@/lib/export-csv';
 import { cn, safeFormat } from '@/lib/utils';
 import { useMembers } from '@/hooks/use-members';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
+import { QueryError } from '@/components/QueryError';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
@@ -57,11 +58,14 @@ const STATUS_META: Record<string, { label: string; variant: 'default' | 'seconda
 };
 
 const formSchema = z.object({
-  name:       z.string().min(1, 'Required').max(255),
-  goal:       z.string().optional(),
+  name:       z.string().trim().min(1, 'Required').max(255),
+  goal:       z.string().max(2000, 'Max 2000 characters').optional(),
   status:     z.enum(['planning', 'active', 'completed']),
   start_date: z.string().optional(),
   end_date:   z.string().optional(),
+}).refine((d) => !d.start_date || !d.end_date || d.start_date <= d.end_date, {
+  message: 'End date must be on or after the start date',
+  path: ['end_date'],
 });
 type FormData = z.infer<typeof formSchema>;
 
@@ -70,17 +74,20 @@ export default function Sprints() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const { members } = useMembers();
-  const isAdmin = useIsAdmin();
+  // Privileged controls stay hidden until the workspace role has loaded (no flash).
+  const { isAdmin, isLoading: roleLoading } = useMyRole();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Sprint | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Sprint | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [closePrompt, setClosePrompt] = useState<{ sprint: Sprint; incompleteCount: number } | null>(null);
 
-  const { data: sprints = [], isLoading } = useQuery<Sprint[]>({
+  const { data, isLoading: sprintsLoading, isError, error, refetch } = useQuery<Sprint[]>({
     queryKey: ['/api/sprints'],
     queryFn: () => apiRequest('GET', '/api/sprints'),
   });
+  const sprints = data ?? [];
+  const isLoading = sprintsLoading || roleLoading;
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
@@ -121,8 +128,12 @@ export default function Sprints() {
       qc.invalidateQueries({ queryKey: ['/api/sprints'] });
       setOpen(false);
       toast({ title: editing ? 'Sprint updated' : 'Sprint created' });
-      // If completing a sprint with incomplete tasks, show the close prompt
-      if (editing && variables.status === 'completed' && 'incomplete_count' in result) {
+      // Only offer move-to-backlog when this edit actually completed the sprint (not on every
+      // later edit of an already-completed sprint).
+      if (
+        editing && editing.status !== 'completed' && variables.status === 'completed' &&
+        'incomplete_count' in result
+      ) {
         const { sprint, incomplete_count } = result;
         if (incomplete_count > 0) {
           setClosePrompt({ sprint, incompleteCount: incomplete_count });
@@ -136,16 +147,18 @@ export default function Sprints() {
     mutationFn: (sprintId: string) => apiRequest<{ moved: number }>('POST', `/api/sprints/${sprintId}/move-to-backlog`),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['/api/sprints'] });
+      qc.invalidateQueries({ queryKey: ['/api/tasks'] });
       setClosePrompt(null);
       toast({ title: `${data.moved} task${data.moved !== 1 ? 's' : ''} moved to backlog` });
     },
-    onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Failed to move tasks to backlog', description: e.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest('DELETE', `/api/sprints/${id}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['/api/sprints'] });
+      qc.invalidateQueries({ queryKey: ['/api/tasks'] });
       setDeleteTarget(null);
       toast({ title: 'Sprint deleted' });
     },
@@ -199,6 +212,8 @@ export default function Sprints() {
 
       {isLoading ? (
         <div className="space-y-3">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-28 w-full rounded-lg" />)}</div>
+      ) : isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : sprints.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <Zap className="h-10 w-10 text-muted-foreground/30 mb-3" />
@@ -413,9 +428,9 @@ interface Retro {
 }
 
 const retroSchema = z.object({
-  went_well:    z.string().optional(),
-  to_improve:   z.string().optional(),
-  action_items: z.string().optional(),
+  went_well:    z.string().max(5000, 'Max 5000 characters').optional(),
+  to_improve:   z.string().max(5000, 'Max 5000 characters').optional(),
+  action_items: z.string().max(5000, 'Max 5000 characters').optional(),
 });
 type RetroForm = z.infer<typeof retroSchema>;
 
@@ -425,7 +440,7 @@ function RetroSection({ sprint, isAdmin }: { sprint: Sprint; isAdmin: boolean })
   const { toast } = useToast();
   const [editing, setEditing] = useState(false);
 
-  const { data: retro } = useQuery<Retro | null>({
+  const { data: retro, isError, error, refetch } = useQuery<Retro | null>({
     queryKey: ['/api/sprints', sprint.id, 'retro'],
     queryFn: () => apiRequest('GET', `/api/sprints/${sprint.id}/retro`),
   });
@@ -442,7 +457,7 @@ function RetroSection({ sprint, isAdmin }: { sprint: Sprint; isAdmin: boolean })
       setEditing(false);
       toast({ title: 'Retrospective saved' });
     },
-    onError: () => toast({ title: 'Failed to save retro', variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Failed to save retro', description: e.message, variant: 'destructive' }),
   });
 
   const openEdit = () => {
@@ -456,6 +471,9 @@ function RetroSection({ sprint, isAdmin }: { sprint: Sprint; isAdmin: boolean })
 
   const hasContent = retro && (retro.went_well || retro.to_improve || retro.action_items);
 
+  if (isError && retro === undefined) {
+    return <QueryError error={error} onRetry={() => refetch()} className="mt-1" />;
+  }
   if (!hasContent && !isAdmin) return null;
 
   return (
@@ -478,18 +496,21 @@ function RetroSection({ sprint, isAdmin }: { sprint: Sprint; isAdmin: boolean })
               <FormItem>
                 <FormLabel className="text-xs">✅ What went well</FormLabel>
                 <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+                <FormMessage />
               </FormItem>
             )} />
             <FormField control={form.control} name="to_improve" render={({ field }) => (
               <FormItem>
                 <FormLabel className="text-xs">🔧 What to improve</FormLabel>
                 <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+                <FormMessage />
               </FormItem>
             )} />
             <FormField control={form.control} name="action_items" render={({ field }) => (
               <FormItem>
                 <FormLabel className="text-xs">🎯 Action items</FormLabel>
                 <FormControl><Textarea rows={2} className="text-sm resize-none" {...field} /></FormControl>
+                <FormMessage />
               </FormItem>
             )} />
             <div className="flex gap-2">
@@ -548,12 +569,13 @@ interface BurndownData {
 
 function BurndownChart({ sprintId }: { sprintId: string }) {
   const { apiRequest } = useApiClient();
-  const { data, isLoading } = useQuery<BurndownData>({
+  const { data, isLoading, isError, error, refetch } = useQuery<BurndownData>({
     queryKey: ['/api/sprints', sprintId, 'burndown'],
     queryFn: () => apiRequest('GET', `/api/sprints/${sprintId}/burndown`),
   });
 
   if (isLoading) return <Skeleton className="h-40 w-full" />;
+  if (isError && !data) return <QueryError error={error} onRetry={() => refetch()} />;
   if (!data || data.points.length < 2) return null;
 
   const chartData = data.points.map((p) => ({
@@ -595,8 +617,6 @@ function VelocityChart({ sprints }: { sprints: Sprint[] }) {
   // One shared scale for both bars (and the average line) — separate done/total maxima made a
   // fully-completed sprint's done bar look taller than its own total bar.
   const maxVal = Math.max(...last.map((s) => Math.max(s.done_tasks, s.total_tasks)), 1);
-  const maxDone = maxVal;
-  const maxTotal = maxVal;
   const chartHeight = 100;
   const barWidth = 24;
   const gap = 12;
@@ -625,9 +645,9 @@ function VelocityChart({ sprints }: { sprints: Sprint[] }) {
               <>
                 <line
                   x1="0"
-                  y1={chartHeight - (avg / maxDone) * chartHeight}
+                  y1={chartHeight - (avg / maxVal) * chartHeight}
                   x2={Math.max(chartWidth, 300)}
-                  y2={chartHeight - (avg / maxDone) * chartHeight}
+                  y2={chartHeight - (avg / maxVal) * chartHeight}
                   stroke="hsl(var(--primary))"
                   strokeOpacity="0.4"
                   strokeWidth="1"
@@ -635,7 +655,7 @@ function VelocityChart({ sprints }: { sprints: Sprint[] }) {
                 />
                 <text
                   x={Math.max(chartWidth, 300) - 2}
-                  y={chartHeight - (avg / maxDone) * chartHeight - 3}
+                  y={chartHeight - (avg / maxVal) * chartHeight - 3}
                   fontSize="9"
                   textAnchor="end"
                   fill="hsl(var(--primary))"
@@ -647,8 +667,8 @@ function VelocityChart({ sprints }: { sprints: Sprint[] }) {
             )}
             {last.map((sprint, i) => {
               const x = i * (barWidth * 2 + gap + 4);
-              const totalH = maxTotal > 0 ? (sprint.total_tasks / maxTotal) * chartHeight : 0;
-              const doneH  = maxDone  > 0 ? (sprint.done_tasks  / maxDone)  * chartHeight : 0;
+              const totalH = (sprint.total_tasks / maxVal) * chartHeight;
+              const doneH  = (sprint.done_tasks  / maxVal) * chartHeight;
               const label  = sprint.name.length > 10 ? sprint.name.slice(0, 9) + '…' : sprint.name;
               return (
                 <g key={sprint.id}>
@@ -717,10 +737,11 @@ function SprintTaskList({ sprintId, memberMap, canRemove }: { sprintId: string; 
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
-  const { data: tasks = [], isLoading } = useQuery<SprintTask[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<SprintTask[]>({
     queryKey: ['/api/sprints', sprintId, 'tasks'],
     queryFn: () => apiRequest('GET', `/api/sprints/${sprintId}/tasks`),
   });
+  const tasks = data ?? [];
 
   const removeMutation = useMutation({
     mutationFn: (taskId: string) => apiRequest('DELETE', `/api/sprints/${sprintId}/tasks/${taskId}`),
@@ -733,6 +754,7 @@ function SprintTaskList({ sprintId, memberMap, canRemove }: { sprintId: string; 
   });
 
   if (isLoading) return <Skeleton className="h-10 w-full" />;
+  if (isError && !data) return <QueryError error={error} onRetry={() => refetch()} className="ml-6" />;
   if (tasks.length === 0) return <p className="text-xs text-muted-foreground pl-6">No tasks yet. Assign tasks via the task Edit dialog.</p>;
 
   return (
@@ -751,7 +773,8 @@ function SprintTaskList({ sprintId, memberMap, canRemove }: { sprintId: string; 
           {/* Removing a task from a sprint is requireAdmin server-side. */}
           {canRemove && (
             <Button
-              variant="ghost" size="icon" className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+              variant="ghost" size="icon"
+              className="h-5 w-5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity shrink-0"
               onClick={() => removeMutation.mutate(task.id)}
               aria-label="Remove from sprint"
             >

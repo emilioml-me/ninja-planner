@@ -1,20 +1,12 @@
 User-agent: *
 Allow: /
 
-# Auth routes — no SEO value
-Disallow: /login
-Disallow: /register
-Disallow: /sign-in
-Disallow: /sign-up
-Disallow: /invite/
-Disallow: /forgot-password
-Disallow: /reset-password
-
 # App / dashboard routes — behind auth, no SEO value (no trailing slash so e.g.
 # /dashboard itself is covered, not only /dashboard/...)
 Disallow: /dashboard
 Disallow: /my-tasks
 Disallow: /tasks
+Disallow: /task-templates
 Disallow: /calendar
 Disallow: /analytics
 Disallow: /revenue
@@ -36,10 +28,12 @@ Disallow: /members
 Disallow: /integrations
 Disallow: /webhooks
 Disallow: /settings/
-Disallow: /admin/
 
-# Token-based guest links (private, per-recipient)
+# Token-based links (private, per-recipient): guest views, shared roadmaps, invites
 Disallow: /g/
+Disallow: /r/
+Disallow: /invite/
+Disallow: /public/
 
 # API routes
 Disallow: /api/

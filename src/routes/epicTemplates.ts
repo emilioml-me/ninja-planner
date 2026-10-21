@@ -8,6 +8,8 @@ import { pool } from '../config/db.js';
 import { createEpic } from '../services/epicService.js';
 import { createTask, logTaskActivity } from '../services/taskService.js';
 import { fireWebhooks } from '../services/webhookService.js';
+import { dispatchAutomations } from '../services/automationService.js';
+import { getRequestTz, todayInTz } from '../lib/tz.js';
 import { logger } from '../config/logger.js';
 
 const router = Router();
@@ -96,7 +98,7 @@ async function getTaskTemplateIds(epicTemplateId: string, db: Pick<import('pg').
 router.get('/', async (req, res, next) => {
   try {
     const { rows } = await pool.query<EpicTemplateRow>(
-      'SELECT * FROM epic_templates WHERE workspace_id = $1 ORDER BY created_at DESC',
+      'SELECT * FROM epic_templates WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 500',
       [req.workspace.id],
     );
 
@@ -264,7 +266,7 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
           // Both ends are plain calendar dates: end = start + duration - 1 (inclusive), matching
           // sprintTemplates' /use. The old `new Date(start)` + setDate() mixed a UTC-parsed date
           // with local-time arithmetic, which can shift the end date by a day.
-          const startDate = parsed.data.start_date ?? new Date().toISOString().slice(0, 10);
+          const startDate = parsed.data.start_date ?? todayInTz(getRequestTz(req));
           const endDate = addDaysToDateString(startDate, st.duration_days - 1);
           const { rows: sprintRows } = await client.query(
             `INSERT INTO sprints (workspace_id, name, goal, status, start_date, end_date, created_by)
@@ -283,6 +285,9 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
           [req.workspace.id, taskTemplateIds],
         );
         const byId = new Map(taskTpls.map((t) => [t.id, t]));
+        // position follows the template's task order (previously every task got position 0,
+        // so the board showed them in arbitrary order).
+        let position = 0;
         for (const id of taskTemplateIds) {
           const tt = byId.get(id);
           if (!tt) continue;
@@ -296,6 +301,7 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
               checklist: tt.checklist,
               epic_id: epic.id,
               sprint_id: sprintId,
+              position: position++,
             },
             req.auth.userId,
             client,
@@ -306,12 +312,20 @@ router.post('/:id/use', requireAdmin, async (req, res, next) => {
 
       await client.query('COMMIT');
 
-      // Same post-create side effects as POST /api/tasks, run only after the commit so
-      // nothing is logged/announced for tasks that were rolled back.
+      // Same post-create side effects as POST /api/epics and POST /api/tasks, run only after the
+      // commit so nothing is logged/announced for rows that were rolled back.
+      fireWebhooks(req.workspace.id, 'epic.created', { epic });
       for (const task of createdTasks) {
         logTaskActivity(task.id, req.auth.userId, 'created', { status: task.status, source: 'epic_template' })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'Failed to log task activity for epic template task'));
         fireWebhooks(req.workspace.id, 'task.created', { task });
+        dispatchAutomations({
+          type: 'task.created',
+          workspaceId: req.workspace.id,
+          taskId: task.id,
+          assigneeId: task.assignee_clerk_id,
+          title: task.title,
+        }).catch((err) => logger.warn({ err, taskId: task.id }, 'Automation dispatch failed for epic template task'));
       }
 
       res.status(201).json({ epic, sprint_id: sprintId, tasks: createdTasks });

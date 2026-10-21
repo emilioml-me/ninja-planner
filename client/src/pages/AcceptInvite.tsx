@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { useAuth, useClerk, SignIn } from '@clerk/clerk-react';
-import { useApiClient } from '@/lib/api';
+import { useAuth, useClerk, useUser, SignIn } from '@clerk/clerk-react';
+import { baseHeaders, useApiClient } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Loader2, CheckCircle2, XCircle, Users } from 'lucide-react';
@@ -19,7 +19,11 @@ interface AcceptResult {
 
 export default function AcceptInvite({ token }: { token: string }) {
   const { isLoaded, isSignedIn } = useAuth();
+  const { user } = useUser();
   const clerk = useClerk();
+  const signedInAs = user?.primaryEmailAddress?.emailAddress ?? user?.fullName ?? null;
+  // "Not you?" - sign out and come back to this invite as another account.
+  const signOutAndReturn = () => void clerk.signOut({ redirectUrl: `/invite/${token}` });
   const { apiRequest } = useApiClient();
 
   const [info, setInfo] = useState<InviteInfo | null>(null);
@@ -32,6 +36,15 @@ export default function AcceptInvite({ token }: { token: string }) {
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
 
+  // Private, per-recipient link: keep it out of search indexes.
+  useEffect(() => {
+    const meta = document.createElement('meta');
+    meta.name = 'robots';
+    meta.content = 'noindex, nofollow';
+    document.head.appendChild(meta);
+    return () => meta.remove();
+  }, []);
+
   // Load invite info (public endpoint — no auth needed)
   useEffect(() => {
     // Validate token is a UUID before fetching to guard against path-traversal attempts
@@ -40,7 +53,7 @@ export default function AcceptInvite({ token }: { token: string }) {
       return;
     }
     const controller = new AbortController();
-    fetch(`/api/invites/token/${token}`, { signal: controller.signal })
+    fetch(`/api/invites/token/${token}`, { signal: controller.signal, headers: baseHeaders() })
       .then(async (r) => {
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
@@ -110,10 +123,32 @@ export default function AcceptInvite({ token }: { token: string }) {
           <CardHeader>
             <XCircle className="h-10 w-10 text-destructive mx-auto mb-2" />
             <CardTitle>Invite unavailable</CardTitle>
-            <CardDescription>{infoError}</CardDescription>
+            <CardDescription>
+              {infoError}
+              {isLoaded && isSignedIn && (
+                <>
+                  {' '}If you already accepted this invite, it has been used up - open the app and
+                  pick the workspace from the workspace switcher.
+                </>
+              )}
+            </CardDescription>
           </CardHeader>
-          <CardFooter className="justify-center">
-            <Button variant="outline" onClick={() => window.location.href = '/'}>Go home</Button>
+          <CardFooter className="flex-col gap-2 justify-center">
+            {isLoaded && isSignedIn ? (
+              <>
+                <Button onClick={() => { window.location.href = '/dashboard'; }}>Go to the app</Button>
+                {signedInAs && (
+                  <p className="text-xs text-muted-foreground">
+                    Signed in as {signedInAs}.{' '}
+                    <button type="button" className="underline underline-offset-2" onClick={signOutAndReturn}>
+                      Not you? Sign out
+                    </button>
+                  </p>
+                )}
+              </>
+            ) : (
+              <Button variant="outline" onClick={() => { window.location.href = '/'; }}>Go home</Button>
+            )}
           </CardFooter>
         </Card>
       </div>
@@ -174,8 +209,8 @@ export default function AcceptInvite({ token }: { token: string }) {
               </p>
               <SignIn
                 appearance={{ elements: { rootBox: 'w-full', card: 'shadow-none border p-4 rounded-lg' } }}
-                afterSignInUrl={`/invite/${token}`}
-                afterSignUpUrl={`/invite/${token}`}
+                forceRedirectUrl={`/invite/${token}`}
+                signUpForceRedirectUrl={`/invite/${token}`}
               />
             </div>
           ) : (
@@ -187,6 +222,14 @@ export default function AcceptInvite({ token }: { token: string }) {
                 {accepting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
                 Accept &amp; Join Workspace
               </Button>
+              {signedInAs && (
+                <p className="text-xs text-muted-foreground text-center">
+                  Joining as {signedInAs}.{' '}
+                  <button type="button" className="underline underline-offset-2" onClick={signOutAndReturn} disabled={accepting}>
+                    Not you? Sign out
+                  </button>
+                </p>
+              )}
             </>
           )}
         </CardContent>

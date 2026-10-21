@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Plus, Trash2, Zap, ChevronDown, ChevronUp, ToggleLeft, ToggleRight } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useMembers } from '@/hooks/use-members';
+import { QueryError } from '@/components/QueryError';
 
 interface Rule {
   id: string;
@@ -72,10 +73,13 @@ function RuleForm({ onSave, onCancel, loading }: {
 
   const { apiRequest } = useApiClient();
   const { members } = useMembers();
-  const { data: endpoints = [] } = useQuery<{ id: string; url: string; active: boolean }[]>({
+  const {
+    data: endpointsData, isError: endpointsIsError, error: endpointsError, refetch: refetchEndpoints,
+  } = useQuery<{ id: string; url: string; active: boolean }[]>({
     queryKey: ['/api/webhooks'],
     queryFn: () => apiRequest('GET', '/api/webhooks'),
   });
+  const endpoints = endpointsData ?? [];
 
   function buildTriggerConfig(): Record<string, string> {
     if (triggerType === 'task.status_changed') {
@@ -199,7 +203,9 @@ function RuleForm({ onSave, onCancel, loading }: {
       {actionType === 'post_webhook' && (
         <div>
           <label className="text-sm font-medium">Webhook endpoint</label>
-          {endpoints.length === 0 ? (
+          {endpointsIsError && !endpointsData ? (
+            <QueryError error={endpointsError} onRetry={() => refetchEndpoints()} className="mt-1 py-3" />
+          ) : endpoints.length === 0 ? (
             <p className="text-xs text-muted-foreground mt-1">
               No webhook endpoints registered yet — add one on the Webhooks page first.
             </p>
@@ -232,11 +238,14 @@ function RuleForm({ onSave, onCancel, loading }: {
 
 function RuleLogs({ ruleId }: { ruleId: string }) {
   const { apiRequest } = useApiClient();
-  const { data: logs = [] } = useQuery<LogEntry[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<LogEntry[]>({
     queryKey: ['automation-logs', ruleId],
     queryFn: () => apiRequest('GET', `/api/automations/${ruleId}/logs`),
   });
+  const logs = data ?? [];
 
+  if (isError && !data) return <QueryError error={error} onRetry={() => refetch()} className="mt-2 py-3" />;
+  if (isLoading) return <Skeleton className="h-6 w-full mt-2" />;
   if (logs.length === 0) return <p className="text-xs text-muted-foreground py-2">No runs yet.</p>;
 
   return (
@@ -266,28 +275,29 @@ export default function Automations() {
   const [creating, setCreating] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  const { data: rules = [], isLoading } = useQuery<Rule[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<Rule[]>({
     queryKey: ['automations'],
     queryFn: () => apiRequest('GET', '/api/automations'),
     // Previously fired unconditionally, guaranteeing a 403 (this route is requireAdmin-gated
     // server-side) plus react-query's default retry for any non-admin who reaches this page.
     enabled: isAdmin,
   });
+  const rules = data ?? [];
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['automations'] });
 
   const createMutation = useMutation({
-    mutationFn: (data: Omit<Rule, 'id' | 'created_at'>) =>
-      apiRequest('POST', '/api/automations', data),
+    mutationFn: (body: Omit<Rule, 'id' | 'created_at'>) =>
+      apiRequest('POST', '/api/automations', body),
     onSuccess: () => { invalidate(); setCreating(false); toast({ title: 'Rule created' }); },
-    onError: () => toast({ title: 'Failed to create rule', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to create rule', description: err.message, variant: 'destructive' }),
   });
 
   const toggleMutation = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
       apiRequest('PATCH', `/api/automations/${id}`, { active }),
     onSuccess: () => invalidate(),
-    onError: () => toast({ title: 'Failed to update rule', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to update rule', description: err.message, variant: 'destructive' }),
   });
 
   const deleteMutation = useMutation({
@@ -296,9 +306,18 @@ export default function Automations() {
     onError: (err: Error) => toast({ title: 'Failed to delete rule', description: err.message, variant: 'destructive' }),
   });
 
-  // Wait for Clerk to resolve before rendering the admin-required block — see ApiKeys.tsx for
-  // the same fix and reasoning.
-  if (isAdminLoaded && !isAdmin) {
+  // While the role is loading show skeletons: neither the admin-required block nor the
+  // (not yet fetched) empty rule list.
+  if (!isAdminLoaded) {
+    return (
+      <div className="p-6 space-y-3">
+        <Skeleton className="h-8 w-40" />
+        {[1, 2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
+      </div>
+    );
+  }
+
+  if (!isAdmin) {
     return (
       <div className="p-6">
         <h1 className="text-2xl font-bold mb-2">Automations</h1>
@@ -330,7 +349,9 @@ export default function Automations() {
         </DialogContent>
       </Dialog>
 
-      {isLoading ? (
+      {isError && !data ? (
+        <QueryError error={error} onRetry={() => refetch()} />
+      ) : isLoading ? (
         <div className="space-y-3">{[1,2].map((i) => <Skeleton key={i} className="h-20 w-full" />)}</div>
       ) : rules.length === 0 ? (
         <div className="text-center py-20 text-muted-foreground">
@@ -344,6 +365,8 @@ export default function Automations() {
               <CardContent className="pt-4">
                 <div className="flex items-center gap-3">
                   <Button size="icon" variant="ghost" className="h-7 w-7"
+                    aria-label={rule.active ? `Pause rule ${rule.name}` : `Activate rule ${rule.name}`}
+                    disabled={toggleMutation.isPending}
                     onClick={() => toggleMutation.mutate({ id: rule.id, active: !rule.active })}>
                     {rule.active
                       ? <ToggleRight className="h-5 w-5 text-primary" />

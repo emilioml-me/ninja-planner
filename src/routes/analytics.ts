@@ -5,6 +5,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
+import { getRequestTz } from '../lib/tz.js';
 
 const router = Router();
 router.use(requireWorkspace);
@@ -13,13 +14,18 @@ router.use(requireWorkspace);
 
 router.get('/velocity', async (req, res, next) => {
   try {
+    // "Committed" (total_points) is the scope snapshotted when the sprint was activated
+    // (sprints.committed_points, migration 060). Falls back to the points still in the sprint
+    // for sprints completed before the snapshot existed — those can overstate delivery because
+    // move-to-backlog strips unfinished work. committed_snapshot tells the client which it is.
     const { rows } = await pool.query(
       `SELECT
          s.id,
          s.name,
          s.start_date,
          s.end_date,
-         COALESCE(SUM(t.story_points), 0)::int                                                  AS total_points,
+         COALESCE(s.committed_points, COALESCE(SUM(t.story_points), 0))::int                    AS total_points,
+         (s.committed_points IS NOT NULL)                                                       AS committed_snapshot,
          COALESCE(SUM(t.story_points) FILTER (WHERE t.status = 'done'), 0)::int                 AS completed_points,
          COUNT(t.id) FILTER (WHERE t.story_points IS NOT NULL)::int                             AS total_tasks,
          COUNT(t.id) FILTER (WHERE t.story_points IS NOT NULL AND t.status = 'done')::int       AS completed_tasks
@@ -59,8 +65,18 @@ router.get('/time-report', async (req, res, next) => {
 
     if (member)    { conditions.push(`tl.user_clerk_id = $${i++}`); values.push(member); }
     if (sprint_id) { conditions.push(`t.sprint_id = $${i++}`);      values.push(sprint_id); }
-    if (from)      { conditions.push(`tl.logged_at::date >= $${i++}`); values.push(from); }
-    if (to)        { conditions.push(`tl.logged_at::date <= $${i++}`); values.push(to); }
+    // from/to are calendar days in the requester's timezone (K6): bound logged_at by that zone's
+    // local midnights instead of casting to UTC days (which put late-evening logs in the wrong
+    // month at report edges). Written as a range on the raw column so it stays index-friendly.
+    const tz = getRequestTz(req);
+    if (from) {
+      conditions.push(`tl.logged_at >= ($${i++}::date::timestamp AT TIME ZONE $${i++})`);
+      values.push(from, tz);
+    }
+    if (to) {
+      conditions.push(`tl.logged_at < (($${i++}::date + 1)::timestamp AT TIME ZONE $${i++})`);
+      values.push(to, tz);
+    }
 
     const [{ rows }, summaryResult] = await Promise.all([
       pool.query(
@@ -123,7 +139,8 @@ router.get('/okr', async (req, res, next) => {
       pool.query(
         `SELECT id, title, description, status, due_date, created_at
          FROM goals WHERE workspace_id = $1
-         ORDER BY created_at`,
+         ORDER BY created_at
+         LIMIT 500`,
         [req.workspace.id],
       ),
       pool.query(
@@ -148,9 +165,13 @@ router.get('/okr', async (req, res, next) => {
         ? (g.status === 'completed' ? 100 : 0)
         : Math.round(
             krs.reduce((sum, kr) => {
-              const pct = kr.target_value > 0
-                ? Math.min(100, (Number(kr.current_value) / Number(kr.target_value)) * 100)
-                : 0;
+              const target = Number(kr.target_value);
+              const current = Number(kr.current_value);
+              // target 0 means "drive it down to zero": met (100%) when current <= 0. Matches the
+              // Goals page's KR progress rule.
+              const pct = target > 0
+                ? Math.max(0, Math.min(100, (current / target) * 100))
+                : (current <= 0 ? 100 : 0);
               return sum + pct;
             }, 0) / krs.length,
           );

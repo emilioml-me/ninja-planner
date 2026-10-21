@@ -9,6 +9,7 @@ import { safeFormat } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { useIsAdmin } from '@/hooks/use-is-admin';
 import { StatCard } from '@/components/StatCard';
+import { QueryError } from '@/components/QueryError';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -78,9 +79,11 @@ function RevenueChart({ targets, periodType }: { targets: RevenueTarget[]; perio
   if (sorted.length < 2) return null;
 
   // Forecast only for monthly rows: x is the absolute month index, so a missing month is a real
-  // gap in the regression instead of being treated as adjacent.
+  // gap in the regression instead of being treated as adjacent. A zero in a month that has already
+  // ended is a genuine zero and counts; the current/future month with 0 is just not filled in yet.
+  const currentMonth = monthIndex(format(new Date(), 'yyyy-MM-dd'));
   const monthlyWithActual = periodType === 'monthly'
-    ? sorted.filter((t) => Number(t.actual_amount) > 0).slice(-6)
+    ? sorted.filter((t) => Number(t.actual_amount) > 0 || monthIndex(t.period_start) < currentMonth).slice(-6)
     : [];
 
   const regressionPoints = monthlyWithActual.map((t) => ({ x: monthIndex(t.period_start), y: Number(t.actual_amount) }));
@@ -245,26 +248,89 @@ interface RevenueTarget {
   target_amount: string;
   actual_amount: string;
   notes: string | null;
+  actual_source?: 'crm' | 'payments' | 'manual' | null;
 }
+
+interface Capabilities {
+  slack_alerts: boolean;
+  payments_sync: boolean;
+  crm_linked: boolean;
+}
+
+/** Revenue sync responses: `skipped` is the list of periods owned by another source. */
+interface RevenueSyncResult {
+  synced: number;
+  skipped?: string[] | number;
+  /** CRM sync: months reset to 0 because they no longer have won deals. */
+  reset?: string[];
+  /** CRM sync: oldest month dropped because the deal window cut it off part-way. */
+  partial_month_dropped?: string | null;
+  currency?: string | null;
+  /** CRM sync: deals ignored (e.g. a different currency). */
+  ignored_deals?: number;
+}
+
+function countOf(v: string[] | number | undefined | null): number {
+  if (Array.isArray(v)) return v.length;
+  return Number(v ?? 0) || 0;
+}
+
+function syncDescription(d: RevenueSyncResult): string {
+  const synced = Number(d.synced) || 0;
+  const parts = [`${synced} period${synced !== 1 ? 's' : ''} updated`];
+  const skipped = countOf(d.skipped);
+  if (skipped > 0) parts.push(`${skipped} skipped (owned by another source or edited manually)`);
+  const reset = countOf(d.reset);
+  if (reset > 0) parts.push(`${reset} reset to 0 (no won deals any more)`);
+  const ignored = Number(d.ignored_deals ?? 0) || 0;
+  if (ignored > 0) parts.push(`${ignored} deal${ignored !== 1 ? 's' : ''} ignored${d.currency ? ` (not in ${d.currency})` : ''}`);
+  if (d.partial_month_dropped) parts.push(`${d.partial_month_dropped.slice(0, 7)} not updated (incomplete data)`);
+  return parts.join(', ');
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  crm: 'CRM',
+  payments: 'Payments',
+  manual: 'Manual',
+};
+
+/**
+ * Snap a date to the first day of its month / quarter / year (the server does the same), so a
+ * manual row and a synced row for the same period don't become two separate rows.
+ */
+function normalizePeriodStart(periodType: PeriodType, dateStr: string): string {
+  const [y, m] = dateStr.slice(0, 10).split('-').map(Number);
+  if (!y || !m) return dateStr;
+  if (periodType === 'yearly') return `${y}-01-01`;
+  if (periodType === 'quarterly') {
+    const qm = Math.floor((m - 1) / 3) * 3 + 1;
+    return `${y}-${String(qm).padStart(2, '0')}-01`;
+  }
+  return `${y}-${String(m).padStart(2, '0')}-01`;
+}
+
+const MAX_AMOUNT = 9_999_999_999.99;
 
 const formSchema = z.object({
   period_type: z.enum(['monthly', 'quarterly', 'yearly']),
   period_start: z.string().min(1, 'Required'),
   // 0 allowed: integration syncs create rows with target 0, which must stay editable.
-  target_amount: z.coerce.number().min(0, 'Must be ≥ 0'),
-  actual_amount: z.coerce.number().min(0).optional(),
-  notes: z.string().optional(),
+  target_amount: z.coerce.number().finite().min(0, 'Must be >= 0').max(MAX_AMOUNT, 'Too large'),
+  actual_amount: z.coerce.number().finite().min(0, 'Must be >= 0').max(MAX_AMOUNT, 'Too large').optional(),
+  notes: z.string().max(2000, 'Max 2000 characters').optional(),
 });
 type FormData = z.infer<typeof formSchema>;
+type RevenuePatch = Omit<Partial<FormData>, 'notes'> & { notes?: string | null; actual_source?: null };
 
 function fmt(val: string) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(Number(val));
 }
 
+/** Real achievement % (can exceed 100); cap only where it drives a progress bar. */
 function pct(actual: string, target: string) {
   const t = Number(target);
   if (!t) return 0;
-  return Math.min(100, Math.round((Number(actual) / t) * 100));
+  return Math.round((Number(actual) / t) * 100);
 }
 
 export default function Revenue() {
@@ -278,9 +344,17 @@ export default function Revenue() {
   // yearly rows double-counts the same revenue.
   const [periodType, setPeriodType] = useState<PeriodType>('monthly');
 
-  const { data: targets = [], isLoading } = useQuery<RevenueTarget[]>({
+  const { data, isLoading, isError, error, refetch } = useQuery<RevenueTarget[]>({
     queryKey: ['/api/revenue'],
     queryFn: () => apiRequest<RevenueTarget[]>('GET', '/api/revenue'),
+  });
+  const targets = data ?? [];
+
+  const { data: capabilities } = useQuery<Capabilities>({
+    queryKey: ['/api/integrations/capabilities'],
+    queryFn: () => apiRequest<Capabilities>('GET', '/api/integrations/capabilities'),
+    enabled: isAdmin,
+    staleTime: 5 * 60_000,
   });
 
   const form = useForm<FormData>({
@@ -313,8 +387,15 @@ export default function Revenue() {
   });
 
   const updateMut = useMutation({
-    mutationFn: (d: FormData) => apiRequest('PATCH', `/api/revenue/${editing!.id}`, d),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/revenue'] }); setOpen(false); setEditing(null); toast({ title: 'Target updated' }); },
+    mutationFn: (d: RevenuePatch) => apiRequest('PATCH', `/api/revenue/${editing!.id}`, d),
+    onSuccess: (_r, d) => {
+      qc.invalidateQueries({ queryKey: ['/api/revenue'] });
+      setOpen(false);
+      setEditing(null);
+      // Keep the edited row visible if its period type changed.
+      if (d.period_type) setPeriodType(d.period_type);
+      toast({ title: 'Target updated' });
+    },
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
@@ -324,20 +405,27 @@ export default function Revenue() {
     onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
   });
 
+  // Hand a manually edited month back to the integrations (the next sync may overwrite it).
+  const releaseSourceMut = useMutation({
+    mutationFn: (id: string) => apiRequest('PATCH', `/api/revenue/${id}`, { actual_source: null }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/api/revenue'] }); toast({ title: 'Actual handed back to sync' }); },
+    onError: (e: Error) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
+  });
+
   const syncCrmMut = useMutation({
-    mutationFn: () => apiRequest<{ synced: number }>('POST', '/api/integrations/sync-revenue'),
+    mutationFn: () => apiRequest<RevenueSyncResult>('POST', '/api/integrations/sync-revenue'),
     onSuccess: (d) => {
       qc.invalidateQueries({ queryKey: ['/api/revenue'] });
-      toast({ title: `CRM sync complete`, description: `${d.synced} period${d.synced !== 1 ? 's' : ''} updated` });
+      toast({ title: 'CRM sync complete', description: syncDescription(d) });
     },
     onError: (e: Error) => toast({ title: 'Sync failed', description: e.message, variant: 'destructive' }),
   });
 
   const syncPaymentsMut = useMutation({
-    mutationFn: () => apiRequest<{ synced: number }>('POST', '/api/integrations/sync-revenue-payments'),
+    mutationFn: () => apiRequest<RevenueSyncResult>('POST', '/api/integrations/sync-revenue-payments'),
     onSuccess: (d) => {
       qc.invalidateQueries({ queryKey: ['/api/revenue'] });
-      toast({ title: `Payments sync complete`, description: `${d.synced} period${d.synced !== 1 ? 's' : ''} updated` });
+      toast({ title: 'Payments sync complete', description: syncDescription(d) });
     },
     onError: (e: Error) => toast({ title: 'Sync failed', description: e.message, variant: 'destructive' }),
   });
@@ -346,6 +434,7 @@ export default function Revenue() {
   const totalTarget = shown.reduce((s, t) => s + Number(t.target_amount), 0);
   const totalActual = shown.reduce((s, t) => s + Number(t.actual_amount), 0);
   // Rows without a target (e.g. created by a sync) have no meaningful achievement %.
+  // Average the real (uncapped) percentages so over-achievement shows.
   const withTarget = shown.filter((t) => Number(t.target_amount) > 0);
   const avgPct = withTarget.length ? Math.round(withTarget.reduce((s, t) => s + pct(t.actual_amount, t.target_amount), 0) / withTarget.length) : 0;
 
@@ -357,7 +446,19 @@ export default function Revenue() {
   };
 
   const handleSubmit = (d: FormData) => {
-    editing ? updateMut.mutate(d) : createMut.mutate(d);
+    const data: FormData = { ...d, period_start: normalizePeriodStart(d.period_type, d.period_start) };
+    if (!editing) {
+      createMut.mutate(data);
+      return;
+    }
+    // Only send actual_amount when it actually changed: a PATCH of actual_amount marks the month
+    // as manually owned, which stops the integrations from updating it.
+    const { actual_amount, notes, ...rest } = data;
+    const actualChanged = actual_amount !== undefined && Number(actual_amount) !== Number(editing.actual_amount);
+    // Cleared notes must be sent as null (undefined means "unchanged").
+    const payload: RevenuePatch = { ...rest, notes: notes?.trim() ? notes : null };
+    if (actualChanged) payload.actual_amount = actual_amount;
+    updateMut.mutate(payload);
   };
 
   const periodTypeColor: Record<string, string> = {
@@ -402,6 +503,7 @@ export default function Revenue() {
             <RefreshCw className={cn('h-4 w-4', syncCrmMut.isPending && 'animate-spin')} />
             <span className="hidden sm:inline">Sync CRM</span>
           </Button>
+          {capabilities?.payments_sync && (
           <Button
             size="sm"
             variant="outline"
@@ -413,6 +515,7 @@ export default function Revenue() {
             <RefreshCw className={cn('h-4 w-4', syncPaymentsMut.isPending && 'animate-spin')} />
             <span className="hidden sm:inline">Sync Payments</span>
           </Button>
+          )}
           <Button size="sm" className="gap-2" onClick={openCreate}>
             <Plus className="h-4 w-4" /> Add Target
           </Button>
@@ -429,10 +532,12 @@ export default function Revenue() {
         </div>
 
         {/* Chart */}
-        {!isLoading && <RevenueChart targets={shown} periodType={periodType} />}
+        {!isLoading && !isError && <RevenueChart targets={shown} periodType={periodType} />}
 
         {/* Table */}
-        {isLoading ? (
+        {isError && !data ? (
+          <QueryError error={error} onRetry={() => refetch()} />
+        ) : isLoading ? (
           <div className="space-y-2">
             {[1,2,3].map(i => <Skeleton key={i} className="h-14 w-full" />)}
           </div>
@@ -468,11 +573,24 @@ export default function Revenue() {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-right">{fmt(t.target_amount)}</TableCell>
-                    <TableCell className="text-right">{fmt(t.actual_amount)}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {t.actual_source && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal" title={
+                            t.actual_source === 'manual'
+                              ? 'Edited manually - integration syncs leave this period alone'
+                              : `Synced from ${SOURCE_LABEL[t.actual_source] ?? t.actual_source}`
+                          }>
+                            {SOURCE_LABEL[t.actual_source] ?? t.actual_source}
+                          </Badge>
+                        )}
+                        {fmt(t.actual_amount)}
+                      </div>
+                    </TableCell>
                     <TableCell className="min-w-32">
                       <div className="flex items-center gap-2">
-                        <Progress value={p} className="flex-1 h-2" />
-                        <span className="text-xs text-muted-foreground w-9 text-right">{p}%</span>
+                        <Progress value={Math.min(100, Math.max(0, p))} className="flex-1 h-2" />
+                        <span className={cn('text-xs w-10 text-right', p > 100 ? 'text-green-600 font-medium' : 'text-muted-foreground')}>{p}%</span>
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm max-w-48 truncate">
@@ -490,6 +608,14 @@ export default function Revenue() {
                           <DropdownMenuItem onClick={() => openEdit(t)}>
                             <Pencil className="h-4 w-4 mr-2" /> Edit
                           </DropdownMenuItem>
+                          {t.actual_source === 'manual' && (
+                            <DropdownMenuItem
+                              disabled={releaseSourceMut.isPending}
+                              onClick={() => releaseSourceMut.mutate(t.id)}
+                            >
+                              <RefreshCw className="h-4 w-4 mr-2" /> Let sync update actual
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuItem
                             className="text-destructive"
                             onClick={() => { if (confirm(`Delete the ${t.period_type} target for ${periodLabel(t)}?`)) deleteMut.mutate(t.id); }}
@@ -536,6 +662,7 @@ export default function Revenue() {
                   <FormItem>
                     <FormLabel>Period Start</FormLabel>
                     <FormControl><Input type="date" {...field} /></FormControl>
+                    <p className="text-[11px] text-muted-foreground">Saved as the first day of the period.</p>
                     <FormMessage />
                   </FormItem>
                 )} />
@@ -544,14 +671,14 @@ export default function Revenue() {
                 <FormField control={form.control} name="target_amount" render={({ field }) => (
                   <FormItem>
                     <FormLabel>Target ($)</FormLabel>
-                    <FormControl><Input type="number" min="0" step="100" {...field} /></FormControl>
+                    <FormControl><Input type="number" min="0" step="any" {...field} /></FormControl>
                     <FormMessage />
                   </FormItem>
                 )} />
                 <FormField control={form.control} name="actual_amount" render={({ field }) => (
                   <FormItem>
                     <FormLabel>Actual ($)</FormLabel>
-                    <FormControl><Input type="number" min="0" step="100" {...field} /></FormControl>
+                    <FormControl><Input type="number" min="0" step="any" {...field} /></FormControl>
                     <FormMessage />
                   </FormItem>
                 )} />

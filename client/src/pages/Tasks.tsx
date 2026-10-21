@@ -6,9 +6,10 @@ import { ApiError, useApiClient } from '@/lib/api';
 import { useTaskList } from '@/hooks/use-tasks';
 import { useToast } from '@/hooks/use-toast';
 import { useMembers } from '@/hooks/use-members';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
 import { KanbanBoard, type KanbanCard, type KanbanColumnData } from '@/components/KanbanBoard';
 import { TaskFormDialog, type Task } from '@/components/TaskFormDialog';
+import { QueryError } from '@/components/QueryError';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -29,7 +30,7 @@ import {
   CheckSquare, ChevronDown, Download, FileText, Upload, AlertTriangle,
 } from 'lucide-react';
 import { downloadCsv } from '@/lib/export-csv';
-import { cn, localDateOnly, safeFormat } from '@/lib/utils';
+import { cn, localDateOnly, safeFormat, todayLocal } from '@/lib/utils';
 
 interface Sprint { id: string; name: string; status: string; }
 
@@ -66,6 +67,41 @@ async function runWithConcurrency<T>(
 
 const BULK_CONCURRENCY = 5;
 const BULK_CHUNK = 200;
+
+/**
+ * Mirrors the server's CSV tokenizer (csvImport.ts): quoted fields may contain commas, newlines
+ * and "" escapes. Used for the pre-import check so multiline fields (e.g. descriptions in this
+ * page's own export) and quoted/capitalised headers are counted the same way the server will.
+ */
+function precheckCsv(text: string): { header: string[]; rowCount: number } {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  const src = text.replace(/^﻿/, '');
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+    if (ch === '"') inQuotes = true;
+    else if (ch === ',') { row.push(field); field = ''; }
+    else if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (ch !== '\r') field += ch;
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  const nonEmpty = rows.filter((r) => r.some((v) => v.trim() !== ''));
+  if (nonEmpty.length === 0) return { header: [], rowCount: 0 };
+  const header = nonEmpty[0].map((h) => h.trim().toLowerCase().replace(/[\s-]+/g, '_'));
+  return { header, rowCount: nonEmpty.length - 1 };
+}
+
+const IMPORT_MAX_ROWS = 500;
 
 /** Server row errors are JSON-stringified zod fieldErrors -- render them as "field: msg". */
 function formatImportError(raw: string): string {
@@ -336,11 +372,27 @@ export default function Tasks() {
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [importErrors, setImportErrors] = useState<{ row: number; error: string }[] | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [overdueOnly, setOverdueOnly] = useState(false);
 
-  const { tasks, isLoading, truncated, total: totalTasks } = useTaskList();
+  const {
+    tasks, isLoading, isError, error, refetch, truncated, total: totalTasks,
+  } = useTaskList();
 
   const { members, displayName, initials } = useMembers();
-  const isAdmin = useIsAdmin();
+  // Privileged controls stay hidden until the role is known (no flash of edit controls).
+  const { isAdmin, isViewer, isLoading: roleLoading } = useMyRole();
+  const canEdit = !roleLoading && !isViewer;
+  const canAdmin = !roleLoading && isAdmin;
+
+  const importCheck = useMemo(() => {
+    if (!importCsv.trim()) return null;
+    const { header, rowCount } = precheckCsv(importCsv);
+    const problems: string[] = [];
+    if (!header.includes('title')) problems.push('Header row is missing a "title" column');
+    if (rowCount === 0) problems.push('No data rows found below the header');
+    if (rowCount > IMPORT_MAX_ROWS) problems.push(`${rowCount} rows found, max ${IMPORT_MAX_ROWS} per import`);
+    return { rowCount, problems };
+  }, [importCsv]);
 
   const { data: templates = [] } = useQuery<TaskTemplate[]>({
     queryKey: ['/api/task-templates'],
@@ -381,7 +433,7 @@ export default function Tasks() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, ...data }: Partial<Task> & { id: string; title: string }) =>
+    mutationFn: ({ id, ...data }: Partial<Task> & { id: string }) =>
       apiRequest<Task>('PATCH', `/api/tasks/${id}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
@@ -397,6 +449,7 @@ export default function Tasks() {
     mutationFn: (id: string) => apiRequest('DELETE', `/api/tasks/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       toast({ title: 'Task deleted' });
     },
     onError: (err: Error) => toast({ title: 'Error', description: err.message, variant: 'destructive' }),
@@ -409,7 +462,11 @@ export default function Tasks() {
       newPosition: number;
       resequence?: Array<{ id: string; position: number }>;
     }) => apiRequest('POST', '/api/tasks/reorder', payload),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/tasks'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      // A cross-column drag can complete a task, which changes sprint progress counts.
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
+    },
     onError: (err: Error) => toast({ title: 'Reorder failed', description: err.message, variant: 'destructive' }),
   });
 
@@ -477,6 +534,7 @@ export default function Tasks() {
     },
     onError: (err: Error) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       toast({ title: 'Bulk update failed', description: err.message, variant: 'destructive' });
     },
   });
@@ -485,6 +543,7 @@ export default function Tasks() {
     mutationFn: (ids: string[]) => runBulk(ids, { delete: true }),
     onSuccess: ({ succeeded, failed }) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setSelectedIds(new Set(failed));
       setBulkDeleteConfirm(false);
       if (failed.length === 0) {
@@ -501,6 +560,7 @@ export default function Tasks() {
     },
     onError: (err: Error) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setBulkDeleteConfirm(false);
       toast({ title: 'Bulk delete failed', description: err.message, variant: 'destructive' });
     },
@@ -510,6 +570,7 @@ export default function Tasks() {
     mutationFn: (csv: string) => apiRequest<ImportResult>('POST', '/api/tasks/import', { csv }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['/api/tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sprints'] });
       setImportResult(res);
       setImportErrors(null);
       setImportCsv('');
@@ -549,6 +610,16 @@ export default function Tasks() {
   const searchString = useSearch();
   const [, navigate] = useLocation();
   const taskParam = new URLSearchParams(searchString).get('task');
+  const statusParam = new URLSearchParams(searchString).get('status');
+
+  // ?status=overdue (overdue alert notifications) turns on the overdue filter.
+  useEffect(() => {
+    if (statusParam !== 'overdue') return;
+    setOverdueOnly(true);
+    if (!taskParam) navigate('/tasks', { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusParam]);
+
   useEffect(() => {
     if (!taskParam || isLoading) return;
     let cancelled = false;
@@ -579,7 +650,11 @@ export default function Tasks() {
 
   const filteredTasks = useMemo(() => {
     const q = search.toLowerCase().trim();
+    const today = todayLocal();
     return tasks.filter((t) => {
+      if (overdueOnly) {
+        if (t.status === 'done' || !t.due_date || t.due_date.substring(0, 10) >= today) return false;
+      }
       if (q) {
         const inTitle = t.title.toLowerCase().includes(q);
         const inDesc  = t.description?.toLowerCase().includes(q) ?? false;
@@ -589,7 +664,7 @@ export default function Tasks() {
       if (priorityFilter !== 'all' && t.priority !== priorityFilter) return false;
       return true;
     });
-  }, [tasks, search, priorityFilter]);
+  }, [tasks, search, priorityFilter, overdueOnly]);
 
   // Drop selected ids that are no longer visible (filtered out) or no longer exist (deleted),
   // so bulk actions never act on tasks the user can't see.
@@ -618,12 +693,13 @@ export default function Tasks() {
 
   const pendingDeleteTask = pendingDeleteId ? tasks.find((t) => t.id === pendingDeleteId) : undefined;
 
-  const hasFilters = search !== '' || priorityFilter !== 'all';
+  const hasFilters = search !== '' || priorityFilter !== 'all' || overdueOnly;
   const selectedCount = selectedIds.size;
 
   const clearFilters = () => {
     setSearch('');
     setPriorityFilter('all');
+    setOverdueOnly(false);
   };
 
   const handleAddCard = (columnId: string) => {
@@ -671,11 +747,54 @@ export default function Tasks() {
     setDialogOpen(true);
   };
 
-  const handleSubmit = (data: Partial<Task> & { title: string }) => {
+  const handleSubmit = (data: Partial<Task>) => {
     if (editingTask?.id) {
       updateMutation.mutate({ ...data, id: editingTask.id });
     } else {
-      createMutation.mutate({ ...data, status: data.status ?? defaultStatus });
+      createMutation.mutate({ ...data, title: data.title ?? '', status: data.status ?? defaultStatus });
+    }
+  };
+
+  // Export every task (paged past the board's list cap), with informational columns the import
+  // ignores (sprint, epic, start date, story points, checklist progress).
+  const [exporting, setExporting] = useState(false);
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const PAGE = 1000;
+      const all: Task[] = [];
+      for (let offset = 0; offset < 100_000; offset += PAGE) {
+        const page = await apiRequest<Task[]>('GET', `/api/tasks?limit=${PAGE}&offset=${offset}`);
+        all.push(...page);
+        if (page.length < PAGE) break;
+      }
+      if (all.length === 0) {
+        toast({ title: 'No tasks to export' });
+        return;
+      }
+      downloadCsv('tasks.csv', all.map((t) => ({
+        // Columns accepted by POST /api/tasks/import (tags separated by ;).
+        title: t.title,
+        description: t.description ?? '',
+        status: t.status,
+        priority: t.priority,
+        assignee_clerk_id: t.assignee_clerk_id ?? '',
+        due_date: t.due_date ? t.due_date.substring(0, 10) : '',
+        tags: t.tags.join(';'),
+        // Informational only (ignored on import).
+        assignee_name: t.assignee_clerk_id ? displayName(t.assignee_clerk_id) : '',
+        start_date: t.start_date ? t.start_date.substring(0, 10) : '',
+        story_points: t.story_points ?? '',
+        sprint: t.sprint_id ? (sprintMap[t.sprint_id] ?? '') : '',
+        checklist: t.checklist && t.checklist.length > 0
+          ? `${t.checklist.filter((i) => i.done).length}/${t.checklist.length}`
+          : '',
+        created_at: t.created_at ?? '',
+      })));
+    } catch (err) {
+      toast({ title: 'Export failed', description: (err as Error).message, variant: 'destructive' });
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -722,33 +841,24 @@ export default function Tasks() {
             size="sm"
             variant="outline"
             className="gap-2"
-            // Column names / tag separator match POST /api/tasks/import so an export can be
-            // re-imported as-is (assignee_name and created_at are informational and ignored).
-            onClick={() => downloadCsv('tasks.csv', tasks.map((t) => ({
-              title: t.title,
-              description: t.description ?? '',
-              status: t.status,
-              priority: t.priority,
-              assignee_clerk_id: t.assignee_clerk_id ?? '',
-              assignee_name: t.assignee_clerk_id ? displayName(t.assignee_clerk_id) : '',
-              due_date: t.due_date ? t.due_date.substring(0, 10) : '',
-              tags: t.tags.join(';'),
-              created_at: t.created_at ?? '',
-            })))}
+            disabled={exporting}
+            onClick={() => void handleExport()}
           >
             <Download className="h-4 w-4" />
-            <span className="hidden sm:inline">Export</span>
+            <span className="hidden sm:inline">{exporting ? 'Exporting...' : 'Export'}</span>
           </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="gap-2"
-            onClick={() => { setImportOpen(true); setImportResult(null); setImportErrors(null); }}
-          >
-            <Upload className="h-4 w-4" />
-            <span className="hidden sm:inline">Import</span>
-          </Button>
-          {templates.length > 0 && (
+          {canEdit && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-2"
+              onClick={() => { setImportOpen(true); setImportResult(null); setImportErrors(null); }}
+            >
+              <Upload className="h-4 w-4" />
+              <span className="hidden sm:inline">Import</span>
+            </Button>
+          )}
+          {canEdit && templates.length > 0 && (
             <Button
               size="sm"
               variant="outline"
@@ -759,14 +869,16 @@ export default function Tasks() {
               <span className="hidden sm:inline">From Template</span>
             </Button>
           )}
-          <Button
-            size="sm"
-            className="gap-2"
-            onClick={() => { setEditingTask(null); setDefaultStatus('todo'); setDialogOpen(true); }}
-          >
-            <Plus className="h-4 w-4" />
-            <span className="hidden sm:inline">New Task</span>
-          </Button>
+          {canEdit && (
+            <Button
+              size="sm"
+              className="gap-2"
+              onClick={() => { setEditingTask(null); setDefaultStatus('todo'); setDialogOpen(true); }}
+            >
+              <Plus className="h-4 w-4" />
+              <span className="hidden sm:inline">New Task</span>
+            </Button>
+          )}
         </div>
       </div>
 
@@ -786,6 +898,17 @@ export default function Tasks() {
             {label}
           </button>
         ))}
+        <button
+          onClick={() => setOverdueOnly((v) => !v)}
+          className={cn(
+            'shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors',
+            overdueOnly
+              ? 'bg-destructive text-destructive-foreground'
+              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+          )}
+        >
+          Overdue
+        </button>
         {hasFilters && (
           <span className="text-xs text-muted-foreground ml-1">
             {filteredTasks.length} of {tasks.length} tasks
@@ -802,15 +925,17 @@ export default function Tasks() {
 
       {/* Board / List */}
       <div className="flex-1 overflow-hidden">
-        {isLoading ? (
+        {isError && tasks.length === 0 ? (
+          <QueryError error={error} onRetry={() => void refetch()} className="m-6" />
+        ) : isLoading ? (
           <TasksSkeleton />
         ) : view === 'kanban' ? (
           <KanbanBoard
             columns={columns}
-            onAddCard={handleAddCard}
+            onAddCard={canEdit ? handleAddCard : undefined}
             onCardClick={handleCardClick}
-            onReorder={handleReorder}
-            onDeleteCard={isAdmin ? (id) => setPendingDeleteId(id) : undefined}
+            onReorder={canEdit ? handleReorder : undefined}
+            onDeleteCard={canAdmin ? (id) => setPendingDeleteId(id) : undefined}
             members={members}
             allColumns={allColumns}
           />
@@ -818,7 +943,7 @@ export default function Tasks() {
           <TaskListView
             tasks={filteredTasks}
             onEdit={(task) => { setEditingTask(task); setDialogOpen(true); }}
-            onDelete={isAdmin ? (id) => setPendingDeleteId(id) : undefined}
+            onDelete={canAdmin ? (id) => setPendingDeleteId(id) : undefined}
             displayName={displayName}
             initials={initials}
             selectedIds={selectedIds}
@@ -830,7 +955,7 @@ export default function Tasks() {
       </div>
 
       {/* Bulk action bar */}
-      {selectedCount > 0 && (
+      {selectedCount > 0 && canEdit && (
         <div className="flex items-center gap-3 px-6 py-3 border-t bg-muted/50 shrink-0">
           <div className="flex items-center gap-2">
             <CheckSquare className="h-4 w-4 text-primary" />
@@ -930,7 +1055,7 @@ export default function Tasks() {
             )}
 
             {/* Bulk delete — admin only */}
-            {isAdmin && (
+            {canAdmin && (
               <Button
                 variant="destructive"
                 size="sm"
@@ -991,7 +1116,8 @@ export default function Tasks() {
           <DialogHeader>
             <DialogTitle>Delete {selectedCount} task{selectedCount !== 1 ? 's' : ''}?</DialogTitle>
             <DialogDescription>
-              This will permanently delete the selected tasks. This action cannot be undone.
+              The selected tasks will be deleted and removed from boards, sprints and reports.
+              They can't be restored from the app.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
@@ -1046,7 +1172,8 @@ export default function Tasks() {
             <DialogDescription>
               Paste CSV text with headers: title, description, status, priority, due_date,
               tags (separated by ;), assignee_clerk_id. A file exported from this page can be
-              re-imported as-is.
+              re-imported; only those columns are imported (sprint, epic, start date, story
+              points and checklist columns are ignored).
             </DialogDescription>
           </DialogHeader>
           {importResult ? (
@@ -1098,34 +1225,20 @@ export default function Tasks() {
                   </ul>
                 </div>
               )}
-              {(() => {
-                const lines = importCsv.split(/\r?\n/).filter((l) => l.trim());
-                if (lines.length === 0) return null;
-                const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
-                const rowCount = Math.max(lines.length - 1, 0);
-                const problems: string[] = [];
-                if (!header.includes('title')) problems.push('Header row is missing a "title" column');
-                if (rowCount === 0) problems.push('No data rows found below the header');
-                if (rowCount > 500) problems.push(`${rowCount} rows found — max 500 per import`);
-                return problems.length > 0 ? (
-                  <p className="text-xs text-destructive">{problems.join('. ')}</p>
+              {importCheck && (
+                importCheck.problems.length > 0 ? (
+                  <p className="text-xs text-destructive">{importCheck.problems.join('. ')}</p>
                 ) : (
-                  <p className="text-xs text-muted-foreground">{rowCount} row{rowCount !== 1 ? 's' : ''} ready to import</p>
-                );
-              })()}
+                  <p className="text-xs text-muted-foreground">
+                    {importCheck.rowCount} row{importCheck.rowCount !== 1 ? 's' : ''} ready to import
+                  </p>
+                )
+              )}
               <DialogFooter>
                 <Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button>
                 <Button
                   onClick={() => importMutation.mutate(importCsv)}
-                  disabled={(() => {
-                    if (!importCsv.trim() || importMutation.isPending) return true;
-                    const lines = importCsv.split(/\r?\n/).filter((l) => l.trim());
-                    if (lines.length < 2) return true;
-                    const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
-                    if (!header.includes('title')) return true;
-                    if (lines.length - 1 > 500) return true;
-                    return false;
-                  })()}
+                  disabled={!importCheck || importCheck.problems.length > 0 || importMutation.isPending}
                 >
                   Import
                 </Button>

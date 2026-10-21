@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { pool } from '../config/db.js';
+import { canManageGoal } from './goals.js';
 
 // Mounted at /api/goals/:goalId/key-results  (mergeParams: true)
 const router = Router({ mergeParams: true });
@@ -25,7 +26,7 @@ const createSchema = z.object({
   target_value:  z.number().min(0).max(1_000_000_000).optional(),
   current_value: z.number().min(0).max(1_000_000_000).optional(),
   unit:          z.string().min(1).max(30).optional(),
-  position:      z.number().int().min(0).optional(),
+  position:      z.number().int().min(0).max(1_000_000).optional(),
 });
 
 const updateSchema = z.object({
@@ -33,7 +34,7 @@ const updateSchema = z.object({
   target_value:  z.number().min(0).max(1_000_000_000).optional(),
   current_value: z.number().min(0).max(1_000_000_000).optional(),
   unit:          z.string().min(1).max(30).optional(),
-  position:      z.number().int().min(0).optional(),
+  position:      z.number().int().min(0).max(1_000_000).optional(),
 });
 
 /** Verify the goal belongs to the current workspace */
@@ -55,7 +56,8 @@ router.get('/', async (req, res, next) => {
     }
     const result = await pool.query<KeyResult>(
       `SELECT * FROM key_results WHERE goal_id = $1 AND workspace_id = $2
-       ORDER BY position, created_at`,
+       ORDER BY position, created_at
+       LIMIT 500`,
       [goalId, req.workspace.id],
     );
     res.json(result.rows);
@@ -112,10 +114,11 @@ router.patch('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/goals/:goalId/key-results/:id
+// DELETE /api/goals/:goalId/key-results/:id  [admin or goal owner, same as goal delete]
 router.delete('/:id', async (req, res, next) => {
   try {
     const { goalId, id } = req.params as Record<string, string>;
+    if (!(await canManageGoal(req, res, goalId))) return;
     const result = await pool.query(
       'DELETE FROM key_results WHERE id = $1 AND goal_id = $2 AND workspace_id = $3',
       [id, goalId, req.workspace.id],

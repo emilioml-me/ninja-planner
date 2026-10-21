@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from 'vitest';
 import request from 'supertest';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -11,6 +11,7 @@ vi.mock('../config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 vi.mock('@clerk/backend', () => ({
+  verifyToken: vi.fn(),
   createClerkClient: vi.fn(() => ({ verifyToken: vi.fn() })),
 }));
 vi.mock('../middleware/auth.js', () => ({
@@ -19,23 +20,27 @@ vi.mock('../middleware/auth.js', () => ({
     next();
   },
 }));
-vi.mock('../middleware/requireWorkspace.js', () => ({
-  requireWorkspace: (req: any, _res: any, next: any) => {
+vi.mock('../middleware/requireWorkspace.js', () => {
+  const stub = (req: any, _res: any, next: any) => {
     req.workspace = { id: 'ws_test', clerk_org_id: 'org_test' };
     next();
-  },
-}));
+  };
+  return { requireWorkspace: stub, requireWorkspaceAllowViewerWrites: stub };
+});
 vi.mock('../middleware/requireAdmin.js', () => ({
   requireAdmin: (_req: any, _res: any, next: any) => next(),
 }));
-// Stub email + notification side-effects (M6: use real exported function names)
-vi.mock('../services/emailService.js', () => ({
+// Stub email + notification side-effects. Partial mocks keep every other export of the real
+// modules (routes import more than these), so a new export can't make app import fail.
+vi.mock('../services/emailService.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/emailService.js')>()),
   sendTaskAssignedEmail:    vi.fn().mockResolvedValue(undefined),
   sendDueDateReminderEmail: vi.fn().mockResolvedValue(undefined),
   sendGoalMilestoneEmail:   vi.fn().mockResolvedValue(undefined),
   resolveClerkEmail:        vi.fn().mockResolvedValue(null),
 }));
-vi.mock('../services/notificationService.js', () => ({
+vi.mock('../services/notificationService.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/notificationService.js')>()),
   createNotification: vi.fn().mockResolvedValue(undefined),
 }));
 // Partial mock: keep the module's other exports (e.g. ALL_EVENTS, imported at load time by
@@ -55,6 +60,7 @@ const TASK_ROW = {
 };
 
 let app: any;
+const ORIGINAL_ENV = { ...process.env };
 beforeAll(async () => {
   process.env.CLERK_SECRET_KEY     = 'test';
   process.env.CLERK_WEBHOOK_SECRET = 'test';
@@ -64,7 +70,18 @@ beforeAll(async () => {
   app = createApp();
 });
 
+beforeEach(() => {
+  // mockReset drops unconsumed mockResolvedValueOnce values (clearAllMocks keeps them queued);
+  // any query a test didn't script gets an empty result set.
+  mockQuery.mockReset();
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+});
+
 afterEach(() => vi.clearAllMocks());
+
+afterAll(() => {
+  process.env = ORIGINAL_ENV;
+});
 
 describe('GET /api/tasks', () => {
   it('returns task list', async () => {
@@ -91,9 +108,8 @@ describe('GET /api/tasks', () => {
 
 describe('POST /api/tasks', () => {
   it('creates a task and returns 201', async () => {
-    // Workspace members check (assignee validation)
-    mockQuery
-      .mockResolvedValueOnce({ rows: [TASK_ROW] }); // INSERT returning
+    // No assignee, so no member lookup: the first query is the INSERT ... RETURNING.
+    mockQuery.mockResolvedValueOnce({ rows: [TASK_ROW] });
 
     const res = await request(app)
       .post('/api/tasks')

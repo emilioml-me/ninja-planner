@@ -1,8 +1,24 @@
 import type { PoolClient } from 'pg';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
+import { todayInTz } from '../lib/tz.js';
+
+// Used when no request timezone is available (system-driven transitions: automations, webhooks).
+const DEFAULT_TZ = 'America/Mexico_City';
 
 type Queryable = Pick<PoolClient, 'query'>;
+
+// Accepted range for task due/start dates. One far-future date (e.g. 9999-12-31) used to turn the
+// timeline into a multi-million-day range and freeze the tab.
+export const TASK_DATE_MIN = '1900-01-01';
+export const TASK_DATE_MAX = '2199-12-31';
+export const TASK_DATE_RANGE_MESSAGE = `Date must be between ${TASK_DATE_MIN} and ${TASK_DATE_MAX}`;
+/** True when a YYYY-MM-DD string is inside the accepted task date range. */
+export function isTaskDateInBounds(d: string): boolean {
+  return d >= TASK_DATE_MIN && d <= TASK_DATE_MAX;
+}
+// Positions are int4 columns; anything larger 500s with 22003 instead of a 400.
+export const TASK_POSITION_MAX = 1_000_000_000;
 
 export interface Task {
   id: string;
@@ -193,7 +209,34 @@ export async function getTaskById(
   return { task: taskResult.rows[0], activity: activityResult.rows };
 }
 
-const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'start_date', 'tags', 'sprint_id', 'epic_id', 'recurrence_rule', 'story_points', 'checklist']);
+const TASK_UPDATABLE_COLUMNS = new Set(['title', 'description', 'status', 'priority', 'assignee_clerk_id', 'due_date', 'start_date', 'tags', 'position', 'sprint_id', 'epic_id', 'recurrence_rule', 'story_points', 'checklist']);
+
+// Canonical form of a column value for "did it actually change" comparisons. Checklist items
+// come back from jsonb with reordered keys, so they're compared by their fields, not raw JSON.
+function comparableValue(key: string, value: unknown): string {
+  if (value === undefined || value === null) return 'null';
+  if (key === 'checklist' && Array.isArray(value)) {
+    return JSON.stringify(
+      (value as { id: string; text: string; done: boolean }[]).map((item) => [item.id, item.text, Boolean(item.done)]),
+    );
+  }
+  if ((key === 'due_date' || key === 'start_date') && typeof value === 'string') return JSON.stringify(value.slice(0, 10));
+  return JSON.stringify(value);
+}
+
+/**
+ * Returns only the updatable fields of `data` whose value differs from `prev`. A full-object
+ * PATCH echoes every field; only the real changes should be written, logged and announced.
+ */
+export function diffTaskChanges(prev: Task, data: Partial<Record<string, unknown>>): Record<string, unknown> {
+  const changed: Record<string, unknown> = {};
+  const prevRecord = prev as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(data)) {
+    if (value === undefined || !TASK_UPDATABLE_COLUMNS.has(key)) continue;
+    if (comparableValue(key, value) !== comparableValue(key, prevRecord[key])) changed[key] = value;
+  }
+  return changed;
+}
 
 export async function updateTask(
   taskId: string,
@@ -236,30 +279,44 @@ export async function updateTask(
  * Locks the task row, reads its pre-update assignee/status, applies the update, and commits —
  * all in one transaction — so a concurrent PATCH can't read stale "previous" values between
  * this route's SELECT and its UPDATE (which previously fed automations the wrong old status).
+ *
+ * Only fields whose value actually differs are written; `changed` lists them (empty when the
+ * request was a no-op, in which case the unchanged task is returned and nothing is written, so
+ * an echoed due_date doesn't reset the due-date automation marker either).
  */
 export async function updateTaskWithPrevState(
   taskId: string,
   workspaceId: string,
   data: Partial<Record<string, unknown>> & { sprint_id?: string | null; epic_id?: string | null },
-): Promise<{ task: Task; prevAssigneeClerkId: string | null; prevStatus: string | null; prevDueDate: string | null } | null> {
+): Promise<{
+  task: Task;
+  prevAssigneeClerkId: string | null;
+  prevStatus: string | null;
+  prevDueDate: string | null;
+  changed: Record<string, unknown>;
+} | null> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const prevRow = await client.query<{ assignee_clerk_id: string | null; status: string; due_date: string | null }>(
-      'SELECT assignee_clerk_id, status, due_date FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL FOR UPDATE',
+    const prevRow = await client.query<Task>(
+      'SELECT * FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL FOR UPDATE',
       [taskId, workspaceId],
     );
     if (prevRow.rows.length === 0) {
       await client.query('COMMIT');
       return null;
     }
-    const prevAssigneeClerkId = prevRow.rows[0].assignee_clerk_id;
-    const prevStatus = prevRow.rows[0].status;
-    const prevDueDate = prevRow.rows[0].due_date;
+    const prev = prevRow.rows[0];
+    const changed = diffTaskChanges(prev, data);
 
-    const task = await updateTask(taskId, workspaceId, data, client);
+    let task: Task | null = prev;
+    if (Object.keys(changed).length > 0) {
+      task = await updateTask(taskId, workspaceId, changed, client);
+    }
     await client.query('COMMIT');
-    return task ? { task, prevAssigneeClerkId, prevStatus, prevDueDate } : null;
+    return task
+      ? { task, prevAssigneeClerkId: prev.assignee_clerk_id, prevStatus: prev.status, prevDueDate: prev.due_date, changed }
+      : null;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -268,24 +325,44 @@ export async function updateTaskWithPrevState(
   }
 }
 
-const ninjaTaskPendingMarker = (taskId: string) => `__pending__:${taskId}`;
+// Pending sentinel: `__pending__:<taskId>:<claimedAtMs>`. The legacy form without the timestamp
+// (`__pending__:<taskId>`) is still recognized. A claim older than NINJA_TASK_CLAIM_STALE_MS is
+// considered abandoned (process crashed between claim and resolve) and can be re-claimed, so a
+// crash no longer leaves the task permanently unsynced.
+const ninjaTaskPendingPrefix = (taskId: string) => `__pending__:${taskId}`;
+const NINJA_TASK_CLAIM_STALE_MS = 10 * 60_000;
 
 /**
  * Atomically claims the "sync to ninja-task" slot for a task using a per-task pending sentinel
  * (unique per task, so it can't collide with the DB-level unique constraint on
  * external_ninja_task_id). Returns true if this call won the race and should proceed to push;
- * false if another concurrent request already claimed or completed the sync. Optional for
- * callers where a duplicate push can't happen (e.g. right after INSERT) — they can go straight
- * to resolveNinjaTaskSync, which also accepts the unclaimed (NULL) state.
+ * false if another concurrent request already claimed (recently) or completed the sync. Optional
+ * for callers where a duplicate push can't happen (e.g. right after INSERT) — they can go
+ * straight to resolveNinjaTaskSync, which also accepts the unclaimed (NULL) state.
  */
 export async function claimNinjaTaskSync(taskId: string, workspaceId: string): Promise<boolean> {
+  const prefix = ninjaTaskPendingPrefix(taskId);
+  const now = Date.now();
   const result = await pool.query(
     `UPDATE tasks SET external_ninja_task_id = $1
-     WHERE id = $2 AND workspace_id = $3 AND external_ninja_task_id IS NULL`,
-    [ninjaTaskPendingMarker(taskId), taskId, workspaceId],
+     WHERE id = $2 AND workspace_id = $3
+       AND (
+         external_ninja_task_id IS NULL
+         OR external_ninja_task_id = $4
+         OR (
+           left(external_ninja_task_id, length($4) + 1) = $4 || ':'
+           AND (CASE WHEN split_part(external_ninja_task_id, ':', 3) ~ '^[0-9]{1,15}$'
+                     THEN split_part(external_ninja_task_id, ':', 3)::bigint ELSE 0 END) < $5
+         )
+       )`,
+    [`${prefix}:${now}`, taskId, workspaceId, prefix, now - NINJA_TASK_CLAIM_STALE_MS],
   );
   return (result.rowCount ?? 0) > 0;
 }
+
+// SQL predicate matching any pending sentinel (legacy or timestamped); `param` holds the prefix.
+const pendingMarkerMatch = (param: string) =>
+  `(external_ninja_task_id = ${param} OR left(external_ninja_task_id, length(${param}) + 1) = ${param} || ':')`;
 
 /**
  * Resolves a sync slot to the real external ID. Matches either an unclaimed (NULL) slot or one
@@ -295,31 +372,17 @@ export async function claimNinjaTaskSync(taskId: string, workspaceId: string): P
 export async function resolveNinjaTaskSync(taskId: string, externalId: string): Promise<void> {
   await pool.query(
     `UPDATE tasks SET external_ninja_task_id = $1
-     WHERE id = $2 AND (external_ninja_task_id IS NULL OR external_ninja_task_id = $3)`,
-    [externalId, taskId, ninjaTaskPendingMarker(taskId)],
+     WHERE id = $2 AND (external_ninja_task_id IS NULL OR ${pendingMarkerMatch('$3')})`,
+    [externalId, taskId, ninjaTaskPendingPrefix(taskId)],
   );
 }
 
 /** Releases a claimed-but-failed sync slot back to NULL so a later attempt can retry. */
 export async function releaseNinjaTaskSync(taskId: string): Promise<void> {
   await pool.query(
-    `UPDATE tasks SET external_ninja_task_id = NULL WHERE id = $1 AND external_ninja_task_id = $2`,
-    [taskId, ninjaTaskPendingMarker(taskId)],
+    `UPDATE tasks SET external_ninja_task_id = NULL WHERE id = $1 AND ${pendingMarkerMatch('$2')}`,
+    [taskId, ninjaTaskPendingPrefix(taskId)],
   );
-}
-
-export async function updateTaskPosition(
-  taskId: string,
-  workspaceId: string,
-  position: number,
-): Promise<Task | null> {
-  const result = await pool.query<Task>(
-    `UPDATE tasks SET position = $1, updated_at = now()
-     WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL
-     RETURNING *`,
-    [position, taskId, workspaceId],
-  );
-  return result.rows[0] ?? null;
 }
 
 export async function softDeleteTask(taskId: string, workspaceId: string): Promise<boolean> {
@@ -345,16 +408,22 @@ export async function reorderTaskInTransaction(
   try {
     await client.query('BEGIN');
 
-    // Lock the moved task first and capture its current status.
-    const prevRow = await client.query<{ status: string }>(
-      'SELECT status FROM tasks WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL FOR UPDATE',
-      [taskId, workspaceId],
+    // Lock the moved task AND every resequenced row in one statement, in a stable sorted order.
+    // Locking the moved row first and the sorted set second let two concurrent drags in the same
+    // column each hold one row the other needed (deadlock -> 40P01, drag lost).
+    const lockIds = [...new Set([taskId, ...(resequence ?? []).map((r) => r.id)])].sort();
+    const locked = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM tasks
+       WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND deleted_at IS NULL
+       ORDER BY id FOR UPDATE`,
+      [lockIds, workspaceId],
     );
-    if (prevRow.rows.length === 0) {
+    const movedRow = locked.rows.find((r) => r.id === taskId);
+    if (!movedRow) {
       await client.query('ROLLBACK');
       return null;
     }
-    const prevStatus = prevRow.rows[0].status;
+    const prevStatus = movedRow.status;
 
     if (resequence && resequence.length > 0) {
       // The API accepts `resequence` as an independent array from any caller — nothing enforces
@@ -367,14 +436,8 @@ export async function reorderTaskInTransaction(
         ? resequence
         : [...resequence, { id: taskId, position: newPosition }];
 
-      // Lock every affected row up front, in a stable sorted order, so two concurrent
-      // reorders of the same column fully serialize instead of interleaving row-by-row
-      // (which previously could leave duplicate `position` values across both writers).
-      const sortedIds = [...effectiveResequence.map((r) => r.id)].sort();
-      await client.query(
-        `SELECT id FROM tasks WHERE id = ANY($1::uuid[]) AND workspace_id = $2 ORDER BY id FOR UPDATE`,
-        [sortedIds, workspaceId],
-      );
+      // Every affected row is already locked above, so two concurrent reorders of the same
+      // column fully serialize instead of interleaving row-by-row.
       // Bulk update using unnest — one round-trip regardless of list size
       await client.query(
         `UPDATE tasks SET position = u.pos, updated_at = now()
@@ -450,6 +513,30 @@ export function computeNextRecurrenceDate(rule: string, dueDate: string | null, 
   return advance(new Date(Date.UTC(y, m - 1, d))).toISOString().slice(0, 10);
 }
 
+function parseDateUtc(s: string): Date {
+  const [y, m, d] = s.slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+/**
+ * Exported for tests. Next start date for a recurring task: keeps the original start->due span
+ * (start moves with the due date); without a due date the start advances on its own.
+ */
+export function computeNextStartDate(
+  rule: string,
+  startDate: string | null,
+  dueDate: string | null,
+  newDueDate: string,
+  today: string,
+): string | null {
+  if (!startDate) return null;
+  if (dueDate) {
+    const spanDays = Math.round((parseDateUtc(dueDate).getTime() - parseDateUtc(startDate).getTime()) / 86_400_000);
+    return addDaysUtc(parseDateUtc(newDueDate), -spanDays).toISOString().slice(0, 10);
+  }
+  return computeNextRecurrenceDate(rule, startDate, today);
+}
+
 /**
  * Spawns a fresh copy of a recurring task when the original is completed.
  * The new task's due_date is bumped by the recurrence interval from the original due_date
@@ -457,11 +544,16 @@ export function computeNextRecurrenceDate(rule: string, dueDate: string | null, 
  * Dedup: at most one live successor per task instance — a task that is reopened and completed
  * again (or a retried completion) never spawns a second copy. Previously this was a 2-minute
  * time window, so completing the same instance again later spawned duplicates.
+ * `tz` (IANA name) decides what "today" is; defaults to the app's home timezone for
+ * system-driven completions with no request context.
  */
-export async function spawnRecurringTask(task: Task): Promise<Task | null> {
-  const today = new Date().toISOString().slice(0, 10);
+export async function spawnRecurringTask(task: Task, tz: string = DEFAULT_TZ): Promise<Task | null> {
+  const today = todayInTz(tz);
   const newDueDate = task.recurrence_rule
     ? computeNextRecurrenceDate(task.recurrence_rule, task.due_date, today)
+    : null;
+  const newStartDate = task.recurrence_rule && newDueDate
+    ? computeNextStartDate(task.recurrence_rule, task.start_date, task.due_date, newDueDate, today)
     : null;
   if (!newDueDate) {
     logger.warn(
@@ -511,8 +603,8 @@ export async function spawnRecurringTask(task: Task): Promise<Task | null> {
     // checklist/points on every recurrence.
     const result = await client.query<Task>(
       `INSERT INTO tasks
-         (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, recurrence_rule, spawned_from_id, epic_id, sprint_id, story_points, checklist)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+         (workspace_id, title, description, status, priority, assignee_clerk_id, due_date, tags, position, created_by, recurrence_rule, spawned_from_id, epic_id, sprint_id, story_points, checklist, start_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING *`,
       [
         task.workspace_id,
@@ -535,6 +627,7 @@ export async function spawnRecurringTask(task: Task): Promise<Task | null> {
         // off as part of completing it (the normal path to marking it 'done') respawns already
         // showing every item finished, even though none of the new instance's work has happened.
         JSON.stringify((task.checklist ?? []).map((item) => ({ ...item, done: false }))),
+        newStartDate,
       ],
     );
 

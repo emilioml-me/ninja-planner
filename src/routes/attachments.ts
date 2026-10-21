@@ -6,6 +6,7 @@ import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { pool } from '../config/db.js';
 import { logger } from '../config/logger.js';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
 import {
   getUploadUrl, getDownloadUrl, deleteObject, verifyObjectMimeType, getObjectSize, isR2Configured,
 } from '../lib/r2.js';
@@ -36,13 +37,23 @@ const ALLOWED_MIME  = new Set([
   // NOTE: image/svg+xml intentionally excluded — stored XSS risk
 ]);
 
-/** Sanitize a user-supplied filename: strip path separators, null bytes, and dangerous sequences (H4) */
+/**
+ * Sanitize a user-supplied filename: strip path separators, control characters (incl. NUL/CR/LF),
+ * and Unicode bidi/invisible formatting characters (U+202E "right-to-left override" can make
+ * "invoice[U+202E]fdp.exe" display as "invoiceexe.pdf").
+ */
 function sanitizeFileName(name: string): string {
-  return name
-    .replace(/\0/g, '')          // null bytes
+  const cleaned = name
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')                    // C0/C1 control chars
+    .replace(/[؜​-‏‪-‮⁠-⁩﻿]/g, '') // bidi + zero-width
     .replace(/[/\\]/g, '_')      // path separators
+    .trim()
     .replace(/^\.+$/, '_');      // bare dot/dotdot
+  return cleaned.length > 0 ? cleaned : 'file';
 }
+
+/** Outstanding (presigned but unconfirmed) uploads allowed per user within the sweep window. */
+const MAX_PENDING_UPLOADS_PER_USER = 30;
 
 // -- Upload-key binding (H3) --------------------------------------------------
 //
@@ -88,6 +99,16 @@ async function deleteObjectIfUnreferenced(r2Key: string, context: string): Promi
   });
 }
 
+/**
+ * Forget a pending upload once it is confirmed. Best-effort. Rejected confirms leave the row in
+ * place so the sweeper retries the object delete if the inline delete failed.
+ */
+async function clearPendingUpload(r2Key: string): Promise<void> {
+  await pool.query('DELETE FROM pending_uploads WHERE r2_key = $1', [r2Key]).catch((err) => {
+    logger.warn({ err, r2_key: r2Key }, 'Failed to clear pending_uploads row (sweeper will retry)');
+  });
+}
+
 // Columns returned to clients - r2_key is internal (the client never needs it; downloads go
 // through /:id/download).
 const PUBLIC_COLUMNS = 'ta.id, ta.task_id, ta.workspace_id, ta.file_name, ta.file_size, ta.mime_type, ta.uploaded_by, ta.created_at';
@@ -116,6 +137,7 @@ const presignLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => ipBucket(getClientIp(req)),
   message: { error: 'Too many upload requests, please try again later' },
 });
 
@@ -165,12 +187,28 @@ router.post('/presign', presignLimiter, async (req, res, next) => {
       res.status(400).json({ error: 'File type not allowed' }); return;
     }
 
+    // A presigned PUT can't bound the object size, so unconfirmed uploads are tracked in
+    // pending_uploads (swept after 24h by services/attachmentCleanup.ts) and capped per user.
+    const pending = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pending_uploads
+       WHERE workspace_id = $1 AND created_by = $2`,
+      [req.workspace.id, req.auth.userId],
+    );
+    if ((pending.rows[0]?.n ?? 0) >= MAX_PENDING_UPLOADS_PER_USER) {
+      res.status(429).json({ error: 'Too many unfinished uploads, please try again later' }); return;
+    }
+
     const file_name = sanitizeFileName(rawName);                   // H4: sanitize before use
     const rawExt = file_name.includes('.') ? file_name.split('.').pop() ?? '' : '';
     const ext  = /^[A-Za-z0-9]{1,20}$/.test(rawExt) ? rawExt : 'bin';
     const uuid = randomUUID();
     const sig  = signKeyId(uuid, req.workspace.id, taskId, req.auth.userId);
     const key  = `attachments/${req.workspace.id}/${taskId}/${uuid}-${sig}.${ext}`;
+    await pool.query(
+      `INSERT INTO pending_uploads (r2_key, workspace_id, task_id, created_by)
+       VALUES ($1, $2, $3, $4)`,
+      [key, req.workspace.id, taskId, req.auth.userId],
+    );
     const url  = await getUploadUrl(key, mime_type);
     res.json({ upload_url: url, r2_key: key, file_name });         // return sanitized name to client
   } catch (err) { next(err); }
@@ -236,6 +274,7 @@ router.post('/', async (req, res, next) => {
       throw dbErr;
     }
 
+    await clearPendingUpload(r2_key);
     res.status(201).json(result.rows[0]);
   } catch (err) { next(err); }
 });

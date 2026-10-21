@@ -1,4 +1,5 @@
 import { pool } from '../config/db.js';
+import { trackBackground } from '../lib/background.js';
 
 export interface Notification {
   id: string;
@@ -65,16 +66,33 @@ export async function setNotificationPreference(
   );
 }
 
-export async function createNotification(data: {
+/**
+ * Insert an in-app notification unless the recipient muted this type.
+ * Resolves to whether the type is enabled for the recipient, so callers that also send an email
+ * can honour the same preference without querying it a second time.
+ * Registered with trackBackground so graceful shutdown waits for un-awaited calls.
+ */
+export function createNotification(data: {
   workspaceId: string;
   recipientClerkId: string;
   type: string;
   title: string;
   body?: string;
   link?: string;
-}): Promise<void> {
+}): Promise<boolean> {
+  return trackBackground(insertNotification(data));
+}
+
+async function insertNotification(data: {
+  workspaceId: string;
+  recipientClerkId: string;
+  type: string;
+  title: string;
+  body?: string;
+  link?: string;
+}): Promise<boolean> {
   const enabled = await isNotificationEnabled(data.workspaceId, data.recipientClerkId, data.type);
-  if (!enabled) return;
+  if (!enabled) return false;
   await pool.query(
     `INSERT INTO notifications (workspace_id, recipient_clerk_id, type, title, body, link)
      VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -87,27 +105,33 @@ export async function createNotification(data: {
       data.link ?? null,
     ],
   );
+  return true;
 }
 
 export async function getNotifications(
   workspaceId: string,
   recipientId: string,
   limit = 50,
+  offset = 0,
 ): Promise<Notification[]> {
   const result = await pool.query<Notification>(
     `SELECT * FROM notifications
      WHERE workspace_id = $1 AND recipient_clerk_id = $2
-     ORDER BY created_at DESC
-     LIMIT $3`,
-    [workspaceId, recipientId, limit],
+     ORDER BY created_at DESC, id DESC
+     LIMIT $3 OFFSET $4`,
+    [workspaceId, recipientId, limit, offset],
   );
   return result.rows;
 }
 
+/**
+ * Mark one notification read. Idempotent: an already-read notification still returns true
+ * (read_at is kept, not bumped). Returns false only when it doesn't exist for this recipient.
+ */
 export async function markRead(notificationId: string, recipientId: string, workspaceId: string): Promise<boolean> {
   const result = await pool.query(
-    `UPDATE notifications SET read_at = now()
-     WHERE id = $1 AND recipient_clerk_id = $2 AND workspace_id = $3 AND read_at IS NULL`,
+    `UPDATE notifications SET read_at = COALESCE(read_at, now())
+     WHERE id = $1 AND recipient_clerk_id = $2 AND workspace_id = $3`,
     [notificationId, recipientId, workspaceId],
   );
   return (result.rowCount ?? 0) > 0;

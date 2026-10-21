@@ -1,6 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { useAuth } from '@clerk/clerk-react';
-import { Route, Switch, Redirect, useLocation } from 'wouter';
+import { Route, Switch, Redirect, useLocation, useSearch } from 'wouter';
 import { queryClient } from './lib/queryClient';
 import { Toaster } from './components/ui/toaster';
 import { AppLayout } from './components/AppLayout';
@@ -38,20 +38,28 @@ import SprintTemplates from './pages/SprintTemplates';
 import Clients from './pages/Clients';
 import NotificationPreferences from './pages/NotificationPreferences';
 import EpicTemplates from './pages/EpicTemplates';
+import TaskTemplates from './pages/TaskTemplates';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
   const [location] = useLocation();
+  const search = useSearch();
 
   if (!isLoaded) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="text-muted-foreground text-sm">Loading…</div>
+        <div className="text-muted-foreground text-sm">Loading...</div>
       </div>
     );
   }
 
-  if (!isSignedIn) return <Redirect to="/" />;
+  if (!isSignedIn) {
+    // Keep the deep link (e.g. a notification email's /tasks?task=...) so Landing can send the
+    // user back to it after sign-in.
+    const target = `${location}${search ? `?${search}` : ''}`;
+    const keep = location !== '/' && location !== '/dashboard';
+    return <Redirect to={keep ? `/?redirect_url=${encodeURIComponent(target)}` : '/'} />;
+  }
 
   return (
     <WorkspaceGate>
@@ -83,6 +91,7 @@ function AuthenticatedApp() {
             <Route path="/settings/custom-fields" component={CustomFields} />
             <Route path="/settings/guest-links"   component={GuestLinks} />
             <Route path="/settings/notifications" component={NotificationPreferences} />
+            <Route path="/task-templates"         component={TaskTemplates} />
             <Route path="/epic-templates"         component={EpicTemplates} />
             <Route path="/sprint-templates"        component={SprintTemplates} />
             <Route path="/clients"                 component={Clients} />
@@ -95,28 +104,30 @@ function AuthenticatedApp() {
 }
 
 export default function App() {
+  const [location] = useLocation();
   return (
     <QueryClientProvider client={queryClient}>
-      <Switch>
-        <Route path="/" component={Landing} />
-        {/* Public share pages — no auth required */}
-        <Route path="/r/:token">
-          {(params) => <PublicRoadmap token={params.token} />}
-        </Route>
-        {/* Guest view pages — no auth required */}
-        <Route path="/g/:token">
-          {(params) => (
-            <ErrorBoundary>
-              <GuestView token={params.token} />
-            </ErrorBoundary>
-          )}
-        </Route>
-        {/* Workspace invite accept page */}
-        <Route path="/invite/:token">
-          {(params) => <AcceptInvite token={params.token} />}
-        </Route>
-        <Route component={AuthenticatedApp} />
-      </Switch>
+      {/* Top-level boundary: covers the app chrome (sidebar, palette, bell, banners) and the
+          public pages, so a crash there shows a recovery screen instead of a blank page. The
+          inner boundary in AuthenticatedApp keeps the chrome usable when only a page crashes. */}
+      <ErrorBoundary resetKey={location} fullScreen>
+        <Switch>
+          <Route path="/" component={Landing} />
+          {/* Public share pages — no auth required */}
+          <Route path="/r/:token">
+            {(params) => <PublicRoadmap token={params.token} />}
+          </Route>
+          {/* Guest view pages — no auth required */}
+          <Route path="/g/:token">
+            {(params) => <GuestView token={params.token} />}
+          </Route>
+          {/* Workspace invite accept page */}
+          <Route path="/invite/:token">
+            {(params) => <AcceptInvite token={params.token} />}
+          </Route>
+          <Route component={AuthenticatedApp} />
+        </Switch>
+      </ErrorBoundary>
       <Toaster />
     </QueryClientProvider>
   );

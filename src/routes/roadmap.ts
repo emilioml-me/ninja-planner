@@ -9,6 +9,9 @@ import {
   deleteRoadmapItem,
 } from '../services/roadmapService.js';
 import { regenerateShareToken, getShareToken, revokeShareToken } from '../services/shareService.js';
+import { checkAndNotifyGoalMilestonesForEntity } from '../services/goalService.js';
+import { isOperatorWorkspace } from '../lib/operator.js';
+import { getPublicAppUrl } from '../config/origins.js';
 import { pool } from '../config/db.js';
 
 const router = Router();
@@ -31,12 +34,15 @@ const httpUrlSchema = z.string().max(500).refine(
   { message: 'external_ref must be a valid http(s) URL' },
 );
 
+// priority is a Postgres INTEGER — bound it so out-of-range input is a 400, not a 22003 500.
+const PRIORITY_MAX = 1_000_000;
+
 const createSchema = z.object({
   title:        z.string().min(1).max(500),
-  description:  z.string().optional(),
-  phase:        z.string().max(100).optional(),
+  description:  z.string().max(5000).nullable().optional(),
+  phase:        z.string().max(100).nullable().optional(),
   status:       z.enum(STATUSES).optional(),
-  priority:     z.number().int().min(0).optional(),
+  priority:     z.number().int().min(0).max(PRIORITY_MAX).optional(),
   external_ref: httpUrlSchema.nullable().optional(),
 });
 
@@ -79,7 +85,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 router.patch('/reorder', requireAdmin, async (req, res, next) => {
   try {
     const schema = z.object({
-      items: z.array(z.object({ id: z.string().uuid(), priority: z.number().int().min(0) })).min(1).max(200),
+      items: z.array(z.object({ id: z.string().uuid(), priority: z.number().int().min(0).max(PRIORITY_MAX) })).min(1).max(1000),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -122,6 +128,12 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     }
     const { prev_status: prevStatus, ...item } = updated;
     res.json(item);
+
+    // Live roadmap items count toward linked goals' progress — re-check 50%/100% milestones
+    // when an item goes live (fire-and-forget, never throws).
+    if (item.status === 'live' && prevStatus !== 'live') {
+      checkAndNotifyGoalMilestonesForEntity('roadmap_item', item.id, req.workspace.id, getPublicAppUrl());
+    }
 
     // Phase 6 — Roadmap → GTD Capture: when an item TRANSITIONS to "building" (in-progress),
     // push it to the ninja-task GTD inbox for every participating workspace member (viewers are
@@ -211,7 +223,8 @@ router.get('/:id/tasks', async (req, res, next) => {
        FROM roadmap_task_links rtl
        JOIN tasks t ON t.id = rtl.task_id
        WHERE rtl.roadmap_item_id = $1 AND t.workspace_id = $2 AND t.deleted_at IS NULL
-       ORDER BY t.created_at`,
+       ORDER BY t.created_at
+       LIMIT 500`,
       [req.params.id, req.workspace.id],
     );
     res.json(result.rows);
@@ -279,15 +292,26 @@ router.post('/:id/check-github-status', requireAdmin, async (req, res, next) => 
       return;
     }
 
-    const issue = await fetchGithubIssueStatus(item.external_ref);
-    if (!issue) { res.status(502).json({ error: 'Could not fetch GitHub issue status' }); return; }
+    // The operator's GITHUB_TOKEN can read the operator's private repos, so only the operator
+    // workspace uses it; every other workspace checks public issues unauthenticated. All failure
+    // modes collapse into one response so the endpoint can't be used to probe private repos.
+    const issue = await fetchGithubIssueStatus(item.external_ref, {
+      useToken: isOperatorWorkspace(req.workspace.id),
+    });
+    if (!issue) {
+      res.status(422).json({ error: 'GitHub issue not found or not accessible' });
+      return;
+    }
 
     let updated = null;
     if (issue.state === 'closed' && item.status !== 'live' && item.status !== 'archived') {
       const result = await updateRoadmapItem(req.params.id, req.workspace.id, { status: 'live' });
       if (result) {
-        const { prev_status: _prevStatus, ...rest } = result;
+        const { prev_status: prevStatus, ...rest } = result;
         updated = rest;
+        if (prevStatus !== 'live') {
+          checkAndNotifyGoalMilestonesForEntity('roadmap_item', rest.id, req.workspace.id, getPublicAppUrl());
+        }
       }
     }
 

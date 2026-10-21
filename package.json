@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Multi-tenant business planning SaaS — ninja suite",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:client": "vite",

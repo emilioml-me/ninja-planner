@@ -26,8 +26,8 @@ const listQuerySchema = z.object({
   // the existing client (which reads the first page, newest first) working unchanged.
   limit:     z.coerce.number().int().min(1).max(200).default(100),
   offset:    z.coerce.number().int().min(0).default(0),
-  // preview=1 returns a content excerpt (first PREVIEW_CHARS chars) plus content_truncated;
-  // fetch GET /:id for the full text.
+  // By default (or preview=1) returns a content excerpt (first PREVIEW_CHARS chars) plus
+  // content_truncated; fetch GET /:id for the full text, or pass preview=0.
   preview:   z.enum(['0', '1', 'true', 'false']).optional(),
 });
 
@@ -37,7 +37,9 @@ router.get('/', async (req, res, next) => {
     const q = listQuerySchema.safeParse(req.query);
     if (!q.success) { res.status(400).json({ error: q.error.flatten() }); return; }
     const { sprint_id, epic_id, limit, offset } = q.data;
-    const preview = q.data.preview === '1' || q.data.preview === 'true';
+    // Preview is the default (full content of 200 notes can reach ~10MB); pass preview=0 for
+    // full content.
+    const preview = !(q.data.preview === '0' || q.data.preview === 'false');
 
     const conditions = ['workspace_id = $1'];
     const values: unknown[] = [req.workspace.id];

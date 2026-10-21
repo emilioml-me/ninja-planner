@@ -21,11 +21,13 @@ export function AppLayout({ children }: AppLayoutProps) {
 
   // ⌘K / Ctrl+K global shortcut
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
+      // Don't stack the palette over the onboarding wizard.
+      if (onboardingOpen) return;
       setPaletteOpen((v) => !v);
     }
-  }, []);
+  }, [onboardingOpen]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);

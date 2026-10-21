@@ -4,6 +4,8 @@ import { Router } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import type { Pool } from 'pg';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
+import { trackBackground } from '../lib/background.js';
 
 const REPLAY_WINDOW_MS = 5 * 60_000;
 
@@ -17,6 +19,7 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
     max: 30,
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => ipBucket(getClientIp(req)),
     message: { error: 'Too many requests' },
   });
 
@@ -102,7 +105,7 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
       // Map the completed quest back to (sprint, member) via sprint_quests, then let the member's
       // workspace admins know — there's no per-sprint "done" state to flip here since a quest
       // only represents one member's personal copy of the sprint, not the sprint itself.
-      pool.query<{ sprint_id: string; workspace_id: string; clerk_user_id: string }>(
+      void trackBackground(pool.query<{ sprint_id: string; workspace_id: string; clerk_user_id: string }>(
         `UPDATE sprint_quests SET completed_at = now()
          WHERE ninja_task_quest_id = $1 AND completed_at IS NULL
          RETURNING sprint_id, workspace_id, clerk_user_id`,
@@ -117,6 +120,8 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
         const sprintName = sprintResult.rows[0]?.name ?? 'sprint';
 
         const { createNotification } = await import('../services/notificationService.js');
+        const { getMemberDisplayName } = await import('../services/workspaceService.js');
+        const memberName = await getMemberDisplayName(row.workspace_id, row.clerk_user_id).catch(() => 'A teammate');
         const admins = await pool.query<{ clerk_user_id: string }>(
           "SELECT clerk_user_id FROM workspace_members WHERE workspace_id = $1 AND role IN ('org:owner','org:admin')",
           [row.workspace_id],
@@ -126,14 +131,14 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
             workspaceId: row.workspace_id,
             recipientClerkId: admin.clerk_user_id,
             type: 'automation',
-            title: `A teammate completed their "${sprintName}" quest`,
+            title: `${memberName} completed their "${sprintName}" quest`,
             link: '/sprints',
           }).catch(() => {});
         }
         console.info('[ninja-task-webhook] quest_complete synced', { questId, sprintId: row.sprint_id });
       }).catch((err: unknown) => {
         console.error('[ninja-task-webhook] quest_complete DB update failed', err);
-      });
+      }));
 
       res.json({ ok: true });
       return;
@@ -153,7 +158,7 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
 
     // Respond immediately so ninja-task doesn't time out; the actual sync (including every
     // completion side effect) runs fire-and-forget below.
-    (async () => {
+    void trackBackground((async () => {
       const found = await pool.query<{ id: string; workspace_id: string; status: string }>(
         `SELECT id, workspace_id, status FROM tasks
          WHERE external_ninja_task_id = $1 AND deleted_at IS NULL`,
@@ -185,7 +190,7 @@ export function createNinjaTaskWebhookRouter(pool: Pool) {
       console.info('[ninja-task-webhook] task_complete synced', { ninjaTaskId, taskId: task.id });
     })().catch((err: unknown) => {
       console.error('[ninja-task-webhook] task_complete sync failed', err);
-    });
+    }));
 
     res.json({ ok: true });
   });

@@ -13,16 +13,21 @@ export interface Notification {
   created_at: string;
 }
 
-export function useNotifications() {
+/**
+ * Recent notifications. Not polled: only the (cheap) unread count polls; the list is fetched when
+ * the bell's popover opens (`enabled`) and refreshed whenever the unread count changes.
+ */
+export function useNotifications(options: { enabled?: boolean } = {}) {
   const { apiRequest } = useApiClient();
   return useQuery<Notification[]>({
     queryKey: ['/api/notifications'],
     queryFn: () => apiRequest('GET', '/api/notifications'),
+    enabled: options.enabled ?? true,
     staleTime: 30_000,
-    refetchInterval: 60_000, // poll every minute
   });
 }
 
+/** The single notifications poll (every minute). */
 export function useUnreadCount() {
   const { apiRequest } = useApiClient();
   return useQuery<{ count: number }>({

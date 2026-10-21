@@ -1,9 +1,10 @@
+import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
+import { useQueryClient } from '@tanstack/react-query';
 import { safeFromNow } from '@/lib/utils';
 import { Bell, CheckCheck, MessageSquare, UserCheck, ClipboardList, AtSign, CalendarClock, Zap, Target, Clock, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
 import {
@@ -33,16 +34,17 @@ function NotifItem({
   onRead,
 }: {
   notif: Notification;
-  onRead: (id: string, link: string | null) => void;
+  onRead: (notif: Notification) => void;
 }) {
   const unread = !notif.read_at;
   return (
     <button
+      type="button"
       className={cn(
-        'w-full text-left px-4 py-3 flex items-start gap-3 hover:bg-muted/50 transition-colors',
+        'w-full text-left px-4 py-3 flex items-start gap-3 hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none transition-colors',
         unread && 'bg-primary/5',
       )}
-      onClick={() => onRead(notif.id, notif.link)}
+      onClick={() => onRead(notif)}
     >
       <div className="mt-0.5 h-6 w-6 rounded-full bg-muted flex items-center justify-center shrink-0">
         <NotifIcon type={notif.type} />
@@ -67,22 +69,43 @@ function NotifItem({
 
 export function NotificationBell() {
   const [, navigate] = useLocation();
-  const { data: notifications = [] } = useNotifications();
+  const [open, setOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const { data: notifications = [], isError, refetch } = useNotifications({ enabled: open });
   const { data: countData } = useUnreadCount();
   const { mutate: markRead } = useMarkRead();
   const { mutate: markAllRead } = useMarkAllRead();
 
   const unread = countData?.count ?? 0;
 
-  const handleRead = (id: string, link: string | null) => {
-    markRead(id);
-    if (link) navigate(link);
+  // The unread count is the only poll; when it changes, the cached list is out of date.
+  const lastCount = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (countData === undefined) return;
+    if (lastCount.current !== undefined && lastCount.current !== countData.count) {
+      queryClient.invalidateQueries({ queryKey: ['/api/notifications'], exact: true });
+    }
+    lastCount.current = countData.count;
+  }, [countData, queryClient]);
+
+  const handleRead = (notif: Notification) => {
+    if (!notif.read_at) markRead(notif.id);
+    // Only in-app paths; close the popover so it doesn't sit over the page we navigate to.
+    if (notif.link && notif.link.startsWith('/') && !notif.link.startsWith('//')) {
+      setOpen(false);
+      navigate(notif.link);
+    }
   };
 
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative h-8 w-8">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="relative h-8 w-8"
+          aria-label={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
+        >
           <Bell className="h-4 w-4" />
           {unread > 0 && (
             <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-primary text-[10px] font-bold text-primary-foreground flex items-center justify-center">
@@ -109,23 +132,29 @@ export function NotificationBell() {
           )}
         </div>
 
-        {/* List */}
-        <ScrollArea className="max-h-[360px]">
-          {notifications.length === 0 ? (
+        {/* List - a plain overflow container: Radix ScrollArea's viewport is h-full, so with only
+            a max-height on the root it never scrolled and items past ~5 were unreachable. */}
+        <div className="max-h-[360px] overflow-y-auto overscroll-contain">
+          {isError && notifications.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-10 text-center px-4 gap-2">
+              <p className="text-sm text-muted-foreground">Couldn't load notifications.</p>
+              <Button variant="outline" size="sm" onClick={() => refetch()}>Retry</Button>
+            </div>
+          ) : notifications.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-10 text-center px-4">
               <Bell className="h-8 w-8 text-muted-foreground/40 mb-2" />
               <p className="text-sm text-muted-foreground">No notifications yet</p>
             </div>
           ) : (
             <div className="divide-y">
-              {notifications.map((n, i) => (
+              {notifications.map((n) => (
                 <div key={n.id}>
                   <NotifItem notif={n} onRead={handleRead} />
                 </div>
               ))}
             </div>
           )}
-        </ScrollArea>
+        </div>
 
         {notifications.length > 0 && (
           <>

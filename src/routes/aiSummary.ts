@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireWorkspaceAllowViewerWrites } from '../middleware/requireWorkspace.js';
+import { getClientIp, ipBucket } from '../lib/clientIp.js';
 import { pool } from '../config/db.js';
 
 const router = Router({ mergeParams: true });
-router.use(requireWorkspace);
+// Generating a summary is a read (POST only because it is an expensive, non-cacheable call),
+// so viewers are allowed through the central read-only block.
+router.use(requireWorkspaceAllowViewerWrites);
 
 // OLLAMA_URL empty/unset => AI summaries are disabled (503). No hard-coded fallback host:
 // a baked-in private IP silently sent workspace data to whatever answered at that address.
@@ -29,7 +32,7 @@ const aiLimiter = rateLimit({
   max: 5,
   // Per user, not per IP: users behind one office NAT shouldn't share a 5/min budget, and one
   // user can't dodge the limit by switching networks. Always authenticated on this router.
-  keyGenerator: (req) => `ai-summary:${req.auth?.userId ?? req.ip}`,
+  keyGenerator: (req) => `ai-summary:${req.auth?.userId ?? ipBucket(getClientIp(req))}`,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many AI summary requests, please try again later' },

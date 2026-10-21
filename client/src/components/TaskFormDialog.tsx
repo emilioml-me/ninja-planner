@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { safeFromNow } from '@/lib/utils';
@@ -28,9 +28,9 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useApiClient } from '@/lib/api';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useIsAdmin, useIsViewer } from '@/hooks/use-is-admin';
 import { toast } from '@/hooks/use-toast';
-import { type WorkspaceMember } from '@/hooks/use-members';
+import { useMembers, type WorkspaceMember } from '@/hooks/use-members';
 import { useTaskComments, useAddComment, useDeleteComment } from '@/hooks/use-notifications';
 import { Send, Trash2, MessageSquare, Plus, CheckSquare2, Square, GitBranch, ArrowRight, ArrowLeft, Clock, Eye, EyeOff, Timer, Paperclip, FileText, Download, Image as ImageIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -44,16 +44,68 @@ interface TaskActivity {
   created_at: string;
 }
 
-function formatAction(action: string, payload: Record<string, unknown> | null): string {
+/** Same caps as the server's task schema (tasks.ts). */
+const MAX_CHECKLIST_ITEMS = 50;
+const MAX_DESCRIPTION = 10000;
+/** Server cap for a single time log (time_logs minutes max). */
+const MAX_LOG_MINUTES = 14400;
+
+/** crypto.randomUUID only exists in secure contexts (https / localhost), not over plain-http LAN. */
+function newId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    try { return crypto.randomUUID(); } catch { /* insecure context */ }
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+const STATUS_TEXT: Record<string, string> = {
+  todo: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked',
+};
+
+const FIELD_LABELS: Record<string, string> = {
+  title: 'title', description: 'description', status: 'status', priority: 'priority',
+  due_date: 'due date', start_date: 'start date', tags: 'tags', assignee_clerk_id: 'assignee',
+  sprint_id: 'sprint', epic_id: 'epic', recurrence_rule: 'recurrence', story_points: 'story points',
+  checklist: 'checklist', position: 'position',
+};
+
+/**
+ * Human text for one activity row. `payload` holds the fields that were sent/changed; values are
+ * shown for short scalar fields, names for the assignee, and long/complex fields by name only.
+ */
+function formatAction(
+  action: string,
+  payload: Record<string, unknown> | null,
+  nameOf: (clerkId: string) => string,
+): string {
+  const describe = (key: string, value: unknown): string => {
+    const label = FIELD_LABELS[key] ?? key.replace(/_/g, ' ');
+    if (value === null || value === undefined || value === '') {
+      return `${label} to none`;
+    }
+    switch (key) {
+      case 'status': return `status to ${STATUS_TEXT[String(value)] ?? String(value)}`;
+      case 'priority': return `priority to ${String(value)}`;
+      case 'assignee_clerk_id': return `assignee to ${nameOf(String(value))}`;
+      case 'due_date':
+      case 'start_date': return `${label} to ${String(value).slice(0, 10)}`;
+      case 'story_points':
+      case 'recurrence_rule': return `${label} to ${String(value)}`;
+      default: return label;
+    }
+  };
+
   switch (action) {
     case 'created': return 'Created this task';
     case 'moved': {
       const status = payload?.status as string | undefined;
-      return status ? `Moved to ${status.replace('_', ' ')}` : 'Moved';
+      return status ? `Moved to ${STATUS_TEXT[status] ?? status}` : 'Reordered';
     }
     case 'updated': {
-      const keys = payload ? Object.keys(payload).join(', ') : '';
-      return keys ? `Updated ${keys}` : 'Updated';
+      const parts = payload
+        ? Object.entries(payload).filter(([k]) => k !== 'position').map(([k, v]) => describe(k, v))
+        : [];
+      return parts.length > 0 ? `Changed ${parts.join(', ')}` : 'Updated';
     }
     case 'deleted': return 'Deleted';
     default: return action;
@@ -91,13 +143,30 @@ interface TaskDependencies { blocked_by: DependencyTask[]; blocks: DependencyTas
 interface Epic { id: string; title: string; color: string; status: string; }
 interface Sprint { id: string; name: string; status: string; }
 
+// Server bounds (tasks.ts): dates 1900-01-01..2199-12-31, at most 50 tags of 200 chars.
+const MIN_DATE = '1900-01-01';
+const MAX_DATE = '2199-12-31';
+const MAX_TAGS = 50;
+const MAX_TAG_LENGTH = 200;
+
+const dateInRange = z.string().optional().refine(
+  (v) => !v || (/^\d{4}-\d{2}-\d{2}$/.test(v) && v >= MIN_DATE && v <= MAX_DATE),
+  { message: 'Date must be between 1900-01-01 and 2199-12-31' },
+);
+
 const taskFormSchema = z.object({
   title: z.string().min(1, 'Title is required').max(500),
-  description: z.string().optional(),
+  description: z.string().max(MAX_DESCRIPTION, `Description must be at most ${MAX_DESCRIPTION} characters`).optional(),
   status: z.enum(['todo', 'in_progress', 'done', 'blocked']),
   priority: z.enum(['low', 'medium', 'high', 'urgent']),
-  due_date: z.string().optional(),
-  tags: z.string().optional(),
+  due_date: dateInRange,
+  tags: z.string().optional().refine(
+    (v) => {
+      const tags = (v ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+      return tags.length <= MAX_TAGS && tags.every((t) => t.length <= MAX_TAG_LENGTH);
+    },
+    { message: `At most ${MAX_TAGS} tags, each up to ${MAX_TAG_LENGTH} characters` },
+  ),
   assignee_clerk_id: z.string().optional(),
   recurrence_rule: z.enum(['daily', 'weekly', 'biweekly', 'monthly', '']).optional(),
   epic_id: z.string().optional(),
@@ -110,15 +179,66 @@ const taskFormSchema = z.object({
     (v) => !v || (/^\d+$/.test(v) && Number(v) <= 144),
     { message: 'Must be a whole number from 0 to 144' },
   ),
-  start_date: z.string().optional(),
+  start_date: dateInRange,
 });
 
 type TaskFormData = z.infer<typeof taskFormSchema>;
 
+type RecurrenceValue = '' | 'daily' | 'weekly' | 'biweekly' | 'monthly';
+
+function taskToFormValues(task: Task | null, defaultStatus: Task['status']): TaskFormData {
+  return {
+    title: task?.title ?? '',
+    description: task?.description ?? '',
+    status: task?.status ?? defaultStatus,
+    priority: task?.priority ?? 'medium',
+    due_date: task?.due_date ? task.due_date.substring(0, 10) : '',
+    tags: task?.tags?.join(', ') ?? '',
+    assignee_clerk_id: task?.assignee_clerk_id ?? '',
+    recurrence_rule: (task?.recurrence_rule ?? '') as RecurrenceValue,
+    epic_id: task?.epic_id ?? '',
+    sprint_id: task?.sprint_id ?? '',
+    story_points: task?.story_points != null ? String(task.story_points) : '',
+    start_date: task?.start_date ? task.start_date.substring(0, 10) : '',
+  };
+}
+
+function sameFormValues(a: Partial<TaskFormData>, b: TaskFormData): boolean {
+  return (Object.keys(b) as (keyof TaskFormData)[]).every((k) => (a[k] ?? '') === (b[k] ?? ''));
+}
+
+function formToPayload(data: TaskFormData, checklist: ChecklistItem[]) {
+  const tags = data.tags
+    ? data.tags.split(',').map((t) => t.trim()).filter(Boolean)
+    : [];
+  const sp = data.story_points ? parseInt(data.story_points, 10) : null;
+  return {
+    title: data.title,
+    description: data.description || '',
+    status: data.status,
+    priority: data.priority,
+    due_date: data.due_date ? data.due_date : null,
+    tags,
+    assignee_clerk_id: data.assignee_clerk_id || null,
+    recurrence_rule: (data.recurrence_rule || null) as Task['recurrence_rule'],
+    epic_id: data.epic_id || null,
+    sprint_id: data.sprint_id || null,
+    story_points: sp != null && !isNaN(sp) ? sp : null,
+    start_date: data.start_date ? data.start_date : null,
+    checklist,
+  } satisfies Partial<Task> & { title: string };
+}
+
 interface TaskFormDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (data: Partial<Task> & { title: string }) => void;
+  /**
+   * Create mode: the full task (title always present). Edit mode: ONLY the fields the user
+   * changed relative to the task the form was seeded from (title present only if changed), so a
+   * PATCH never overwrites teammates' concurrent edits to other fields. When nothing changed the
+   * dialog closes itself without calling onSubmit.
+   */
+  onSubmit: (data: Partial<Task>) => void;
   task?: Task | null;
   defaultStatus?: Task['status'];
   isPending?: boolean;
@@ -137,11 +257,12 @@ function ChecklistTab({
 }) {
   const [newText, setNewText] = useState('');
   const doneCount = items.filter((i) => i.done).length;
+  const atCap = items.length >= MAX_CHECKLIST_ITEMS;
 
   const addItem = () => {
     const text = newText.trim();
-    if (!text) return;
-    onChange([...items, { id: crypto.randomUUID(), text, done: false }]);
+    if (!text || atCap) return;
+    onChange([...items, { id: newId(), text, done: false }]);
     setNewText('');
   };
 
@@ -209,14 +330,15 @@ function ChecklistTab({
 
       <div className="flex gap-2">
         <Input
-          placeholder="Add an item…"
+          placeholder={atCap ? `Limit of ${MAX_CHECKLIST_ITEMS} items reached` : 'Add an item…'}
           value={newText}
           onChange={(e) => setNewText(e.target.value)}
           onKeyDown={handleKeyDown}
           className="flex-1 h-8 text-sm"
           maxLength={500}
+          disabled={atCap}
         />
-        <Button type="button" size="sm" variant="outline" onClick={addItem} disabled={!newText.trim()}>
+        <Button type="button" size="sm" variant="outline" onClick={addItem} disabled={!newText.trim() || atCap}>
           <Plus className="h-3.5 w-3.5 mr-1" /> Add
         </Button>
       </div>
@@ -506,15 +628,17 @@ function DependenciesTab({ task, allTasks }: { task: Task; allTasks: Task[] }) {
 interface Attachment {
   id: string;
   file_name: string;
-  file_size: number;
+  // BIGINT column: arrives as a string.
+  file_size: string | number;
   mime_type: string;
   uploaded_by: string;
   uploader_name: string | null;
   created_at: string;
 }
 
+// Must match ALLOWED_MIME in src/routes/attachments.ts (SVG is rejected there: stored XSS risk).
 const ALLOWED_TYPES = [
-  'image/jpeg','image/png','image/gif','image/webp','image/svg+xml',
+  'image/jpeg','image/png','image/gif','image/webp',
   'application/pdf',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -526,7 +650,31 @@ const ALLOWED_TYPES = [
   'audio/mpeg','audio/wav',
 ];
 
-function fmtBytes(b: number): string {
+/**
+ * Browsers often report an empty (or OS-specific) type for .md / .csv / .zip etc. Fall back to
+ * the extension so those uploads aren't rejected client-side (the server re-checks the type).
+ */
+const MIME_BY_EXTENSION: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  txt: 'text/plain', csv: 'text/csv', md: 'text/markdown', markdown: 'text/markdown',
+  zip: 'application/zip',
+  mp4: 'video/mp4', webm: 'video/webm',
+  mp3: 'audio/mpeg', wav: 'audio/wav',
+};
+
+function resolveMimeType(file: File): string | null {
+  if (ALLOWED_TYPES.includes(file.type)) return file.type;
+  const ext = file.name.includes('.') ? file.name.split('.').pop()!.toLowerCase() : '';
+  return MIME_BY_EXTENSION[ext] ?? null;
+}
+
+function fmtBytes(raw: string | number): string {
+  const b = Number(raw) || 0;
   if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
   if (b >= 1024) return `${(b / 1024).toFixed(0)} KB`;
   return `${b} B`;
@@ -534,6 +682,7 @@ function fmtBytes(b: number): string {
 
 function AttachmentsTab({ task }: { task: Task }) {
   const { userId } = useAuth();
+  const isAdmin = useIsAdmin();
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -564,28 +713,30 @@ function AttachmentsTab({ task }: { task: Task }) {
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 50 * 1024 * 1024) { setUploadErr('File too large (max 50 MB)'); return; }
-    if (!ALLOWED_TYPES.includes(file.type)) { setUploadErr('File type not allowed'); return; }
+    const resetInput = () => { if (fileRef.current) fileRef.current.value = ''; };
+    if (file.size > 50 * 1024 * 1024) { setUploadErr('File too large (max 50 MB)'); resetInput(); return; }
+    const mimeType = resolveMimeType(file);
+    if (!mimeType) { setUploadErr('File type not allowed'); resetInput(); return; }
 
     setUploading(true); setUploadErr(null);
     try {
       // Step 1: get presigned upload URL
       const { upload_url, r2_key } = await apiRequest<{ upload_url: string; r2_key: string }>(
         'POST', `/api/tasks/${task.id}/attachments/presign`,
-        { file_name: file.name, file_size: file.size, mime_type: file.type },
+        { file_name: file.name, file_size: file.size, mime_type: mimeType },
       );
 
       // Step 2: upload directly to R2
       const putRes = await fetch(upload_url, {
         method: 'PUT',
-        headers: { 'Content-Type': file.type },
+        headers: { 'Content-Type': mimeType },
         body: file,
       });
       if (!putRes.ok) throw new Error('Upload to storage failed');
 
       // Step 3: confirm metadata
       await apiRequest('POST', `/api/tasks/${task.id}/attachments`, {
-        file_name: file.name, file_size: file.size, mime_type: file.type, r2_key,
+        file_name: file.name, file_size: file.size, mime_type: mimeType, r2_key,
       });
       qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'attachments'] });
     } catch (err) {
@@ -614,7 +765,7 @@ function AttachmentsTab({ task }: { task: Task }) {
           ref={fileRef}
           type="file"
           className="hidden"
-          accept={ALLOWED_TYPES.join(',')}
+          accept={[...ALLOWED_TYPES, ...Object.keys(MIME_BY_EXTENSION).map((ext) => `.${ext}`)].join(',')}
           onChange={handleFile}
           disabled={uploading}
         />
@@ -633,21 +784,23 @@ function AttachmentsTab({ task }: { task: Task }) {
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium truncate">{att.file_name}</p>
                 <p className="text-[10px] text-muted-foreground">
-                  {fmtBytes(att.file_size)} · {att.uploader_name ?? 'you'}
+                  {fmtBytes(att.file_size)} · {att.uploaded_by === userId ? 'you' : (att.uploader_name ?? 'former member')}
                 </p>
               </div>
               <Button
                 type="button" variant="ghost" size="icon"
-                className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0"
+                className="h-6 w-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 shrink-0"
                 onClick={() => handleDownload(att)}
                 title="Download"
               >
                 <Download className="h-3 w-3" />
               </Button>
-              {att.uploaded_by === userId && (
+              {(att.uploaded_by === userId || isAdmin) && (
                 <Button
                   type="button" variant="ghost" size="icon"
-                  className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0"
+                  className="h-6 w-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 shrink-0"
+                  title="Delete"
+                  disabled={deleteMut.isPending}
                   onClick={() => deleteMut.mutate(att.id)}
                 >
                   <Trash2 className="h-3 w-3 text-muted-foreground" />
@@ -670,9 +823,50 @@ interface TimeLog {
   minutes: number;
   note: string | null;
   billable: boolean;
-  hourly_rate: number | null;
+  // NUMERIC column: arrives as a string. The server may omit/null it for non-admins.
+  hourly_rate?: string | number | null;
   budget_entry_id: string | null;
   logged_at: string;
+}
+
+/** Admin-only inline editor for a time log's hourly rate (PATCH .../time-logs/:id). */
+function RateEditor({
+  log, onSave, pending,
+}: {
+  log: TimeLog;
+  onSave: (rate: number | null) => void;
+  pending: boolean;
+}) {
+  const current = log.hourly_rate != null ? String(Number(log.hourly_rate)) : '';
+  const [value, setValue] = useState(current);
+  useEffect(() => { setValue(current); }, [current]);
+
+  const commit = () => {
+    const trimmed = value.trim();
+    if (trimmed === current) return;
+    if (trimmed === '') { onSave(null); return; }
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n < 0 || n > 10000) {
+      toast({ title: 'Hourly rate must be between 0 and 10000', variant: 'destructive' });
+      setValue(current);
+      return;
+    }
+    onSave(n);
+  };
+
+  return (
+    <Input
+      type="number" min={0} max={10000} step="0.01" placeholder="Rate"
+      title="Hourly rate ($/h)"
+      aria-label="Hourly rate"
+      value={value}
+      disabled={pending}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+      className="h-6 w-20 text-[11px] shrink-0"
+    />
+  );
 }
 
 interface BudgetEntryOption {
@@ -721,6 +915,17 @@ function TimeTab({ task }: { task: Task }) {
     queryFn: () => apiRequest('GET', '/api/budgets/entries'),
   });
 
+  const rateMut = useMutation({
+    mutationFn: ({ logId, hourlyRate }: { logId: string; hourlyRate: number | null }) =>
+      apiRequest('PATCH', `/api/tasks/${task.id}/time-logs/${logId}`, { hourly_rate: hourlyRate }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/api/tasks', task.id, 'time-logs'] });
+      // Rates feed budget time_cost and analytics billable totals.
+      qc.invalidateQueries({ queryKey: ['/api/budgets'] });
+    },
+    onError: (err: Error) => toast({ title: 'Failed to update hourly rate', description: err.message, variant: 'destructive' }),
+  });
+
   const linkBudgetMut = useMutation({
     mutationFn: ({ logId, budgetEntryId }: { logId: string; budgetEntryId: string | null }) =>
       apiRequest('PATCH', `/api/tasks/${task.id}/time-logs/${logId}/budget-entry`, { budget_entry_id: budgetEntryId }),
@@ -746,10 +951,14 @@ function TimeTab({ task }: { task: Task }) {
       : !Number.isInteger(parsedMins) || parsedMins < 0 || parsedMins > 59
         ? 'Minutes must be a whole number from 0 to 59'
         : null;
-  const totalEntered = timeError ? 0 : parsedHours * 60 + parsedMins;
+  const rawTotal = timeError ? 0 : parsedHours * 60 + parsedMins;
+  const capError = !timeError && rawTotal > MAX_LOG_MINUTES
+    ? `A single entry can be at most ${MAX_LOG_MINUTES / 60} hours`
+    : null;
+  const totalEntered = capError ? 0 : rawTotal;
 
   const handleLog = () => {
-    if (timeError) return;
+    if (timeError || capError) return;
     const total = totalEntered;
     if (total < 1) return;
     // Only admins may set a custom hourly rate (the server 403s a non-null rate from members,
@@ -799,12 +1008,12 @@ function TimeTab({ task }: { task: Task }) {
           />
           <Button
             type="button" size="sm" onClick={handleLog}
-            disabled={addMut.isPending || !!timeError || totalEntered < 1}
+            disabled={addMut.isPending || !!timeError || !!capError || totalEntered < 1}
           >
             <Plus className="h-3.5 w-3.5 mr-1" /> Log
           </Button>
         </div>
-        {timeError && <p className="text-xs text-destructive">{timeError}</p>}
+        {(timeError || capError) && <p className="text-xs text-destructive">{timeError ?? capError}</p>}
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <input
@@ -843,10 +1052,17 @@ function TimeTab({ task }: { task: Task }) {
                   {' '}· {isOwn ? 'you' : name}
                   {log.billable && (
                     <span className="text-green-600 ml-1">
-                      · billable{log.hourly_rate ? ` $${log.hourly_rate}/h` : ''}
+                      · billable{!isAdmin && log.hourly_rate != null ? ` $${Number(log.hourly_rate)}/h` : ''}
                     </span>
                   )}
                 </span>
+                {log.billable && isAdmin && (
+                  <RateEditor
+                    log={log}
+                    pending={rateMut.isPending}
+                    onSave={(hourlyRate) => rateMut.mutate({ logId: log.id, hourlyRate })}
+                  />
+                )}
                 {log.billable && (isOwn || isAdmin) && (
                   <Select
                     value={log.budget_entry_id ?? NO_BUDGET_ENTRY}
@@ -863,10 +1079,12 @@ function TimeTab({ task }: { task: Task }) {
                     </SelectContent>
                   </Select>
                 )}
-                {isOwn && (
+                {(isOwn || isAdmin) && (
                   <Button
                     type="button" variant="ghost" size="icon"
-                    className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                    className="h-5 w-5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shrink-0"
+                    title="Delete"
+                    disabled={deleteMut.isPending}
                     onClick={() => deleteMut.mutate(log.id)}
                   >
                     <Trash2 className="h-3 w-3 text-muted-foreground" />
@@ -972,72 +1190,109 @@ export function TaskFormDialog({
 
   const activity = taskDetail?.activity ?? [];
 
+  const isViewer = useIsViewer();
+  const { lookup: memberLookup } = useMembers();
+  const memberName = useCallback(
+    (clerkId: string) => memberLookup.get(clerkId)?.display_name ?? 'Former member',
+    [memberLookup],
+  );
+
   const form = useForm<TaskFormData>({
     resolver: zodResolver(taskFormSchema),
-    defaultValues: {
-      title: '',
-      description: '',
-      status: defaultStatus,
-      priority: 'medium',
-      due_date: '',
-      tags: '',
-      assignee_clerk_id: '',
-      recurrence_rule: '',
-      epic_id: '',
-      sprint_id: '',
-      story_points: '',
-      start_date: '',
-    },
+    defaultValues: taskToFormValues(null, defaultStatus),
   });
+
+  // The task the form (and checklist) were last seeded from. Edit-mode PATCHes send only fields
+  // that differ from this baseline, so fields the user didn't touch never overwrite teammates'
+  // concurrent edits.
+  const baselineRef = useRef<Task | null>(null);
+  const checklistTouchedRef = useRef(false);
+
+  // Tabs whose panels have been opened at least once in this dialog session. Panels are mounted
+  // on first open (so their queries don't all fire up front) and then kept mounted, hidden, so
+  // in-progress input (time entry, comment draft, custom fields) survives tab switches.
+  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set(['details']));
+  const changeTab = (tab: string) => {
+    setActiveTab(tab);
+    setVisitedTabs((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
+  };
+
+  // Custom fields save registered by CustomFieldsSection; awaited inside "Update Task".
+  const customSaveRef = useRef<(() => Promise<void>) | null>(null);
+  const registerCustomSave = useCallback((save: (() => Promise<void>) | null) => {
+    customSaveRef.current = save;
+  }, []);
+  const [savingCustom, setSavingCustom] = useState(false);
 
   useEffect(() => {
     if (open) {
-      form.reset({
-        title: task?.title ?? '',
-        description: task?.description ?? '',
-        status: task?.status ?? defaultStatus,
-        priority: task?.priority ?? 'medium',
-        due_date: task?.due_date ? task.due_date.substring(0, 10) : '',
-        tags: task?.tags?.join(', ') ?? '',
-        assignee_clerk_id: task?.assignee_clerk_id ?? '',
-        recurrence_rule: (task?.recurrence_rule ?? '') as '' | 'daily' | 'weekly' | 'biweekly' | 'monthly',
-        epic_id: task?.epic_id ?? '',
-        sprint_id: task?.sprint_id ?? '',
-        story_points: task?.story_points != null ? String(task.story_points) : '',
-        start_date: task?.start_date ? task.start_date.substring(0, 10) : '',
-      });
+      form.reset(taskToFormValues(task ?? null, defaultStatus));
       setChecklist(task?.checklist ?? []);
+      baselineRef.current = task ?? null;
+      checklistTouchedRef.current = false;
       setActiveTab('details');
+      setVisitedTabs(new Set(['details']));
     }
   }, [open, task, defaultStatus, form]);
 
+  // The `task` prop is a list snapshot (up to 30s stale). When the fresh GET /api/tasks/:id
+  // result arrives, re-seed from it -- but only while the user hasn't edited anything yet, so
+  // their input is never replaced.
+  const freshTask = taskDetail?.task;
+  useEffect(() => {
+    if (!open || !task?.id || !freshTask || freshTask.id !== task.id) return;
+    const baseline = baselineRef.current;
+    const untouched = !checklistTouchedRef.current
+      && sameFormValues(form.getValues(), taskToFormValues(baseline, defaultStatus));
+    if (!untouched) return;
+    form.reset(taskToFormValues(freshTask, defaultStatus));
+    setChecklist(freshTask.checklist ?? []);
+    baselineRef.current = freshTask;
+  }, [open, task?.id, freshTask, defaultStatus, form]);
+
+  const handleChecklistChange = (items: ChecklistItem[]) => {
+    checklistTouchedRef.current = true;
+    setChecklist(items);
+  };
+
   const handleSubmit = (data: TaskFormData) => {
-    const tags = data.tags
-      ? data.tags.split(',').map((t) => t.trim()).filter(Boolean)
-      : [];
-    const sp = data.story_points ? parseInt(data.story_points, 10) : null;
-    onSubmit({
-      title: data.title,
-      description: data.description || '',
-      status: data.status,
-      priority: data.priority,
-      due_date: data.due_date ? data.due_date : null,
-      tags,
-      assignee_clerk_id: data.assignee_clerk_id || null,
-      recurrence_rule: data.recurrence_rule || null,
-      epic_id: data.epic_id || null,
-      sprint_id: data.sprint_id || null,
-      story_points: sp != null && !isNaN(sp) ? sp : null,
-      start_date: data.start_date ? data.start_date : null,
-      checklist,
-    });
+    onSubmit(formToPayload(data, checklist));
+  };
+
+  const handleEditSubmit = async (data: TaskFormData) => {
+    // Custom fields first: if they fail, nothing else is saved and the dialog stays open.
+    if (customSaveRef.current) {
+      setSavingCustom(true);
+      try {
+        await customSaveRef.current();
+      } catch (err) {
+        toast({ title: 'Failed to save custom fields', description: (err as Error).message, variant: 'destructive' });
+        changeTab('details');
+        return;
+      } finally {
+        setSavingCustom(false);
+      }
+    }
+    const next = formToPayload(data, checklist);
+    const base = formToPayload(taskToFormValues(baselineRef.current, defaultStatus), baselineRef.current?.checklist ?? []);
+    const changed: Partial<Task> = {};
+    for (const key of Object.keys(next) as (keyof typeof next)[]) {
+      if (JSON.stringify(next[key]) !== JSON.stringify(base[key])) {
+        (changed as Record<string, unknown>)[key] = next[key];
+      }
+    }
+    if (Object.keys(changed).length === 0) {
+      onOpenChange(false);
+      return;
+    }
+    onSubmit(changed);
   };
 
   // The footer "Update Task" button sits outside the details TabsContent, so a `form=` submit
   // did nothing when another tab was active (the <form> isn't mounted then). Submit via
   // react-hook-form directly and jump back to the details tab if validation fails so the
   // field errors are visible.
-  const submitEdit = form.handleSubmit(handleSubmit, () => setActiveTab('details'));
+  const submitEdit = form.handleSubmit(handleEditSubmit, () => changeTab('details'));
 
   // ── Edit mode: tabbed layout ────────────────────────────────────────────────
   // Keyed on task.id, not the task object: "From template" pre-fills pass a task with id ''
@@ -1053,7 +1308,7 @@ export function TaskFormDialog({
 
           <WatchersBar task={task} />
 
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-1 flex flex-col flex-1 min-h-0">
+          <Tabs value={activeTab} onValueChange={changeTab} className="mt-1 flex flex-col flex-1 min-h-0">
             <TabsList className="w-full shrink-0">
               <TabsTrigger value="details" className="flex-1">Details</TabsTrigger>
               <TabsTrigger value="checklist" className="flex-1 gap-1.5">
@@ -1081,7 +1336,10 @@ export function TaskFormDialog({
 
             <div className="flex-1 overflow-y-auto min-h-0 pr-1">
             {/* ── Details tab ─────────────────────────────────────────────── */}
-            <TabsContent value="details" className="mt-4">
+            {/* forceMount + data-[state=inactive]:hidden on every panel with local input: Radix
+                unmounts inactive panels by default (losing drafts), and a force-mounted panel is
+                only hidden by this class. Panels other than details mount on first open. */}
+            <TabsContent value="details" className="mt-4 data-[state=inactive]:hidden" forceMount>
               <Form {...form}>
                 <form id="task-edit-form" onSubmit={(e) => { e.preventDefault(); void submitEdit(); }} className="space-y-4 pb-2">
                   <FormField control={form.control} name="title" render={({ field }) => (
@@ -1138,7 +1396,7 @@ export function TaskFormDialog({
                     <FormField control={form.control} name="start_date" render={({ field }) => (
                       <FormItem>
                         <FormLabel>Start Date</FormLabel>
-                        <FormControl><Input type="date" {...field} /></FormControl>
+                        <FormControl><Input type="date" min={MIN_DATE} max={MAX_DATE} {...field} /></FormControl>
                         <FormMessage />
                       </FormItem>
                     )} />
@@ -1146,7 +1404,7 @@ export function TaskFormDialog({
                     <FormField control={form.control} name="due_date" render={({ field }) => (
                       <FormItem>
                         <FormLabel>Due Date</FormLabel>
-                        <FormControl><Input type="date" {...field} /></FormControl>
+                        <FormControl><Input type="date" min={MIN_DATE} max={MAX_DATE} {...field} /></FormControl>
                         <FormMessage />
                       </FormItem>
                     )} />
@@ -1258,12 +1516,12 @@ export function TaskFormDialog({
                 </form>
               </Form>
 
-              <CustomFieldsSection entityType="task" entityId={task.id} />
+              <CustomFieldsSection entityType="task" entityId={task.id} registerSave={registerCustomSave} />
             </TabsContent>
 
             {/* ── Checklist tab ────────────────────────────────────────────── */}
             <TabsContent value="checklist" className="mt-4">
-              <ChecklistTab items={checklist} onChange={setChecklist} />
+              <ChecklistTab items={checklist} onChange={handleChecklistChange} />
             </TabsContent>
 
             {/* ── Files tab ───────────────────────────────────────────────── */}
@@ -1272,23 +1530,18 @@ export function TaskFormDialog({
             </TabsContent>
 
             {/* ── Time tab ────────────────────────────────────────────────── */}
-            {/* forceMount: TimeTab/DependenciesTab/CommentsTab keep in-progress input in local
-                state. Without forceMount, Radix unmounts inactive TabsContent panels by default,
-                so switching to another tab and back (e.g. to check the checklist mid-comment)
-                silently discarded whatever the user had typed — Radix keeps the panel in the DOM
-                and toggles the `hidden` attribute instead. */}
-            <TabsContent value="time" className="mt-4" forceMount>
-              <TimeTab task={task} />
+            <TabsContent value="time" className="mt-4 data-[state=inactive]:hidden" forceMount>
+              {visitedTabs.has('time') && <TimeTab task={task} />}
             </TabsContent>
 
             {/* ── Dependencies tab ─────────────────────────────────────────── */}
-            <TabsContent value="deps" className="mt-4" forceMount>
-              <DependenciesTab task={task} allTasks={allTasks} />
+            <TabsContent value="deps" className="mt-4 data-[state=inactive]:hidden" forceMount>
+              {visitedTabs.has('deps') && <DependenciesTab task={task} allTasks={allTasks} />}
             </TabsContent>
 
             {/* ── Comments tab ────────────────────────────────────────────── */}
-            <TabsContent value="comments" className="mt-4" forceMount>
-              <CommentsTab task={task} members={members} />
+            <TabsContent value="comments" className="mt-4 data-[state=inactive]:hidden" forceMount>
+              {visitedTabs.has('comments') && <CommentsTab task={task} members={members} />}
             </TabsContent>
 
             {/* ── Activity tab ────────────────────────────────────────────── */}
@@ -1298,10 +1551,15 @@ export function TaskFormDialog({
                   {[...activity].reverse().map((entry) => (
                     <div key={entry.id} className="flex items-start gap-2 text-xs">
                       <div className="h-5 w-5 rounded-full bg-muted flex items-center justify-center shrink-0 mt-0.5 text-[10px] font-medium text-muted-foreground">
-                        {entry.actor_clerk_id === userId ? 'Me' : entry.actor_clerk_id.slice(-2).toUpperCase()}
+                        {entry.actor_clerk_id === userId
+                          ? 'Me'
+                          : memberName(entry.actor_clerk_id).split(/\s+/).map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <span className="text-foreground">{formatAction(entry.action, entry.payload)}</span>
+                        <span className="font-medium mr-1">
+                          {entry.actor_clerk_id === userId ? 'You' : memberName(entry.actor_clerk_id)}
+                        </span>
+                        <span className="text-foreground">{formatAction(entry.action, entry.payload, memberName)}</span>
                         <span className="text-muted-foreground ml-1.5">
                           {safeFromNow(entry.created_at, { addSuffix: true }) ? `· ${safeFromNow(entry.created_at, { addSuffix: true })}` : ''}
                         </span>
@@ -1315,10 +1573,14 @@ export function TaskFormDialog({
           </Tabs>
 
           <DialogFooter className="shrink-0 border-t pt-4">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="button" onClick={() => void submitEdit()} disabled={isPending}>
-              {isPending ? 'Saving...' : 'Update Task'}
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              {isViewer ? 'Close' : 'Cancel'}
             </Button>
+            {!isViewer && (
+              <Button type="button" onClick={() => void submitEdit()} disabled={isPending || savingCustom}>
+                {isPending || savingCustom ? 'Saving...' : 'Update Task'}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1389,7 +1651,7 @@ export function TaskFormDialog({
               <FormField control={form.control} name="start_date" render={({ field }) => (
                 <FormItem>
                   <FormLabel>Start Date</FormLabel>
-                  <FormControl><Input type="date" {...field} /></FormControl>
+                  <FormControl><Input type="date" min={MIN_DATE} max={MAX_DATE} {...field} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )} />
@@ -1397,7 +1659,7 @@ export function TaskFormDialog({
               <FormField control={form.control} name="due_date" render={({ field }) => (
                 <FormItem>
                   <FormLabel>Due Date</FormLabel>
-                  <FormControl><Input type="date" {...field} /></FormControl>
+                  <FormControl><Input type="date" min={MIN_DATE} max={MAX_DATE} {...field} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )} />

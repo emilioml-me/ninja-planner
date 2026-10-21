@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import {
-  getWorkspacesForUser,
   getWorkspaceForOrg,
   updateWorkspace,
 } from '../services/workspaceService.js';
@@ -15,11 +14,23 @@ const updateSchema = z.object({
   // plan is intentionally excluded — plan changes must go through billing
 });
 
-// GET /api/workspaces/me
+// GET /api/workspaces/me — K9: the workspace for the ACTIVE org plus the caller's role in it
+// (`my_role`, from workspace_members.role - the same source requireAdmin checks), so the client
+// gates admin/viewer UI on the server's view of the role rather than the Clerk token's orgRole.
 router.get('/me', async (req, res, next) => {
   try {
-    const workspaces = await getWorkspacesForUser(req.auth.userId);
-    res.json(workspaces);
+    const orgId = req.auth.orgId;
+    if (!orgId || orgId.trim() === '') {
+      res.status(403).json({ error: 'No active organization in token' });
+      return;
+    }
+    const workspace = await getWorkspaceForOrg(orgId, req.auth.userId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+    const { role, ...rest } = workspace;
+    res.json({ ...rest, my_role: role });
   } catch (err) {
     next(err);
   }

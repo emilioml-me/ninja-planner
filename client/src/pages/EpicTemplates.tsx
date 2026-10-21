@@ -2,7 +2,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
 import { todayLocal } from '@/lib/utils';
-import { useIsAdmin } from '@/hooks/use-is-admin';
+import { useMyRole } from '@/hooks/use-is-admin';
+import { QueryError } from '@/components/QueryError';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -53,7 +54,7 @@ const EMPTY_FORM: FormState = {
   sprint_template_id: NO_SPRINT_TEMPLATE, task_template_ids: [],
 };
 
-function UseTemplateDialog({ template, onDone }: { template: EpicTemplate; onDone: () => void }) {
+function UseTemplateDialog({ template, taskCount, onDone }: { template: EpicTemplate; taskCount: number; onDone: () => void }) {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
   const { toast } = useToast();
@@ -80,7 +81,7 @@ function UseTemplateDialog({ template, onDone }: { template: EpicTemplate; onDon
     <div className="space-y-4">
       <div>
         <label className="text-sm font-medium">Epic title</label>
-        <Input value={epicTitle} onChange={(e) => setEpicTitle(e.target.value)} className="mt-1" />
+        <Input value={epicTitle} onChange={(e) => setEpicTitle(e.target.value)} maxLength={500} className="mt-1" />
       </div>
       {template.sprint_template_id && (
         <div>
@@ -89,13 +90,13 @@ function UseTemplateDialog({ template, onDone }: { template: EpicTemplate; onDon
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        This will create the epic{template.sprint_template_id ? ', a sprint,' : ''} and {template.task_template_ids.length} task{template.task_template_ids.length !== 1 ? 's' : ''} linked to it.
+        This will create the epic{template.sprint_template_id ? ', a sprint,' : ''} and {taskCount} task{taskCount !== 1 ? 's' : ''} linked to it.
       </p>
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onDone}>Cancel</Button>
         <Button
           /* Never send '' — a cleared date input omits start_date so the server uses today. */
-          onClick={() => mutation.mutate({ epic_title: epicTitle, ...(template.sprint_template_id && startDate ? { start_date: startDate } : {}) })}
+          onClick={() => mutation.mutate({ epic_title: epicTitle.trim(), ...(template.sprint_template_id && startDate ? { start_date: startDate } : {}) })}
           disabled={!epicTitle.trim() || mutation.isPending}>
           Create
         </Button>
@@ -107,7 +108,7 @@ function UseTemplateDialog({ template, onDone }: { template: EpicTemplate; onDon
 export default function EpicTemplates() {
   const { apiRequest } = useApiClient();
   const qc = useQueryClient();
-  const isAdmin = useIsAdmin();
+  const { isAdmin, isLoading: roleLoading } = useMyRole();
   const { toast } = useToast();
 
   const [creating, setCreating] = useState(false);
@@ -117,40 +118,67 @@ export default function EpicTemplates() {
 
   const dialogOpen = creating || !!editing;
   const openCreate = () => { setEditing(null); setForm(EMPTY_FORM); setCreating(true); };
+  const closeDialog = () => { setCreating(false); setEditing(null); };
+
+  const {
+    data: templatesData, isLoading: templatesLoading, isError, error, refetch,
+  } = useQuery<EpicTemplate[]>({
+    queryKey: ['/api/epic-templates'],
+    queryFn: () => apiRequest('GET', '/api/epic-templates'),
+  });
+  const templates = templatesData ?? [];
+  const isLoading = templatesLoading || roleLoading;
+  const taskTemplatesQuery = useQuery<TaskTemplate[]>({
+    queryKey: ['/api/task-templates'],
+    queryFn: () => apiRequest('GET', '/api/task-templates'),
+  });
+  const taskTemplates = taskTemplatesQuery.data ?? [];
+  const sprintTemplatesQuery = useQuery<SprintTemplate[]>({
+    queryKey: ['/api/sprint-templates'],
+    queryFn: () => apiRequest('GET', '/api/sprint-templates'),
+  });
+  const sprintTemplates = sprintTemplatesQuery.data ?? [];
+
+  const taskTemplateMap = Object.fromEntries(taskTemplates.map((t) => [t.id, t]));
+  const sprintTemplateMap = Object.fromEntries(sprintTemplates.map((t) => [t.id, t]));
+  // Only judge a referenced template as deleted once the lookup list has actually loaded.
+  const taskTemplatesLoaded = taskTemplatesQuery.data !== undefined;
+  const sprintTemplatesLoaded = sprintTemplatesQuery.data !== undefined;
+  const liveTaskTemplateIds = (ids: string[]) =>
+    taskTemplatesLoaded ? ids.filter((id) => id in taskTemplateMap) : ids;
+
   const openEdit = (t: EpicTemplate) => {
     setCreating(false);
     setForm({
       name: t.name, epic_title: t.epic_title, epic_description: t.epic_description ?? '',
-      epic_color: t.epic_color, sprint_template_id: t.sprint_template_id ?? NO_SPRINT_TEMPLATE,
-      task_template_ids: t.task_template_ids,
+      epic_color: t.epic_color,
+      sprint_template_id: t.sprint_template_id && (!sprintTemplatesLoaded || t.sprint_template_id in sprintTemplateMap)
+        ? t.sprint_template_id
+        : NO_SPRINT_TEMPLATE,
+      // Deleted task templates are dropped (they'd be invisible chips and make the save 400).
+      task_template_ids: liveTaskTemplateIds(t.task_template_ids),
     });
     setEditing(t);
   };
-  const closeDialog = () => { setCreating(false); setEditing(null); };
-
-  const { data: templates = [], isLoading } = useQuery<EpicTemplate[]>({
-    queryKey: ['/api/epic-templates'],
-    queryFn: () => apiRequest('GET', '/api/epic-templates'),
-  });
-  const { data: taskTemplates = [] } = useQuery<TaskTemplate[]>({
-    queryKey: ['/api/task-templates'],
-    queryFn: () => apiRequest('GET', '/api/task-templates'),
-  });
-  const { data: sprintTemplates = [] } = useQuery<SprintTemplate[]>({
-    queryKey: ['/api/sprint-templates'],
-    queryFn: () => apiRequest('GET', '/api/sprint-templates'),
-  });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['/api/epic-templates'] });
 
+  // Mirrors the server schema: name 1-255, epic title 1-500 (both trimmed), description <= 5000.
+  const formName = form.name.trim();
+  const formTitle = form.epic_title.trim();
+  const formValid =
+    formName.length >= 1 && formName.length <= 255 &&
+    formTitle.length >= 1 && formTitle.length <= 500 &&
+    form.epic_description.length <= 5000;
+
   const buildPayload = (f: FormState) => ({
-    name: f.name,
-    epic_title: f.epic_title,
+    name: f.name.trim(),
+    epic_title: f.epic_title.trim(),
     // null (not undefined) so clearing the description on edit actually persists.
     epic_description: f.epic_description.trim() || null,
     epic_color: f.epic_color,
     sprint_template_id: f.sprint_template_id === NO_SPRINT_TEMPLATE ? null : f.sprint_template_id,
-    task_template_ids: f.task_template_ids,
+    task_template_ids: liveTaskTemplateIds(f.task_template_ids),
   });
 
   const createMutation = useMutation({
@@ -180,9 +208,6 @@ export default function EpicTemplates() {
     }));
   };
 
-  const taskTemplateMap = Object.fromEntries(taskTemplates.map((t) => [t.id, t]));
-  const sprintTemplateMap = Object.fromEntries(sprintTemplates.map((t) => [t.id, t]));
-
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -206,17 +231,20 @@ export default function EpicTemplates() {
             <div>
               <label className="text-sm font-medium">Template name</label>
               <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="e.g. New client kickoff" className="mt-1" />
+                placeholder="e.g. New client kickoff" maxLength={255} className="mt-1" />
             </div>
             <div>
               <label className="text-sm font-medium">Epic title</label>
               <Input value={form.epic_title} onChange={(e) => setForm({ ...form, epic_title: e.target.value })}
-                className="mt-1" />
+                maxLength={500} className="mt-1" />
             </div>
             <div>
               <label className="text-sm font-medium">Epic description (optional)</label>
               <Textarea value={form.epic_description} onChange={(e) => setForm({ ...form, epic_description: e.target.value })}
                 rows={2} className="mt-1" />
+              {form.epic_description.length > 5000 && (
+                <p className="text-xs text-destructive mt-1">Description must be 5000 characters or fewer.</p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <label className="text-sm font-medium">Epic color</label>
@@ -233,10 +261,15 @@ export default function EpicTemplates() {
                   {sprintTemplates.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
                 </SelectContent>
               </Select>
+              {sprintTemplatesQuery.isError && !sprintTemplatesQuery.data && (
+                <QueryError error={sprintTemplatesQuery.error} onRetry={() => sprintTemplatesQuery.refetch()} className="mt-1" />
+              )}
             </div>
             <div>
               <label className="text-sm font-medium">Task templates</label>
-              {taskTemplates.length === 0 ? (
+              {taskTemplatesQuery.isError && !taskTemplatesQuery.data ? (
+                <QueryError error={taskTemplatesQuery.error} onRetry={() => taskTemplatesQuery.refetch()} className="mt-1" />
+              ) : taskTemplates.length === 0 ? (
                 <p className="text-xs text-muted-foreground mt-1">No task templates yet — create some under Task Templates first.</p>
               ) : (
                 <div className="flex flex-wrap gap-2 mt-2">
@@ -257,7 +290,7 @@ export default function EpicTemplates() {
               <Button variant="outline" onClick={closeDialog}>Cancel</Button>
               <Button
                 onClick={() => (editing ? updateMutation.mutate(buildPayload(form)) : createMutation.mutate(buildPayload(form)))}
-                disabled={!form.name.trim() || !form.epic_title.trim() || createMutation.isPending || updateMutation.isPending}>
+                disabled={!formValid || createMutation.isPending || updateMutation.isPending}>
                 {editing ? 'Update Template' : 'Save Template'}
               </Button>
             </div>
@@ -268,12 +301,20 @@ export default function EpicTemplates() {
       <Dialog open={!!using} onOpenChange={() => setUsing(null)}>
         <DialogContent>
           <DialogHeader><DialogTitle>Start project from "{using?.name}"</DialogTitle></DialogHeader>
-          {using && <UseTemplateDialog template={using} onDone={() => setUsing(null)} />}
+          {using && (
+            <UseTemplateDialog
+              template={using}
+              taskCount={liveTaskTemplateIds(using.task_template_ids).length}
+              onDone={() => setUsing(null)}
+            />
+          )}
         </DialogContent>
       </Dialog>
 
       {isLoading ? (
         <div className="space-y-3">{[1, 2].map((i) => <Skeleton key={i} className="h-24 w-full" />)}</div>
+      ) : isError && !templatesData ? (
+        <QueryError error={error} onRetry={() => refetch()} />
       ) : templates.length === 0 ? (
         <div className="text-center py-20 text-muted-foreground">
           <Layers className="h-10 w-10 mx-auto mb-3 opacity-30" />
@@ -293,14 +334,26 @@ export default function EpicTemplates() {
                 <p className="text-sm text-muted-foreground">{t.epic_title}</p>
                 <div className="flex flex-wrap gap-1">
                   {t.sprint_template_id && (
-                    <Badge variant="outline" className="text-[10px]">
-                      {sprintTemplateMap[t.sprint_template_id]?.name ?? 'sprint'}
-                    </Badge>
+                    sprintTemplateMap[t.sprint_template_id] || !sprintTemplatesLoaded ? (
+                      <Badge variant="outline" className="text-[10px]">
+                        {sprintTemplateMap[t.sprint_template_id]?.name ?? 'Sprint template'}
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] text-muted-foreground line-through" title="This sprint template was deleted">
+                        Missing sprint template
+                      </Badge>
+                    )
                   )}
                   {t.task_template_ids.map((id) => (
-                    <Badge key={id} variant="secondary" className="text-[10px]">
-                      {taskTemplateMap[id]?.name ?? 'task'}
-                    </Badge>
+                    taskTemplateMap[id] || !taskTemplatesLoaded ? (
+                      <Badge key={id} variant="secondary" className="text-[10px]">
+                        {taskTemplateMap[id]?.name ?? 'Task template'}
+                      </Badge>
+                    ) : (
+                      <Badge key={id} variant="outline" className="text-[10px] text-muted-foreground line-through" title="This task template was deleted and will be skipped">
+                        Missing task template
+                      </Badge>
+                    )
                   ))}
                 </div>
                 {/* /use is requireAdmin server-side, so the whole action row is admin-only. */}

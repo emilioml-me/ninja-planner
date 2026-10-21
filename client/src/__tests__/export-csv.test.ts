@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Browser API stubs ────────────────────────────────────────────────────────
 const mockClick       = vi.fn();
@@ -22,7 +22,13 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-// Import after stubs are set up
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+// This top-level import runs BEFORE any beforeEach stub. That is fine because export-csv only
+// touches URL / document / Blob when downloadCsv() is called (inside a test), never at load time.
 const { downloadCsv } = await import('../lib/export-csv');
 
 describe('downloadCsv', () => {

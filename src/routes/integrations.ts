@@ -1,17 +1,21 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireWorkspace } from '../middleware/requireWorkspace.js';
-import { requireAdmin } from '../middleware/requireAdmin.js';
+import { requireAdmin, ADMIN_ROLES } from '../middleware/requireAdmin.js';
 import { fetchAllSummaries, getIntegrationsStatus } from '../integrations/index.js';
+import { getServiceConfig } from '../integrations/client.js';
 import { fetchCrmDeals, fetchCrmClients, verifyCrmTenantLink } from '../integrations/crm.js';
 import { fetchPaymentsSummary } from '../integrations/payments.js';
 import { getNinjaTaskProfile } from '../integrations/ninjatask.js';
-import { upsertActualRevenue } from '../services/revenueService.js';
+import { upsertActualRevenue, resetStaleSyncedRevenue } from '../services/revenueService.js';
 import { pool } from '../config/db.js';
 import { isOperatorWorkspace } from '../lib/operator.js';
 import type { IntegrationsSummary } from '../integrations/types.js';
 
 const router = Router();
+
+/** crm-ninja's /api/internal/deals page size (it returns at most this many, newest first). */
+const CRM_DEALS_PAGE_MAX = 500;
 
 async function getCrmTenantId(workspaceId: string): Promise<number | null> {
   const result = await pool.query<{ crm_ninja_tenant_id: number | null }>(
@@ -80,16 +84,43 @@ router.get('/status', requireWorkspace, (req, res) => {
   res.json(getIntegrationsStatus(req.workspace.id));
 });
 
+/** Same gate the payments sync route uses (operator workspace + payment-ninja configured). */
+function paymentsSyncAvailable(workspaceId: string): boolean {
+  return isOperatorWorkspace(workspaceId) && !!getServiceConfig('PAYMENT_NINJA');
+}
+
+/**
+ * GET /api/integrations/capabilities
+ * Which integration-backed actions actually do something for this workspace, so the UI can hide
+ * controls that would no-op (Slack alert) or 503 (payments sync). No external calls.
+ */
+router.get('/capabilities', requireWorkspace, async (req, res, next) => {
+  try {
+    const operator = isOperatorWorkspace(req.workspace.id);
+    const crmTenantId = await getCrmTenantId(req.workspace.id);
+    res.json({
+      slack_alerts:  operator && !!process.env.SLACK_WEBHOOK_URL,
+      payments_sync: paymentsSyncAvailable(req.workspace.id),
+      crm_linked:    crmTenantId !== null && !!getServiceConfig('CRM_NINJA'),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /**
  * GET /api/integrations/summary
  * Returns live data from all configured integrations. Cached per workspace+user for 5 minutes.
  *
- * Query param: ?refresh=1 to bypass cache.
+ * Query param: ?refresh=1 to bypass cache (admins only; ignored for other roles).
  */
 router.get('/summary', requireWorkspace, async (req, res, next) => {
   try {
     const workspaceId = req.workspace.id;
-    const forceRefresh = req.query.refresh === '1';
+    // Only admins may bypass the cache - every refresh fans out to all upstream services.
+    // Non-admin refresh requests silently fall back to the cached copy.
+    const isAdmin = !!req.auth.memberRole && ADMIN_ROLES.has(req.auth.memberRole);
+    const forceRefresh = req.query.refresh === '1' && isAdmin;
     // Cache key includes the requesting user, not just the workspace — the ninja-task slot is
     // now per-user (see fetchAllSummaries), so a workspace-only key would leak the first
     // requester's ninja-task profile to every other member for the rest of the TTL window.
@@ -200,16 +231,48 @@ router.post('/sync-revenue', requireWorkspace, requireAdmin, async (req, res, ne
       return;
     }
 
+    const deals = (Array.isArray(result.data.deals) ? result.data.deals : [])
+      .map((deal) => {
+        const month = typeof deal?.closed_at === 'string' && /^\d{4}-\d{2}/.test(deal.closed_at)
+          ? deal.closed_at.slice(0, 7) + '-01' // YYYY-MM-01
+          : null;
+        const value = typeof deal?.value === 'number' ? deal.value : Number(deal?.value);
+        const currency = typeof deal?.currency === 'string' && deal.currency.trim()
+          ? deal.currency.trim().toUpperCase()
+          : null;
+        return { month, value, currency };
+      })
+      .filter((d): d is { month: string; value: number; currency: string | null } =>
+        d.month !== null && Number.isFinite(d.value));
+
+    // crm-ninja returns at most CRM_DEALS_PAGE_MAX deals, newest first. A full page means older
+    // deals were cut off, so the oldest month present is (probably) only partially covered:
+    // don't write it, and treat only the months after it as "covered" by this sync.
+    const truncated = (result.data.deals?.length ?? 0) >= CRM_DEALS_PAGE_MAX;
+    const oldestMonth = deals.reduce<string | null>((min, d) => (min === null || d.month < min ? d.month : min), null);
+    const partialMonth = truncated ? oldestMonth : null;
+
+    // revenue_targets has no currency column, so amounts in different currencies can't be summed.
+    // Use the workspace's dominant deal currency (most deals; deals without a currency are assumed
+    // to be in it) and ignore the rest, reporting how many were left out.
+    const currencyCounts = new Map<string, number>();
+    for (const d of deals) {
+      if (d.currency) currencyCounts.set(d.currency, (currencyCounts.get(d.currency) ?? 0) + 1);
+    }
+    const currency = [...currencyCounts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
+
     // Group deal values by first-of-month
     const byMonth = new Map<string, number>();
-    for (const deal of result.data.deals) {
-      if (!deal.closed_at) continue;
-      const periodStart = deal.closed_at.slice(0, 7) + '-01'; // YYYY-MM-01
-      byMonth.set(periodStart, (byMonth.get(periodStart) ?? 0) + deal.value);
+    let ignoredDeals = 0;
+    for (const d of deals) {
+      if (d.month === partialMonth) continue;
+      if (currency !== null && d.currency !== null && d.currency !== currency) { ignoredDeals++; continue; }
+      byMonth.set(d.month, Math.round(((byMonth.get(d.month) ?? 0) + d.value) * 100) / 100);
     }
 
-    // Upsert each month. Months already owned by the payments sync are skipped, not overwritten —
-    // see upsertActualRevenue's source rule.
+    // Upsert each month. Months already owned by another source (payments, or a manual edit) are
+    // skipped, not overwritten - see upsertActualRevenue's source rule.
     const entries = Array.from(byMonth.entries());
     const written = await Promise.all(
       entries.map(([periodStart, amount]) =>
@@ -218,7 +281,22 @@ router.post('/sync-revenue', requireWorkspace, requireAdmin, async (req, res, ne
     );
     const skipped = entries.filter((_, i) => !written[i]).map(([periodStart]) => periodStart);
 
-    res.json({ synced: byMonth.size - skipped.length, skipped, periods: Object.fromEntries(byMonth) });
+    // Months this sync previously filled from CRM that no longer have any won deals inside the
+    // covered window (deal un-won / deleted upstream) are reset to 0 instead of keeping a stale
+    // figure forever.
+    const reset = await resetStaleSyncedRevenue(
+      req.workspace.id, 'crm', entries.map(([periodStart]) => periodStart), partialMonth, syncedAt,
+    );
+
+    res.json({
+      synced: byMonth.size - skipped.length,
+      skipped,
+      reset,
+      partial_month_dropped: partialMonth,
+      currency,
+      ignored_deals: ignoredDeals,
+      periods: Object.fromEntries(byMonth),
+    });
   } catch (err) {
     next(err);
   }
@@ -226,6 +304,18 @@ router.post('/sync-revenue', requireWorkspace, requireAdmin, async (req, res, ne
 
 const CLIENT_STAGES = new Set(['prospect', 'proposal', 'active', 'churned']);
 const emailSchema = z.string().email().max(255);
+const SYNC_CLIENTS_CHUNK = 500;
+
+interface SyncClientRow {
+  externalId: string;
+  name: string;
+  contactName: string | null;
+  hasContactName: boolean;
+  email: string | null;
+  hasEmail: boolean;
+  stage: string | null;
+  mrr: number | null;
+}
 
 /**
  * POST /api/integrations/sync-clients
@@ -235,10 +325,14 @@ const emailSchema = z.string().email().max(255);
  * on-demand/periodic reconciliation pass (e.g. initial backfill, or catching up after the
  * webhook was down), not a replacement for it.
  *
- * Runs in one transaction (all-or-nothing). Missing/unrecognised values never clobber local data:
- * an unknown stage keeps the existing stage (new rows default to 'prospect'), a missing or
- * malformed email keeps the existing contact_email, and a missing mrr keeps the existing mrr.
- * Rows without a usable id/name are skipped and counted.
+ * Runs in one transaction (all-or-nothing), as chunked set-based statements. Missing/unrecognised
+ * values never clobber local data: an unknown stage keeps the existing stage (new rows default to
+ * 'prospect'), a missing or malformed email/contact_name keeps the existing value (an explicit
+ * null or '' clears it), and a missing mrr keeps the existing mrr. Rows without a usable id/name
+ * are skipped and counted.
+ *
+ * CRM-linked clients deleted locally are tombstoned (crm_client_tombstones, migration 067) and
+ * never re-created; they're reported as ignored_deleted.
  */
 router.post('/sync-clients', requireWorkspace, requireAdmin, async (req, res, next) => {
   try {
@@ -258,31 +352,86 @@ router.post('/sync-clients', requireWorkspace, requireAdmin, async (req, res, ne
       return;
     }
 
-    let synced = 0;
     let skipped = 0;
+    // Deduped by external id (last wins) so one batch never touches the same row twice.
+    const rows = new Map<string, SyncClientRow>();
+    for (const client of result.data.clients) {
+      const externalId = client?.id != null ? String(client.id).slice(0, 255) : '';
+      const name = typeof client?.name === 'string' ? client.name.trim().slice(0, 255) : '';
+      if (!externalId || !name) { skipped++; continue; }
+      const stage = typeof client.stage === 'string' && CLIENT_STAGES.has(client.stage) ? client.stage : null;
+      // Contact fields: absent or malformed = keep the local value; explicit null/'' = clear it.
+      let email: string | null = null;
+      let hasEmail = false;
+      if (client.email === null || (typeof client.email === 'string' && client.email.trim() === '')) {
+        hasEmail = true;
+      } else if (typeof client.email === 'string' && emailSchema.safeParse(client.email.trim()).success) {
+        hasEmail = true;
+        email = client.email.trim();
+      }
+      let contactName: string | null = null;
+      let hasContactName = false;
+      if (client.contact_name === null) {
+        hasContactName = true;
+      } else if (typeof client.contact_name === 'string') {
+        hasContactName = true;
+        contactName = client.contact_name.trim().slice(0, 255) || null;
+      }
+      const mrrNum = typeof client.mrr === 'number' ? client.mrr : Number(client.mrr);
+      const mrr = client.mrr != null && Number.isFinite(mrrNum) && mrrNum >= 0 && mrrNum < 1e10 ? mrrNum : null;
+      rows.set(externalId, { externalId, name, contactName, hasContactName, email, hasEmail, stage, mrr });
+    }
+
+    // Clients deleted locally are tombstoned (clientService.deleteClient) - never re-create them.
+    const tombstones = await pool.query<{ external_crm_id: string }>(
+      'SELECT external_crm_id FROM crm_client_tombstones WHERE workspace_id = $1 AND external_crm_id = ANY($2::text[])',
+      [req.workspace.id, [...rows.keys()]],
+    );
+    for (const t of tombstones.rows) rows.delete(t.external_crm_id);
+    const ignoredDeleted = tombstones.rows.length;
+
+    const allRows = [...rows.values()];
     const db = await pool.connect();
     try {
       await db.query('BEGIN');
-      for (const client of result.data.clients) {
-        const externalId = client?.id != null ? String(client.id).slice(0, 255) : '';
-        const name = typeof client?.name === 'string' ? client.name.trim().slice(0, 255) : '';
-        if (!externalId || !name) { skipped++; continue; }
-        const stage = typeof client.stage === 'string' && CLIENT_STAGES.has(client.stage) ? client.stage : null;
-        const email = emailSchema.safeParse(client.email).success ? (client.email as string) : null;
-        const mrrNum = typeof client.mrr === 'number' ? client.mrr : Number(client.mrr);
-        const mrr = client.mrr != null && Number.isFinite(mrrNum) && mrrNum >= 0 && mrrNum < 1e10 ? mrrNum : null;
+      // Set-based upsert in chunks (two statements per chunk) instead of one round-trip per client.
+      for (let i = 0; i < allRows.length; i += SYNC_CLIENTS_CHUNK) {
+        const chunk = allRows.slice(i, i + SYNC_CLIENTS_CHUNK);
+        const params = [
+          req.workspace.id,
+          chunk.map((r) => r.externalId),
+          chunk.map((r) => r.name),
+          chunk.map((r) => r.contactName),
+          chunk.map((r) => r.hasContactName),
+          chunk.map((r) => r.email),
+          chunk.map((r) => r.hasEmail),
+          chunk.map((r) => r.stage),
+          chunk.map((r) => r.mrr),
+        ];
+        const source = `unnest($2::text[], $3::text[], $4::text[], $5::boolean[], $6::text[], $7::boolean[], $8::text[], $9::numeric[])
+                          AS t(ext, name, contact_name, has_contact_name, email, has_email, stage, mrr)`;
         await db.query(
-          `INSERT INTO clients (workspace_id, external_crm_id, name, contact_email, stage, mrr)
-           VALUES ($1, $2, $3, $4, COALESCE($5, 'prospect'), COALESCE($6, 0))
-           ON CONFLICT (workspace_id, external_crm_id) WHERE external_crm_id IS NOT NULL DO UPDATE SET
-             name          = EXCLUDED.name,
-             contact_email = COALESCE($4, clients.contact_email),
-             stage         = COALESCE($5, clients.stage),
-             mrr           = COALESCE($6, clients.mrr),
-             updated_at    = now()`,
-          [req.workspace.id, externalId, name, email, stage, mrr],
+          `UPDATE clients c SET
+             name          = t.name,
+             contact_name  = CASE WHEN t.has_contact_name THEN t.contact_name ELSE c.contact_name END,
+             contact_email = CASE WHEN t.has_email THEN t.email ELSE c.contact_email END,
+             stage         = COALESCE(t.stage, c.stage),
+             mrr           = COALESCE(t.mrr, c.mrr),
+             updated_at    = now()
+           FROM ${source}
+           WHERE c.workspace_id = $1 AND c.external_crm_id = t.ext`,
+          params,
         );
-        synced++;
+        await db.query(
+          `INSERT INTO clients (workspace_id, external_crm_id, name, contact_name, contact_email, stage, mrr)
+           SELECT $1, t.ext, t.name, t.contact_name, t.email, COALESCE(t.stage, 'prospect'), COALESCE(t.mrr, 0)
+           FROM ${source}
+           WHERE NOT EXISTS (
+             SELECT 1 FROM crm_client_tombstones ct WHERE ct.workspace_id = $1 AND ct.external_crm_id = t.ext
+           )
+           ON CONFLICT (workspace_id, external_crm_id) WHERE external_crm_id IS NOT NULL DO NOTHING`,
+          params,
+        );
       }
       await db.query('COMMIT');
     } catch (txErr) {
@@ -292,7 +441,7 @@ router.post('/sync-clients', requireWorkspace, requireAdmin, async (req, res, ne
       db.release();
     }
 
-    res.json({ synced, skipped });
+    res.json({ synced: allRows.length, skipped, ignored_deleted: ignoredDeleted });
   } catch (err) {
     next(err);
   }

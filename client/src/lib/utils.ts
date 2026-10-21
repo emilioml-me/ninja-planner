@@ -90,14 +90,29 @@ export function safeFromNow(
   }
 }
 
+/**
+ * Returns `raw` if it is a same-origin app path ("/tasks?task=1"), else null. Used for the
+ * `redirect_url` kept across sign-in so it can't become an open redirect ("//evil.example",
+ * "https://...", "/\evil.example").
+ */
+export function safeRedirectPath(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.startsWith('/\\')) return null;
+  if (/[\u0000-\u001f]/.test(raw)) return null;
+  return raw;
+}
+
 /** Recognizes common issue-tracker hosts in an external_ref URL for a friendlier link label. */
 export function externalRefLabel(url: string): string {
   try {
-    const host = new URL(url).hostname.replace(/^www\./, '');
-    if (host.includes('github.com')) return 'GitHub';
-    if (host.includes('linear.app')) return 'Linear';
-    if (host.includes('jira')) return 'Jira';
-    if (host.includes('notion.so')) return 'Notion';
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    // Exact domain or a subdomain of it - a substring match labelled e.g.
+    // "github.com.evil.example" or "notjira.example" as a trusted tracker.
+    const isDomain = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+    if (isDomain('github.com')) return 'GitHub';
+    if (isDomain('linear.app')) return 'Linear';
+    if (isDomain('atlassian.net') || isDomain('jira.com')) return 'Jira';
+    if (isDomain('notion.so') || isDomain('notion.site')) return 'Notion';
     return host;
   } catch {
     return url;

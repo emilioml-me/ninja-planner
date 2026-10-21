@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMembers } from '@/hooks/use-members';
+import { useMyRole } from '@/hooks/use-is-admin';
+import { QueryError } from '@/components/QueryError';
 import { useApiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -48,16 +50,18 @@ const ROLE_META: Record<string, { label: string; icon: React.ElementType; varian
 const roleKey = (role: string) => role.replace(/^org:/, '');
 
 export default function Members() {
-  const { userId, orgRole } = useAuth();
-  const { members, initials, isLoading } = useMembers();
+  const { userId } = useAuth();
+  const {
+    members, initials, isLoading, isError: membersIsError, error: membersError, refetch: refetchMembers,
+  } = useMembers();
+  // Role as stored in workspace_members (what the server enforces), not Clerk's session orgRole.
+  const { isAdmin, isOwner } = useMyRole();
   const { apiRequest } = useApiClient();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [statsTarget, setStatsTarget] = useState<{ clerkUserId: string; name: string; imageUrl: string | null } | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
-
-  const isAdmin = orgRole === 'org:admin' || orgRole === 'org:owner';
 
   const removeMutation = useMutation({
     mutationFn: (memberId: string) =>
@@ -84,7 +88,7 @@ export default function Members() {
       queryClient.invalidateQueries({ queryKey: ['/api/workspaces/me/members'] });
       toast({ title: 'Role updated' });
     },
-    onError: () => toast({ title: 'Failed to update role', variant: 'destructive' }),
+    onError: (err: Error) => toast({ title: 'Failed to update role', description: err.message, variant: 'destructive' }),
   });
 
   return (
@@ -108,11 +112,15 @@ export default function Members() {
         <CardHeader>
           <CardTitle className="text-base">Workspace members</CardTitle>
           <CardDescription>
-            Members are managed through your organisation in Clerk. Only admins can remove members here.
+            Members are managed through your organisation in Clerk. Admins can remove members and viewers;
+            only the owner can remove admins, and the owner can't be removed.
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
-          {isLoading ? (
+          {membersIsError && members.length === 0 ? (
+            // useMembers defaults data to [], so an empty list plus isError means "never loaded".
+            <QueryError error={membersError} onRetry={() => refetchMembers()} className="m-4" />
+          ) : isLoading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             </div>
@@ -132,6 +140,10 @@ export default function Members() {
                 // Stats are self-or-admin on the server (403 otherwise) — only make rows
                 // clickable where the dialog can actually load.
                 const canViewStats = isSelf || isAdmin;
+                // Server hierarchy (K25): nobody removes the owner; only the owner removes admins;
+                // admins remove members/viewers. Admin/owner roles are changed in Clerk, not here.
+                const canRemove = !isSelf && rKey !== 'owner' && (rKey === 'admin' ? isOwner : isAdmin);
+                const canChangeRole = isAdmin && !isSelf && !isOwnerOrAdmin && rKey !== 'guest';
 
                 return (
                   <li
@@ -165,7 +177,7 @@ export default function Members() {
                       {roleMeta.label}
                     </Badge>
 
-                    {isAdmin && !isSelf && !isOwnerOrAdmin && rKey !== 'guest' && (
+                    {canChangeRole && (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -180,10 +192,11 @@ export default function Members() {
                       </Button>
                     )}
 
-                    {isAdmin && !isSelf && rKey !== 'owner' && (
+                    {canRemove && (
                       <Button
                         variant="ghost"
                         size="icon"
+                        aria-label={`Remove ${member.display_name}`}
                         className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
                         onClick={(e) => { e.stopPropagation(); setConfirmRemoveId(member.clerk_user_id); }}
                       >
@@ -267,7 +280,7 @@ function MemberStatsDialog({
   onClose: () => void;
 }) {
   const { apiRequest } = useApiClient();
-  const { data: stats, isLoading } = useQuery<MemberStats>({
+  const { data: stats, isLoading, isError, error, refetch } = useQuery<MemberStats>({
     queryKey: ['/api/workspaces/me/members', clerkUserId, 'stats'],
     queryFn: () => apiRequest<MemberStats>('GET', `/api/workspaces/me/members/${clerkUserId}/stats`),
     staleTime: 60_000,
@@ -297,7 +310,9 @@ function MemberStatsDialog({
           </div>
         </DialogHeader>
 
-        {isLoading ? (
+        {isError && !stats ? (
+          <QueryError error={error} onRetry={() => refetch()} />
+        ) : isLoading ? (
           <div className="space-y-3 py-2">
             {[1, 2, 3].map((i) => <Skeleton key={i} className="h-8 w-full" />)}
           </div>
@@ -384,7 +399,9 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
   const { toast } = useToast();
   const qc = useQueryClient();
 
-  const { data: active, isLoading } = useQuery<{ token: string; expires_at: string } | null>({
+  const {
+    data: active, isLoading, isError, error, refetch,
+  } = useQuery<{ token: string; expires_at: string } | null>({
     queryKey: ['/api/workspaces/me/invites/active'],
     queryFn: () => apiRequest<{ token: string; expires_at: string } | null>('GET', '/api/workspaces/me/invites/active'),
     staleTime: 30_000,
@@ -434,7 +451,9 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
         </DialogHeader>
 
         <div className="space-y-4 py-2">
-          {isLoading ? (
+          {isError && active === undefined ? (
+            <QueryError error={error} onRetry={() => refetch()} />
+          ) : isLoading ? (
             <div className="flex justify-center py-4">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             </div>
@@ -466,7 +485,11 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
                   variant="outline"
                   className="gap-2 text-destructive hover:text-destructive"
                   disabled={revokeMut.isPending}
-                  onClick={() => revokeMut.mutate()}
+                  onClick={() => {
+                    if (window.confirm('Revoke this invite link? Anyone you already shared it with will no longer be able to join with it.')) {
+                      revokeMut.mutate();
+                    }
+                  }}
                 >
                   <X className="h-3.5 w-3.5" /> Revoke
                 </Button>

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { requireWorkspace } from '../middleware/requireWorkspace.js';
+import { requireWorkspaceAllowViewerWrites } from '../middleware/requireWorkspace.js';
 import {
   getNotifications,
   markRead,
@@ -12,7 +12,14 @@ import {
 } from '../services/notificationService.js';
 
 const router = Router();
-router.use(requireWorkspace);
+// Every route here only reads or writes the CALLER's own notifications/preferences, so viewers
+// (read-only for workspace data) must still be able to mark read and mute types.
+router.use(requireWorkspaceAllowViewerWrites);
+
+const listQuerySchema = z.object({
+  limit:  z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+});
 
 // GET /api/notifications/preferences
 router.get('/preferences', async (req, res, next) => {
@@ -44,7 +51,9 @@ router.put('/preferences/:type', async (req, res, next) => {
 // GET /api/notifications  — list for current user (most recent first)
 router.get('/', async (req, res, next) => {
   try {
-    const notifications = await getNotifications(req.workspace.id, req.auth.userId);
+    const q = listQuerySchema.safeParse(req.query);
+    if (!q.success) { res.status(400).json({ error: q.error.flatten() }); return; }
+    const notifications = await getNotifications(req.workspace.id, req.auth.userId, q.data.limit, q.data.offset);
     res.json(notifications);
   } catch (err) {
     next(err);

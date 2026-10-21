@@ -14,7 +14,11 @@ export interface Client {
   updated_at: Date;
 }
 
-export async function getClients(workspaceId: string, stage?: string): Promise<Client[]> {
+// sync-clients mirrors at most 2000 CRM contacts, so this cap covers a fully synced roster plus
+// manual entries while still bounding the response.
+const CLIENTS_LIST_LIMIT = 5000;
+
+export async function getClients(workspaceId: string, stage?: string, limit = CLIENTS_LIST_LIMIT): Promise<Client[]> {
   const conditions = ['workspace_id = $1'];
   const values: unknown[] = [workspaceId];
 
@@ -22,9 +26,10 @@ export async function getClients(workspaceId: string, stage?: string): Promise<C
     conditions.push(`stage = $2`);
     values.push(stage);
   }
+  values.push(Math.min(Math.max(1, limit), CLIENTS_LIST_LIMIT));
 
   const result = await pool.query<Client>(
-    `SELECT * FROM clients WHERE ${conditions.join(' AND ')} ORDER BY name`,
+    `SELECT * FROM clients WHERE ${conditions.join(' AND ')} ORDER BY name, id LIMIT $${values.length}`,
     values,
   );
   return result.rows;
@@ -87,10 +92,32 @@ export async function updateClient(
   return result.rows[0] ?? null;
 }
 
+/**
+ * Deletes a client. A CRM-mirrored client (external_crm_id set) also gets a tombstone in the same
+ * transaction so the next sync-clients run / client.upserted webhook doesn't re-create it.
+ */
 export async function deleteClient(id: string, workspaceId: string): Promise<boolean> {
-  const result = await pool.query(
-    'DELETE FROM clients WHERE id = $1 AND workspace_id = $2',
-    [id, workspaceId],
-  );
-  return (result.rowCount ?? 0) > 0;
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const result = await db.query<{ external_crm_id: string | null }>(
+      'DELETE FROM clients WHERE id = $1 AND workspace_id = $2 RETURNING external_crm_id',
+      [id, workspaceId],
+    );
+    const externalId = result.rows[0]?.external_crm_id;
+    if (externalId) {
+      await db.query(
+        `INSERT INTO crm_client_tombstones (workspace_id, external_crm_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [workspaceId, externalId],
+      );
+    }
+    await db.query('COMMIT');
+    return result.rows.length > 0;
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    db.release();
+  }
 }

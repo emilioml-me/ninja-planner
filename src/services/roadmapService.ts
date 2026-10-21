@@ -40,13 +40,16 @@ export async function getRoadmap(
      LEFT JOIN roadmap_task_links rtl ON rtl.roadmap_item_id = ri.id
      LEFT JOIN tasks t ON t.id = rtl.task_id AND t.workspace_id = $1
      LEFT JOIN (
-       SELECT roadmap_item_id, COUNT(*) AS cnt
-       FROM roadmap_votes
-       GROUP BY roadmap_item_id
+       -- Scoped to this workspace's items so the aggregate doesn't scan every tenant's votes.
+       SELECT rv.roadmap_item_id, COUNT(*) AS cnt
+       FROM roadmap_votes rv
+       JOIN roadmap_items r2 ON r2.id = rv.roadmap_item_id AND r2.workspace_id = $1
+       GROUP BY rv.roadmap_item_id
      ) v ON v.roadmap_item_id = ri.id
      WHERE ${conditions.join(' AND ')}
      GROUP BY ri.id, v.cnt
-     ORDER BY ri.priority, ri.created_at`,
+     ORDER BY ri.priority, ri.created_at
+     LIMIT 1000`,
     values,
   );
   return result.rows;
@@ -56,8 +59,8 @@ export async function createRoadmapItem(
   workspaceId: string,
   data: {
     title: string;
-    description?: string;
-    phase?: string;
+    description?: string | null;
+    phase?: string | null;
     status?: string;
     priority?: number;
     external_ref?: string | null;

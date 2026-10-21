@@ -1,13 +1,14 @@
-node_modules
-dist
+**/node_modules
+**/dist
 .git
 .gitignore
 .gitattributes
 *.env
+*.env.*
 .env*
 !.env.example
+**/coverage
 *.log
-coverage
 .DS_Store
 Thumbs.db
 *.md

@@ -1,7 +1,8 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueries } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApiClient } from '@/lib/api';
 import { TASK_LIST_LIMIT } from '@/hooks/use-tasks';
+import { QueryError } from '@/components/QueryError';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,6 +24,8 @@ const PRIORITY_COLOR: Record<string, string> = {
   medium: 'bg-blue-100 text-blue-700 border-blue-200',
   low:    'bg-gray-100 text-gray-600 border-gray-200',
 };
+
+const OPEN_STATUSES = ['todo', 'in_progress', 'blocked'] as const;
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = [
@@ -52,19 +55,32 @@ export default function Calendar() {
   // Only the visible month's tasks, filtered server-side by due date -- the unfiltered list is
   // capped, so large workspaces silently lost tasks here. Keyed under ['/api/tasks', ...] so task
   // mutations elsewhere invalidate it.
-  const { data: tasks = [] } = useQuery<Task[]>({
-    queryKey: ['/api/tasks', 'calendar', monthStart, monthEnd],
-    queryFn: () => apiRequest(
-      'GET',
-      `/api/tasks?due_after=${monthStart}&due_before=${monthEnd}&limit=${TASK_LIST_LIMIT}`,
-    ),
+  // Done tasks aren't shown, so only open statuses are requested (one per status -- the API
+  // filters a single status), keeping done tasks from consuming the per-request cap.
+  const taskQueries = useQueries({
+    queries: OPEN_STATUSES.map((status) => ({
+      queryKey: ['/api/tasks', 'calendar', monthStart, monthEnd, status],
+      queryFn: () => apiRequest<Task[]>(
+        'GET',
+        `/api/tasks?status=${status}&due_after=${monthStart}&due_before=${monthEnd}&limit=${TASK_LIST_LIMIT}`,
+      ),
+    })),
   });
-  const truncated = tasks.length >= TASK_LIST_LIMIT;
+  const tasks: Task[] = taskQueries.flatMap((q) => q.data ?? []);
+  const tasksLoading = taskQueries.some((q) => q.isLoading);
+  const failedTaskQuery = taskQueries.find((q) => q.isError && !q.data);
+  const truncated = taskQueries.some((q) => (q.data?.length ?? 0) >= TASK_LIST_LIMIT);
 
-  const { data: sprints = [] } = useQuery<Sprint[]>({
+  const sprintsQuery = useQuery<Sprint[]>({
     queryKey: ['/api/sprints'],
     queryFn: () => apiRequest('GET', '/api/sprints'),
   });
+  const sprints = sprintsQuery.data ?? [];
+  const queryError = failedTaskQuery?.error ?? (sprintsQuery.isError && !sprintsQuery.data ? sprintsQuery.error : null);
+  const retry = () => {
+    for (const q of taskQueries) if (q.isError) void q.refetch();
+    if (sprintsQuery.isError) void sprintsQuery.refetch();
+  };
 
   // Build a map: dateKey -> tasks due that day
 
@@ -119,6 +135,11 @@ export default function Calendar() {
           <AlertTriangle className="h-3.5 w-3.5" />
           This month has more than {TASK_LIST_LIMIT} tasks with due dates; some are not shown.
         </p>
+      )}
+
+      {queryError && <QueryError error={queryError} onRetry={retry} />}
+      {tasksLoading && !queryError && (
+        <p className="text-xs text-muted-foreground">Loading tasks...</p>
       )}
 
       <Card>

@@ -5,6 +5,25 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { AlertTriangle, Briefcase } from 'lucide-react';
+import { SeoHead } from '@/components/SeoHead';
+import { safeFormat } from '@/lib/utils';
+import { baseHeaders } from '@/lib/api';
+
+// Row caps applied by guestView.ts; hitting one means the list is partial.
+const CAPS = { tasks: 500, roadmap: 200, goals: 200, sprints: 20, epics: 200, changelog: 100, budgets: 200 } as const;
+
+type ErrorKind = 'not_found' | 'rate_limited' | 'other';
+
+const fmtDate = (d: string | null | undefined) => safeFormat(d ?? null, 'MMM d, yyyy', d ?? '');
+
+function CapNote({ count, cap, noun, recent }: { count: number; cap: number; noun: string; recent?: boolean }) {
+  if (count < cap) return null;
+  return (
+    <p className="text-xs text-muted-foreground">
+      Showing the {recent ? 'most recent' : 'first'} {cap} {noun}; there may be more.
+    </p>
+  );
+}
 
 // Mirrors the (deliberately minimal) guestView.ts payload — no internal ids, tags or free text.
 interface GuestData {
@@ -37,28 +56,39 @@ interface GuestViewProps { token: string }
 
 export default function GuestView({ token }: GuestViewProps) {
   const [data,    setData]    = useState<GuestData | null>(null);
-  const [error,   setError]   = useState<string | null>(null);
+  const [error,   setError]   = useState<ErrorKind | null>(null);
   const [loading, setLoading] = useState(true);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
+    // Reset per token so a previous link's error (or data) never sticks to a new one.
     setLoading(true);
-    fetch(`/public/g/${token}`, { signal: controller.signal })
+    setError(null);
+    setData(null);
+    fetch(`/public/g/${encodeURIComponent(token)}`, { signal: controller.signal, headers: baseHeaders() })
       .then(async (r) => {
-        if (!r.ok) throw new Error(await r.text());
+        if (!r.ok) {
+          const kind: ErrorKind = r.status === 404 ? 'not_found' : r.status === 429 ? 'rate_limited' : 'other';
+          throw Object.assign(new Error(`HTTP ${r.status}`), { kind });
+        }
         return r.json();
       })
       .then((d) => { setData(d); setLoading(false); })
-      .catch((e) => {
+      .catch((e: Error & { kind?: ErrorKind }) => {
         if (controller.signal.aborted) return;
-        setError(e.message); setLoading(false);
+        setError(e.kind ?? 'other'); setLoading(false);
       });
     return () => controller.abort();
-  }, [token]);
+  }, [token, attempt]);
+
+  // Guest links must never be indexed.
+  const seo = <SeoHead title={data ? `${data.label} (guest view)` : 'Guest view'} description="Shared project view." noIndex />;
 
   if (loading) {
     return (
       <div className="min-h-screen p-8">
+        {seo}
         <Skeleton className="h-8 w-48 mb-4" />
         <div className="space-y-3">
           {[1,2,3].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
@@ -68,12 +98,31 @@ export default function GuestView({ token }: GuestViewProps) {
   }
 
   if (error || !data) {
+    const notFound = error === 'not_found';
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center px-6">
+        {seo}
         <div className="text-center space-y-3">
           <AlertTriangle className="h-10 w-10 text-destructive mx-auto" />
-          <p className="text-lg font-semibold">Link not found or expired</p>
-          <p className="text-muted-foreground text-sm">This guest link may have been revoked or expired.</p>
+          <p className="text-lg font-semibold">
+            {notFound ? 'Link not found or expired' : "Couldn't load this page"}
+          </p>
+          <p className="text-muted-foreground text-sm">
+            {notFound
+              ? 'This guest link may have been revoked or expired.'
+              : error === 'rate_limited'
+                ? 'Too many requests right now. Please wait a minute and try again.'
+                : 'Something went wrong. Please check your connection and try again.'}
+          </p>
+          {!notFound && (
+            <button
+              type="button"
+              onClick={() => setAttempt((n) => n + 1)}
+              className="rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+            >
+              Try again
+            </button>
+          )}
         </div>
       </div>
     );
@@ -97,18 +146,22 @@ export default function GuestView({ token }: GuestViewProps) {
         <Badge variant="secondary" className="ml-auto text-xs">Guest View</Badge>
       </div>
 
+      {seo}
       <div className="p-6">
         <Tabs defaultValue={tabs[0]}>
-          <TabsList>
-            {tabs.map((t) => (
-              <TabsTrigger key={t} value={t} className="capitalize">{t}</TabsTrigger>
-            ))}
-          </TabsList>
+          <div className="overflow-x-auto">
+            <TabsList>
+              {tabs.map((t) => (
+                <TabsTrigger key={t} value={t} className="capitalize">{t}</TabsTrigger>
+              ))}
+            </TabsList>
+          </div>
 
           {/* Tasks */}
           {data.tasks && (
             <TabsContent value="tasks" className="mt-6">
               <div className="space-y-2">
+                <CapNote count={data.tasks.length} cap={CAPS.tasks} noun="tasks" />
                 {data.tasks.length === 0
                   ? <p className="text-muted-foreground">No tasks.</p>
                   : data.tasks.map((t) => (
@@ -117,7 +170,7 @@ export default function GuestView({ token }: GuestViewProps) {
                         <span className="text-sm font-medium">{t.title}</span>
                         <div className="flex items-center gap-2">
                           {t.due_date && (
-                            <span className="text-xs text-muted-foreground">{t.due_date}</span>
+                            <span className="text-xs text-muted-foreground">Due {fmtDate(t.due_date)}</span>
                           )}
                           <Badge className={`text-xs ${STATUS_COLORS[t.status] ?? ''} hover:opacity-90`}>
                             {t.status}
@@ -134,6 +187,7 @@ export default function GuestView({ token }: GuestViewProps) {
           {data.roadmap && (
             <TabsContent value="roadmap" className="mt-6">
               <div className="space-y-2">
+                <CapNote count={data.roadmap.length} cap={CAPS.roadmap} noun="roadmap items" />
                 {data.roadmap.length === 0
                   ? <p className="text-muted-foreground">No roadmap items.</p>
                   : data.roadmap.map((r) => (
@@ -157,6 +211,7 @@ export default function GuestView({ token }: GuestViewProps) {
           {data.goals && (
             <TabsContent value="goals" className="mt-6">
               <div className="space-y-2">
+                <CapNote count={data.goals.length} cap={CAPS.goals} noun="goals" />
                 {data.goals.length === 0
                   ? <p className="text-muted-foreground">No goals.</p>
                   : data.goals.map((g) => (
@@ -164,7 +219,7 @@ export default function GuestView({ token }: GuestViewProps) {
                       <CardContent className="py-3 px-4 flex items-center justify-between">
                         <span className="text-sm font-medium">{g.title}</span>
                         <div className="flex items-center gap-2">
-                          {g.due_date && <span className="text-xs text-muted-foreground">{g.due_date}</span>}
+                          {g.due_date && <span className="text-xs text-muted-foreground">Due {fmtDate(g.due_date)}</span>}
                           <Badge className={`text-xs ${STATUS_COLORS[g.status] ?? ''} hover:opacity-90`}>
                             {g.status}
                           </Badge>
@@ -180,6 +235,7 @@ export default function GuestView({ token }: GuestViewProps) {
           {data.sprints && (
             <TabsContent value="sprints" className="mt-6">
               <div className="space-y-2">
+                <CapNote count={data.sprints.length} cap={CAPS.sprints} noun="sprints" recent />
                 {data.sprints.length === 0
                   ? <p className="text-muted-foreground">No sprints.</p>
                   : data.sprints.map((s) => (
@@ -189,7 +245,7 @@ export default function GuestView({ token }: GuestViewProps) {
                         <div className="flex items-center gap-2">
                           {s.start_date && s.end_date && (
                             <span className="text-xs text-muted-foreground">
-                              {s.start_date} → {s.end_date}
+                              {fmtDate(s.start_date)} → {fmtDate(s.end_date)}
                             </span>
                           )}
                           <Badge className={`text-xs ${STATUS_COLORS[s.status] ?? ''} hover:opacity-90`}>
@@ -206,10 +262,13 @@ export default function GuestView({ token }: GuestViewProps) {
           {data.epics && (
             <TabsContent value="epics" className="mt-6">
               <div className="space-y-2">
+                <CapNote count={data.epics.length} cap={CAPS.epics} noun="epics" recent />
                 {data.epics.length === 0
                   ? <p className="text-muted-foreground">No epics.</p>
                   : data.epics.map((e) => {
-                    const pct = e.total_tasks > 0 ? Math.round((e.done_tasks / e.total_tasks) * 100) : 0;
+                    const total = Number(e.total_tasks) || 0;
+                    const done = Number(e.done_tasks) || 0;
+                    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
                     return (
                       <Card key={e.id}>
                         <CardContent className="py-3 px-4 space-y-2">
@@ -222,10 +281,10 @@ export default function GuestView({ token }: GuestViewProps) {
                               {e.status}
                             </Badge>
                           </div>
-                          {e.total_tasks > 0 && (
+                          {total > 0 && (
                             <div className="space-y-1">
                               <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                                <span>{e.done_tasks}/{e.total_tasks} tasks</span>
+                                <span>{done}/{total} tasks</span>
                                 <span>{pct}%</span>
                               </div>
                               <Progress value={pct} className="h-1" />
@@ -242,6 +301,7 @@ export default function GuestView({ token }: GuestViewProps) {
           {data.changelog && (
             <TabsContent value="changelog" className="mt-6">
               <div className="space-y-2">
+                <CapNote count={data.changelog.length} cap={CAPS.changelog} noun="completed tasks" recent />
                 {data.changelog.length === 0
                   ? <p className="text-muted-foreground">No completed tasks in the last 30 days.</p>
                   : data.changelog.map((c) => (
@@ -256,7 +316,7 @@ export default function GuestView({ token }: GuestViewProps) {
                           )}
                         </div>
                         <span className="text-xs text-muted-foreground">
-                          {new Date(c.completed_at).toLocaleDateString()}
+                          {fmtDate(c.completed_at)}
                         </span>
                       </CardContent>
                     </Card>
@@ -268,6 +328,7 @@ export default function GuestView({ token }: GuestViewProps) {
           {data.budgets && (
             <TabsContent value="budgets" className="mt-6">
               <div className="space-y-2">
+                <CapNote count={data.budgets.length} cap={CAPS.budgets} noun="budgets" recent />
                 {data.budgets.length === 0
                   ? <p className="text-muted-foreground">No budgets.</p>
                   : data.budgets.map((b) => {

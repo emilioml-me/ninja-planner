@@ -24,7 +24,9 @@ router.get('/', async (req, res, next) => {
     const result = await pool.query<Watcher>(
       `SELECT tw.user_clerk_id, wm.display_name, tw.created_at
        FROM   task_watchers tw
-       LEFT JOIN workspace_members wm
+       -- INNER join: a watcher who has left the workspace is not listed (their row is cleaned
+       -- up when the member is removed).
+       JOIN   workspace_members wm
               ON wm.clerk_user_id = tw.user_clerk_id
              AND wm.workspace_id  = tw.workspace_id
        WHERE  tw.task_id      = $1

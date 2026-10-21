@@ -6,6 +6,10 @@ const APP_SECRET       = process.env.NINJA_CORE_APP_SECRET ?? '';
 const APP_NAME         = 'plan-ninja';
 const REVALIDATE_AFTER  = 24 * 60 * 60 * 1000; // 24 h
 const FAILURE_BACKOFF   = 60 * 1000;           // 1 min
+// L24: how long a cached "active" verdict is still trusted while ninja-core can't be reached (or
+// credentials are missing). Past this, status fails closed with reason 'ninja_core_unreachable'
+// instead of staying active indefinitely.
+const UNREACHABLE_GRACE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // C4: Coalesce concurrent revalidation calls for the same workspace into one fetch
 const revalidationInFlight = new Map<string, Promise<NinjaCoreResult | null>>();
@@ -56,6 +60,16 @@ async function callNinjaCore(code: string): Promise<NinjaCoreResult | null> {
   } catch {
     return null;
   }
+}
+
+type DeniedReason = NonNullable<SubscriptionStatus['reason']>;
+const DENIED_REASONS: ReadonlySet<string> = new Set<DeniedReason>([
+  'no_code', 'expired', 'app_not_allowed', 'revoked', 'ninja_core_unreachable',
+]);
+
+/** L24: ninja-core's free-text reason narrowed to the status union (unknown -> fallback). */
+function toDeniedReason(reason: string | undefined, fallback: DeniedReason): DeniedReason {
+  return reason && DENIED_REASONS.has(reason) ? (reason as DeniedReason) : fallback;
 }
 
 function toIso(d: Date | string | null | undefined): string | null {
@@ -130,6 +144,11 @@ export async function getSubscriptionStatus(workspaceId: string): Promise<Subscr
       if (denied) {
         return { active: false, plan: row.plan, expiresAt: toIso(row.expires_at), adminOverride: false, reason: denied };
       }
+      // L24: the last verdict granted access, but don't keep trusting it forever.
+      const lastVerified = new Date(row.last_verified_at).getTime();
+      if (!Number.isFinite(lastVerified) || Date.now() - lastVerified > UNREACHABLE_GRACE) {
+        return { active: false, plan: row.plan, expiresAt: toIso(row.expires_at), adminOverride: false, reason: 'ninja_core_unreachable' };
+      }
       return { active: true, plan: row.plan, expiresAt: toIso(row.expires_at), adminOverride: false };
     }
     if (!result.valid) {
@@ -142,7 +161,7 @@ export async function getSubscriptionStatus(workspaceId: string): Promise<Subscr
          SET last_verified_at = NOW(), allowed_apps = '{}' WHERE workspace_id = $1 AND admin_override = FALSE`,
         [workspaceId],
       );
-      return { active: false, plan: row.plan, expiresAt: toIso(row.expires_at), adminOverride: false, reason: (result.reason as SubscriptionStatus['reason']) ?? (expired ? 'expired' : 'revoked') };
+      return { active: false, plan: row.plan, expiresAt: toIso(row.expires_at), adminOverride: false, reason: toDeniedReason(result.reason, expired ? 'expired' : 'revoked') };
     }
     const newExpiry = result.expiresAt ? new Date(result.expiresAt) : null;
     const apps = Array.isArray(result.apps) ? result.apps : [];
@@ -168,6 +187,10 @@ export async function getSubscriptionStatus(workspaceId: string): Promise<Subscr
 }
 
 export async function activateSubscription(workspaceId: string, code: string): Promise<SubscriptionStatus> {
+  // 'admin-override' is the placeholder stored on operator-granted override rows and is excluded
+  // from the code uniqueness index (migration 058) - never accept it as a user-submitted code.
+  if (code.trim().toLowerCase() === 'admin-override') throw new Error('invalid_code');
+
   const result = await callNinjaCore(code);
 
   if (result === null) throw new Error('ninja_core_unreachable');
@@ -188,7 +211,7 @@ export async function activateSubscription(workspaceId: string, code: string): P
   const expiresAt = result.expiresAt ? new Date(result.expiresAt) : null;
   const now = new Date();
 
-  // uq_ninja_stack_subscriptions_code (migration 057) closes the race between the check above
+  // The unique code index (migration 058) closes the race between the check above
   // and this insert; a concurrent activation of the same code elsewhere surfaces as 23505.
   await pool.query(
     `INSERT INTO ninja_stack_subscriptions

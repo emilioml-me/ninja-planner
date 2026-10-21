@@ -13,6 +13,7 @@ import { fireWebhooks } from './webhookService.js';
 import { dispatchAutomations } from './automationService.js';
 import { checkAndNotifyGoalMilestones } from './goalService.js';
 import { createNotification } from './notificationService.js';
+import { getPublicAppUrl } from '../config/origins.js';
 
 export type TaskStatusEffectSource = 'patch' | 'reorder' | 'automation' | 'ninjatask' | 'external' | 'csv' | 'bulk';
 
@@ -29,9 +30,9 @@ export interface TaskStatusEffectOptions {
    * in the same request), so a single request produces a single activity row.
    */
   activityPayload?: Record<string, unknown>;
+  /** IANA timezone of the acting user (decides "today" for the next recurring instance). */
+  tz?: string;
 }
-
-const workspaceUrl = () => process.env.ALLOWED_ORIGIN ?? 'https://ninja-planner.com';
 
 /**
  * Runs every side effect of a status transition. No-op (returns false) when the status did not
@@ -54,7 +55,7 @@ export async function runTaskStatusEffects(opts: TaskStatusEffectOptions): Promi
   const becameDone = newStatus === 'done';
 
   if (becameDone && task.recurrence_rule) {
-    spawnRecurringTask(task).catch((err) => {
+    spawnRecurringTask(task, opts.tz).catch((err) => {
       logger.warn({ err, taskId: task.id }, '[taskStatusEffects] spawnRecurringTask failed');
     });
   }
@@ -75,7 +76,7 @@ export async function runTaskStatusEffects(opts: TaskStatusEffectOptions): Promi
   }
 
   if (becameDone) {
-    checkAndNotifyGoalMilestones(task.id, workspaceId, workspaceUrl());
+    checkAndNotifyGoalMilestones(task.id, workspaceId, getPublicAppUrl());
   }
 
   // Watchers — skip the actor themselves.
@@ -91,7 +92,7 @@ export async function runTaskStatusEffects(opts: TaskStatusEffectOptions): Promi
         type: 'task_updated',
         title: becameDone ? `Task completed: "${task.title}"` : `Task updated: "${task.title}"`,
         body: `A task you're watching moved to ${newStatus.replace('_', ' ')}.`,
-        link: '/tasks',
+        link: `/tasks?task=${task.id}`,
       }).catch(() => {});
     }
   }).catch(() => {});
