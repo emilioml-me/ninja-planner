@@ -83,7 +83,7 @@ export default function GuestView({ token }: GuestViewProps) {
   }, [token, attempt]);
 
   // Guest links must never be indexed.
-  const seo = <SeoHead title={data ? `${data.label} (guest view)` : 'Guest view'} description="Shared project view." noIndex />;
+  const seo = <SeoHead title={data ? `${data.label} (guest view)` : 'Guest view'} description="Shared project view." noIndex lang="en" locale="en_US" />;
 
   if (loading) {
     return (

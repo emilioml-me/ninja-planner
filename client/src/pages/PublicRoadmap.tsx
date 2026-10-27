@@ -173,6 +173,8 @@ export default function PublicRoadmap({ token }: PublicRoadmapProps) {
       title={data ? `${data.workspace.name} roadmap` : 'Public roadmap'}
       description="A shared product roadmap."
       noIndex
+      lang="en"
+      locale="en_US"
     />
   );
 

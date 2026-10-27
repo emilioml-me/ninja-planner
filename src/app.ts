@@ -1,6 +1,7 @@
 // app.ts — Express app factory (separated from server startup for testability)
 import { fileURLToPath } from 'url';
 import { dirname, join }  from 'path';
+import { readFileSync }   from 'fs';
 import express            from 'express';
 import helmet             from 'helmet';
 import cors               from 'cors';
@@ -12,6 +13,7 @@ import { requireAuth } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { getAllowedOrigins } from './config/origins.js';
 import { getClientIp, ipBucket } from './lib/clientIp.js';
+import { renderSpaShell } from './lib/seoMeta.js';
 import { createNinjaTaskWebhookRouter } from './routes/ninjataskWebhook.js';
 import { createCrmWebhookRouter } from './routes/crmWebhook.js';
 import { pool } from './config/db.js';
@@ -177,7 +179,8 @@ export function createApp() {
   // don't consume the per-client API budget. index.html fallback stays at the end.
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), 'public');
   if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(publicDir));
+    // index: false so "/" also goes through renderSpaShell instead of getting the raw index.html
+    app.use(express.static(publicDir, { index: false }));
   }
 
   app.use(rateLimit({
@@ -288,7 +291,12 @@ export function createApp() {
   if (process.env.NODE_ENV === 'production') {
     // M8: Return JSON 404 for unmatched /api/* routes instead of serving index.html
     app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
-    app.get('*', (_req, res) => { res.sendFile(join(publicDir, 'index.html')); });
+    // index.html with the route's head tags; unknown paths get a real 404 (see lib/seoMeta.ts)
+    const template = readFileSync(join(publicDir, 'index.html'), 'utf-8');
+    app.get('*', (req, res) => {
+      const { status, html } = renderSpaShell(template, req.path);
+      res.status(status).type('html').send(html);
+    });
   }
 
   app.use(errorHandler);

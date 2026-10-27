@@ -18,8 +18,8 @@ import { cn, safeRedirectPath } from '@/lib/utils';
 import { SeoHead } from '@/components/SeoHead';
 import { buildSoftwareApp, buildFAQ } from '@/lib/structured-data';
 
-// Spanish on purpose: the public SEO copy (meta + FAQ structured data) targets MX search. Only
-// claim what the app actually does.
+// The landing page is Spanish (es-MX) because it targets MX search; the signed-in app is English.
+// Only claim what the app actually does: access needs a ninja-stack subscription (no free plan).
 const FAQ_ITEMS = [
   {
     question: '¿Qué es Ninja Planner y para quién está pensado?',
@@ -49,8 +49,7 @@ const STRUCTURED_DATA = [
     url: 'https://ninja-planner.com',
     description: 'Planificador de equipo y dashboard empresarial para pymes en México y LATAM.',
     applicationCategory: 'ProductivityApplication',
-    price: '0',
-    priceCurrency: 'MXN',
+    // No price: access is through a ninja-stack subscription, not a public free plan
   }),
   buildFAQ(FAQ_ITEMS),
 ];
@@ -58,36 +57,38 @@ const STRUCTURED_DATA = [
 const FEATURES = [
   {
     icon: CheckSquare,
-    title: 'Task Board',
-    description: 'Kanban board with drag-and-drop. To Do, In Progress, Done, Blocked — with priority, tags, assignees, and due dates.',
+    title: 'Tablero de tareas',
+    description: 'Tablero Kanban con arrastrar y soltar: pendiente, en progreso, terminado y bloqueado, con prioridad, etiquetas, responsables y fechas de entrega.',
   },
   {
     icon: TrendingUp,
-    title: 'Revenue Goals',
-    description: 'Set monthly, quarterly, or yearly targets. See actual vs goal at a glance so the team always knows where you stand.',
+    title: 'Metas de ingresos',
+    description: 'Define metas mensuales, trimestrales o anuales y compara lo real contra la meta de un vistazo, para que el equipo siempre sepa cómo va.',
   },
   {
     icon: Map,
-    title: 'Product Roadmap',
-    description: 'Move initiatives from Idea → Building → Live. Keep everyone aligned on what ships next and why.',
+    title: 'Roadmap de producto',
+    description: 'Lleva cada iniciativa de idea a desarrollo y a producción. Todo el equipo sabe qué sigue y por qué.',
   },
   {
     icon: ClipboardList,
-    title: 'Weekly Review',
-    description: 'A structured weekly ritual: wins, blockers, focus for next week, and a team health score to spot burnout early.',
+    title: 'Revisión semanal',
+    description: 'Un ritual semanal con estructura: logros, bloqueos, enfoque de la próxima semana y un indicador de salud del equipo para detectar el desgaste a tiempo.',
   },
   {
     icon: Users,
-    title: 'Business Dashboard',
-    description: 'Key numbers in one place — revenue against targets, goal progress, and team workload.',
+    title: 'Dashboard de negocio',
+    description: 'Los números clave en un solo lugar: ingresos contra metas, avance de objetivos y carga de trabajo del equipo.',
   },
 ];
 
 const STATS = [
-  { value: '1', label: 'workspace for your whole team' },
-  { value: '∞', label: 'tasks & milestones' },
-  { value: '0', label: 'spreadsheets needed' },
+  { value: '1', label: 'workspace para todo tu equipo' },
+  { value: '∞', label: 'tareas e hitos' },
+  { value: '0', label: 'hojas de cálculo' },
 ];
+
+const SUBSCRIPTION_NOTE = 'El acceso requiere una suscripción de ninja-stack.';
 
 export default function Landing() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -101,7 +102,7 @@ export default function Landing() {
     }
   });
   const target = redirectTo ?? '/dashboard';
-  // Which Clerk widget the auth overlay shows ("Get started free" goes to sign-up, not sign-in).
+  // Which Clerk widget the auth overlay shows ("Crear cuenta" goes to sign-up, not sign-in).
   // Opens straight to sign-in when the visitor arrived from a protected link.
   const [authMode, setAuthMode] = useState<'signIn' | 'signUp' | null>(redirectTo ? 'signIn' : null);
   const setSignInOpen = (open: boolean) => setAuthMode(open ? 'signIn' : null);
@@ -129,7 +130,7 @@ export default function Landing() {
     <div className="min-h-screen bg-background text-foreground flex flex-col">
       <SeoHead
         title="Planificador de Equipo y Dashboard Empresarial"
-        description="Gestiona tareas, proyectos y métricas de tu negocio en un solo lugar. Dashboard para equipos y pymes en México. Sin complicaciones."
+        description="Organiza las tareas, metas, roadmap y métricas de negocio de tu equipo en un solo lugar. Planificador para pymes en México y LATAM."
         canonical="https://ninja-planner.com/"
         structuredData={STRUCTURED_DATA}
       />
@@ -143,7 +144,7 @@ export default function Landing() {
             <span className="font-semibold text-sm tracking-tight">Ninja Planner</span>
           </div>
           <Button size="sm" onClick={() => setSignInOpen(true)}>
-            Sign in
+            Iniciar sesión
           </Button>
         </div>
       </header>
@@ -158,28 +159,29 @@ export default function Landing() {
         <div className="relative max-w-3xl mx-auto space-y-6">
           <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-4 py-1.5 text-xs font-medium text-primary">
             <Layers className="h-3 w-3" />
-            Team planner for small businesses
+            Planificador de equipo para pymes
           </div>
 
           <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight leading-tight">
-            Your team's command<br />
-            <span className="text-primary">center.</span>
+            El centro de mando<br />
+            <span className="text-primary">de tu equipo.</span>
           </h1>
 
           <p className="text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
-            Tasks, goals, roadmap, and weekly reviews in one workspace.
-            Plan the week, ship the work, measure what matters.
+            Tareas, metas, roadmap y revisiones semanales en un solo workspace.
+            Planea la semana, entrega el trabajo y mide lo que importa.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
             <Button size="lg" className="gap-2 px-8" onClick={openSignUp}>
-              Get started free
+              Crear cuenta
               <ArrowRight className="h-4 w-4" />
             </Button>
             <Button size="lg" variant="outline" onClick={() => setSignInOpen(true)}>
-              Sign in
+              Iniciar sesión
             </Button>
           </div>
+          <p className="text-xs text-muted-foreground">{SUBSCRIPTION_NOTE}</p>
         </div>
 
         {/* Stats */}
@@ -199,11 +201,11 @@ export default function Landing() {
           <div className="text-center mb-12">
             <div className="flex items-center justify-center gap-2 mb-3">
               <BarChart3 className="h-4 w-4 text-primary" />
-              <span className="text-xs font-semibold uppercase tracking-widest text-primary">Built for execution</span>
+              <span className="text-xs font-semibold uppercase tracking-widest text-primary">Hecho para ejecutar</span>
             </div>
-            <h2 className="text-2xl sm:text-3xl font-bold">Plan it. Ship it. Review it.</h2>
+            <h2 className="text-2xl sm:text-3xl font-bold">Planea. Entrega. Revisa.</h2>
             <p className="text-muted-foreground mt-3 max-w-lg mx-auto">
-              Everything your team needs to stay aligned — without the noise of tools built for enterprises.
+              Todo lo que tu equipo necesita para mantenerse alineado, sin la complejidad de las herramientas para grandes corporativos.
             </p>
           </div>
 
@@ -228,7 +230,7 @@ export default function Landing() {
       </section>
 
       {/* FAQ — rendered so the FAQPage structured data matches visible content */}
-      <section className="border-t px-6 py-20" lang="es">
+      <section className="border-t px-6 py-20">
         <div className="max-w-3xl mx-auto">
           <h2 className="text-2xl sm:text-3xl font-bold text-center mb-10">Preguntas frecuentes</h2>
           <div className="space-y-3">
@@ -248,14 +250,15 @@ export default function Landing() {
       {/* CTA banner */}
       <section className="border-t px-6 py-16">
         <div className="max-w-2xl mx-auto text-center space-y-5">
-          <h2 className="text-2xl sm:text-3xl font-bold">Stop context-switching. Start shipping.</h2>
+          <h2 className="text-2xl sm:text-3xl font-bold">Menos cambiar de herramienta. Más avanzar.</h2>
           <p className="text-muted-foreground">
-            Get your team's workspace up and running in minutes.
+            Ten el workspace de tu equipo listo en minutos.
           </p>
           <Button size="lg" className="gap-2 px-8" onClick={openSignUp}>
-            Get started free
+            Crear cuenta
             <ArrowRight className="h-4 w-4" />
           </Button>
+          <p className="text-xs text-muted-foreground">{SUBSCRIPTION_NOTE}</p>
         </div>
       </section>
 
@@ -268,7 +271,7 @@ export default function Landing() {
             </div>
             <span className="font-medium text-foreground">Ninja Planner</span>
           </div>
-          <span>© {new Date().getFullYear()} Ninja Planner. All rights reserved.</span>
+          <span>© {new Date().getFullYear()} Ninja Planner. Todos los derechos reservados.</span>
         </div>
       </footer>
 
@@ -282,14 +285,14 @@ export default function Landing() {
             ref={overlayRef}
             role="dialog"
             aria-modal="true"
-            aria-label={authMode === 'signUp' ? 'Create your account' : 'Sign in'}
+            aria-label={authMode === 'signUp' ? 'Crear cuenta' : 'Iniciar sesión'}
             tabIndex={-1}
             className="relative outline-none"
             onClick={(e) => e.stopPropagation()}
           >
             <button
               type="button"
-              aria-label="Close"
+              aria-label="Cerrar"
               onClick={() => setSignInOpen(false)}
               className="absolute -top-3 -right-3 z-10 rounded-full bg-background border shadow-sm h-7 w-7 flex items-center justify-center hover:bg-accent transition-colors"
             >

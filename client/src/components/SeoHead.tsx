@@ -12,11 +12,9 @@ interface SeoHeadProps {
   title: string;
   /** Meta description — 150-160 chars, keyword-rich (left unchanged when omitted) */
   description?: string;
-  /** Comma-separated keywords (optional, low SEO value but harmless) */
-  keywords?: string;
   /** Canonical URL for this page — always use absolute URL */
   canonical?: string;
-  /** Absolute URL to OG image (1200x630px, hosted on R2) */
+  /** Absolute URL to OG image (1200x630px) */
   ogImage?: string;
   /** og:type — default "website" */
   ogType?: "website" | "article" | "product";
@@ -26,6 +24,8 @@ interface SeoHeadProps {
   noindex?: boolean;
   /** og:locale of the title/description copy (default "es_MX": the public SEO copy targets MX search) */
   locale?: string;
+  /** Document language while this page is mounted (default "es"; the signed-in app is "en") */
+  lang?: string;
   /** JSON-LD structured data object — pass output from structured-data.ts helpers */
   structuredData?: object | object[];
 }
@@ -33,7 +33,8 @@ interface SeoHeadProps {
 // ─── CONFIGURE THESE PER APP ─────────────────────────────────────────────────
 const APP_NAME = "Ninja Planner";
 const APP_URL = "https://ninja-planner.com";
-const DEFAULT_OG_IMAGE = "https://r2.ninja-stack.com/plan-ninja/og-image.png";
+// Self-hosted (client/public/og-image.png): the old r2.ninja-stack.com host doesn't resolve
+const DEFAULT_OG_IMAGE = `${APP_URL}/og-image.png`;
 const TWITTER_HANDLE = "@ninjastackHQ";
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -63,36 +64,33 @@ function setLink(rel: string, href: string) {
 export function SeoHead({
   title,
   description,
-  keywords,
   canonical,
   ogImage = DEFAULT_OG_IMAGE,
   ogType = "website",
   noIndex: noIndexProp = false,
   noindex = false,
   locale = "es_MX",
+  lang = "es",
   structuredData,
 }: SeoHeadProps) {
   const fullTitle = `${title} | ${APP_NAME}`;
   const canonicalUrl = canonical ?? APP_URL;
   const noIndex = noIndexProp || noindex;
 
+  // Public pages are Spanish; restore the app's English when the page unmounts (e.g. after sign-in)
   useEffect(() => {
-    // ── Core ── (the document language stays the UI's, set in index.html)
+    document.documentElement.lang = lang;
+    return () => {
+      document.documentElement.lang = "en";
+    };
+  }, [lang]);
+
+  useEffect(() => {
+    // ── Core ── (same tags the server writes per route in src/lib/seoMeta.ts)
     document.title = fullTitle;
     if (description) setMeta('meta[name="description"]', description);
     setLink("canonical", canonicalUrl);
-
-    if (keywords) {
-      setMeta('meta[name="keywords"]', keywords);
-    }
-
-    const robotsSelector = 'meta[name="robots"]';
-    if (noIndex) {
-      setMeta(robotsSelector, "noindex, nofollow");
-    } else {
-      const el = document.querySelector<HTMLMetaElement>(robotsSelector);
-      if (el) el.remove();
-    }
+    setMeta('meta[name="robots"]', noIndex ? "noindex, nofollow" : "index, follow");
 
     // ── Open Graph ──
     setMeta('meta[property="og:site_name"]', APP_NAME);
@@ -108,6 +106,7 @@ export function SeoHead({
     // ── Twitter Card ──
     setMeta('meta[name="twitter:card"]', "summary_large_image");
     setMeta('meta[name="twitter:site"]', TWITTER_HANDLE);
+    setMeta('meta[name="twitter:url"]', canonicalUrl);
     setMeta('meta[name="twitter:title"]', fullTitle);
     if (description) setMeta('meta[name="twitter:description"]', description);
     setMeta('meta[name="twitter:image"]', ogImage);
@@ -130,7 +129,7 @@ export function SeoHead({
         document.head.appendChild(script);
       });
     }
-  }, [fullTitle, description, keywords, canonicalUrl, ogImage, ogType, noIndex, locale, structuredData]);
+  }, [fullTitle, description, canonicalUrl, ogImage, ogType, noIndex, locale, structuredData]);
 
   return null;
 }

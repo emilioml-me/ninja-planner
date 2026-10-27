@@ -22,7 +22,7 @@ interface SoftwareAppOptions {
     | "UtilitiesApplication";
   operatingSystem?: string;
   priceCurrency?: string;
-  price?: string;      // "0" for free tier
+  price?: string;      // omit when there's no public price: no Offer is emitted
   ratingValue?: number;
   ratingCount?: number;
   screenshot?: string; // absolute URL
@@ -47,11 +47,15 @@ export function buildSoftwareApp(opts: SoftwareAppOptions) {
     description: opts.description,
     applicationCategory: opts.applicationCategory ?? "BusinessApplication",
     operatingSystem: opts.operatingSystem ?? "Web",
-    offers: {
-      "@type": "Offer",
-      price: opts.price ?? "0",
-      priceCurrency: opts.priceCurrency ?? "MXN",
-    },
+    ...(opts.price !== undefined
+      ? {
+          offers: {
+            "@type": "Offer",
+            price: opts.price,
+            priceCurrency: opts.priceCurrency ?? "MXN",
+          },
+        }
+      : {}),
     ...(opts.ratingValue && opts.ratingCount
       ? {
           aggregateRating: {
