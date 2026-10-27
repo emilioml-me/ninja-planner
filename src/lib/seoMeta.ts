@@ -19,6 +19,36 @@ const SUFFIX = ' | Ninja Planner';
 export const HOME_DESCRIPTION =
   'Organiza las tareas, metas, roadmap y métricas de negocio de tu equipo en un solo lugar. Planificador para pymes en México y LATAM.';
 
+// Public es-MX feature pages: title/description must match FEATURE_PAGES in
+// client/src/pages/FeaturePage.tsx (SeoHead rewrites the same tags after React mounts).
+const FEATURE_PAGES: Record<string, { title: string; description: string }> = {
+  '/gestion-de-tareas-para-equipos': {
+    title: 'Gestión de Tareas para Equipos con Tablero Kanban',
+    description:
+      'Organiza las tareas de tu equipo en un tablero Kanban con responsables, prioridades, fechas, checklists, dependencias y tareas recurrentes. Para pymes en México y LATAM.',
+  },
+  '/planificacion-de-sprints': {
+    title: 'Planificación de Sprints con Burndown y Velocidad del Equipo',
+    description:
+      'Planea sprints, sigue el burndown, mide la velocidad del equipo y cierra cada ciclo con una retrospectiva. Sprints y épicas para equipos de pymes.',
+  },
+  '/okr-para-pymes': {
+    title: 'OKR para Pymes: Objetivos y Resultados Clave con tu Equipo',
+    description:
+      'Define objetivos y resultados clave, liga las tareas y las iniciativas del roadmap y ve el avance real del equipo. OKR sencillos para pymes en México y LATAM.',
+  },
+  '/roadmap-de-producto': {
+    title: 'Roadmap de Producto Compartido con Votos de tus Clientes',
+    description:
+      'Organiza las iniciativas de idea a desarrollo y a producción, liga las tareas y comparte un roadmap público donde tus clientes pueden votar. Para equipos de producto.',
+  },
+  '/control-de-horas': {
+    title: 'Control de Horas por Proyecto y Presupuestos para Equipos',
+    description:
+      'Registra el tiempo de cada tarea, marca las horas facturables con su tarifa y compara el presupuesto contra lo real. Reporte de horas por persona y periodo.',
+  },
+};
+
 // Public, indexable pages (keep in sync with client/public/sitemap.xml)
 const PAGES: Record<string, PageMeta> = {
   '/': {
@@ -26,6 +56,12 @@ const PAGES: Record<string, PageMeta> = {
     description: HOME_DESCRIPTION,
     lang: 'es',
   },
+  ...Object.fromEntries(
+    Object.entries(FEATURE_PAGES).map(([path, { title, description }]) => [
+      path,
+      { title: `${title}${SUFFIX}`, description, lang: 'es' as const },
+    ]),
+  ),
 };
 
 // The signed-in app (client/src/App.tsx). Never indexed.

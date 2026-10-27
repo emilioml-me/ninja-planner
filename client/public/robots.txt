@@ -10,7 +10,8 @@ Disallow: /task-templates
 Disallow: /calendar
 Disallow: /analytics
 Disallow: /revenue
-Disallow: /roadmap
+# $ = exact match, so the public /roadmap-de-producto page stays crawlable
+Disallow: /roadmap$
 Disallow: /reviews
 Disallow: /workload
 Disallow: /goals

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth, SignIn, SignUp } from '@clerk/clerk-react';
-import { Redirect } from 'wouter';
+import { Link, Redirect } from 'wouter';
 import {
   CheckSquare,
   TrendingUp,
@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { cn, safeRedirectPath } from '@/lib/utils';
 import { SeoHead } from '@/components/SeoHead';
 import { buildSoftwareApp, buildFAQ } from '@/lib/structured-data';
+import { FEATURE_PAGES } from './FeaturePage';
 
 // The landing page is Spanish (es-MX) because it targets MX search; the signed-in app is English.
 // Only claim what the app actually does: access needs a ninja-stack subscription (no free plan).
@@ -103,8 +104,19 @@ export default function Landing() {
   });
   const target = redirectTo ?? '/dashboard';
   // Which Clerk widget the auth overlay shows ("Crear cuenta" goes to sign-up, not sign-in).
-  // Opens straight to sign-in when the visitor arrived from a protected link.
-  const [authMode, setAuthMode] = useState<'signIn' | 'signUp' | null>(redirectTo ? 'signIn' : null);
+  // Opens straight to sign-in when the visitor arrived from a protected link, and to the widget
+  // the feature pages ask for with ?acceso=registro / ?acceso=iniciar.
+  const [authMode, setAuthMode] = useState<'signIn' | 'signUp' | null>(() => {
+    if (redirectTo) return 'signIn';
+    try {
+      const acceso = new URLSearchParams(window.location.search).get('acceso');
+      if (acceso === 'registro') return 'signUp';
+      if (acceso === 'iniciar') return 'signIn';
+    } catch {
+      /* no URL params */
+    }
+    return null;
+  });
   const setSignInOpen = (open: boolean) => setAuthMode(open ? 'signIn' : null);
   const openSignUp = () => setAuthMode('signUp');
 
@@ -226,6 +238,26 @@ export default function Landing() {
               </div>
             ))}
           </div>
+        </div>
+      </section>
+
+      {/* Feature pages (internal links for crawlers and visitors) */}
+      <section className="border-t px-6 py-16">
+        <div className="max-w-5xl mx-auto">
+          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-8">Conoce cada función</h2>
+          <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {FEATURE_PAGES.map((p) => (
+              <li key={p.slug}>
+                <Link
+                  href={`/${p.slug}`}
+                  className="flex items-center justify-between gap-2 rounded-lg border bg-card px-4 py-3 text-sm font-medium hover:border-primary/40 transition-colors"
+                >
+                  {p.name}
+                  <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                </Link>
+              </li>
+            ))}
+          </ul>
         </div>
       </section>
 

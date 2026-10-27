@@ -39,6 +39,7 @@ import Clients from './pages/Clients';
 import NotificationPreferences from './pages/NotificationPreferences';
 import EpicTemplates from './pages/EpicTemplates';
 import TaskTemplates from './pages/TaskTemplates';
+import FeaturePage, { FEATURE_PAGES } from './pages/FeaturePage';
 
 function AuthenticatedApp() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -113,6 +114,12 @@ export default function App() {
       <ErrorBoundary resetKey={location} fullScreen>
         <Switch>
           <Route path="/" component={Landing} />
+          {/* Public es-MX feature pages (SEO); slugs must match src/lib/seoMeta.ts + sitemap.xml */}
+          {FEATURE_PAGES.map(({ slug }) => (
+            <Route key={slug} path={`/${slug}`}>
+              <FeaturePage slug={slug} />
+            </Route>
+          ))}
           {/* Public share pages — no auth required */}
           <Route path="/r/:token">
             {(params) => <PublicRoadmap token={params.token} />}
